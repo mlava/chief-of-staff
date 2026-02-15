@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS files
+.DS_Store
+
+# Local editor/agent state
+.claude/
+.vscode/
+.idea/
+
+# Env files
+.env
+.env.*
+extension.js
+/docs

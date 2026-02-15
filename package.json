@@ -1,0 +1,25 @@
+{
+  "name": "chief-of-staff",
+  "version": "1.0.0",
+  "description": "Your personal Chief of Staff within Roam Research",
+  "license": "ISC",
+  "author": "Mark Lavercombe",
+  "main": "index.js",
+  "scripts": {
+    "build": "webpack"
+  },
+  "devDependencies": {
+    "webpack": "^5.105.1",
+    "webpack-cli": "^6.0.1",
+    "browserify-zlib": "^0.2.0",
+    "buffer": "^6.0.3",
+    "https-browserify": "^1.0.0",
+    "stream-browserify": "^3.0.0",
+    "stream-http": "^3.2.0",
+    "url": "^0.11.4"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "izitoast": "^1.4.0"
+  }
+}
