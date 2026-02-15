@@ -51,10 +51,10 @@ export function createOnboardingCard({ onSkip, onDoLater, title = "Chief of Staf
     if (!dragState) return;
     const dx = e.clientX - dragState.startX;
     const dy = e.clientY - dragState.startY;
+    // Switch from centred to absolute positioning on first drag
+    card.style.transform = "none";
     card.style.left = `${dragState.origLeft + dx}px`;
     card.style.top = `${dragState.origTop + dy}px`;
-    card.style.right = "auto";
-    card.style.bottom = "auto";
   };
   const onMouseUp = () => { dragState = null; };
   header.addEventListener("mousedown", onMouseDown);

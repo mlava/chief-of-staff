@@ -1125,8 +1125,7 @@ function ensureChatPanel() {
   closeButton.textContent = "×";
   closeButton.classList.add("chief-panel-btn", "chief-panel-btn--close");
   closeButton.onclick = () => {
-    container.style.display = "none";
-    chatPanelIsOpen = false;
+    setChatPanelOpen(false);
   };
   headerButtons.appendChild(closeButton);
 
@@ -4856,6 +4855,152 @@ function getRoamNativeTools() {
         await api.ui.rightSidebar.removeWindow({ window: windowDef });
         return { success: true, type, removed: block_uid || search_query };
       }
+    },
+
+    // ---- Plain TODO management tools ----
+
+    {
+      name: "roam_search_todos",
+      description: "Search for TODO/DONE items in the Roam graph. Returns blocks containing {{[[TODO]]}} or {{[[DONE]]}} markers with page context. Use this for plain Roam checkboxes — not Better Tasks.",
+      input_schema: {
+        type: "object",
+        properties: {
+          status: { type: "string", enum: ["TODO", "DONE", "ANY"], description: "Filter by status: TODO (open), DONE (completed), or ANY (both). Default TODO." },
+          query: { type: "string", description: "Optional text to filter results. Case-insensitive substring match on block text." },
+          page_title: { type: "string", description: "Limit search to tasks on a specific page (by exact title). Optional — searches all pages if omitted." },
+          max_results: { type: "number", description: "Maximum results to return. Default 50." }
+        }
+      },
+      execute: async ({ status = "TODO", query, page_title, max_results = 50 } = {}) => {
+        const limit = Number.isFinite(max_results) ? Math.max(1, Math.min(500, max_results)) : 50;
+        const hardCap = Math.max(200, limit);
+        const statusFilter = String(status || "TODO").toUpperCase();
+
+        let markerClause;
+        if (statusFilter === "DONE") {
+          markerClause = '[(clojure.string/includes? ?str "{{[[DONE]]}}")]';
+        } else if (statusFilter === "ANY") {
+          markerClause = '(or [(clojure.string/includes? ?str "{{[[TODO]]}}")] [(clojure.string/includes? ?str "{{[[DONE]]}}")])';
+        } else {
+          markerClause = '[(clojure.string/includes? ?str "{{[[TODO]]}}")]';
+        }
+
+        let pageClause = "";
+        if (page_title) {
+          const escapedTitle = escapeForDatalog(String(page_title).trim());
+          pageClause = `[?page :node/title "${escapedTitle}"]`;
+        }
+
+        let textFilter = "";
+        const queryText = String(query || "").trim().toLowerCase();
+        if (queryText) {
+          textFilter = `[(clojure.string/includes? (clojure.string/lower-case ?str) "${escapeForDatalog(queryText)}")]`;
+        }
+
+        const datalogQuery = `[:find ?uid ?str ?page-title
+          :where
+          [?b :block/string ?str]
+          [?b :block/uid ?uid]
+          [?b :block/page ?page]
+          [?page :node/title ?page-title]
+          ${markerClause}
+          ${pageClause}
+          ${textFilter}`;
+
+        let results;
+        try {
+          results = await queryRoamDatalog(`${datalogQuery}\n          :limit ${hardCap}]`);
+        } catch (error) {
+          console.warn("[Chief of Staff] Roam :limit unsupported; running unbounded roam_search_todos scan.");
+          results = await queryRoamDatalog(`${datalogQuery}]`);
+        }
+
+        return (Array.isArray(results) ? results : [])
+          .slice(0, limit)
+          .map(([uid, text, page]) => ({ uid, text, page }));
+      }
+    },
+    {
+      name: "roam_create_todo",
+      description: "Create a new TODO item as a block in Roam. The block text will be prefixed with {{[[TODO]]}}. By default places on today's daily page.",
+      input_schema: {
+        type: "object",
+        properties: {
+          text: { type: "string", description: "The TODO item text (without the {{[[TODO]]}} prefix — it will be added automatically)." },
+          parent_uid: { type: "string", description: "Parent block or page UID to place the TODO under. If omitted, uses today's daily page." },
+          order: { type: "string", description: "\"first\" or \"last\". Default \"last\"." }
+        },
+        required: ["text"]
+      },
+      execute: async ({ text, parent_uid, order = "last" } = {}) => {
+        const todoText = String(text || "").trim();
+        if (!todoText) throw new Error("text is required");
+
+        let targetUid = String(parent_uid || "").trim();
+        if (!targetUid) {
+          targetUid = await ensureDailyPageUid();
+        }
+
+        const blockText = `{{[[TODO]]}} ${todoText}`;
+        const uid = await createRoamBlock(targetUid, blockText, order);
+        return { success: true, uid, parent_uid: targetUid, text: blockText };
+      }
+    },
+    {
+      name: "roam_modify_todo",
+      description: "Modify an existing TODO/DONE item. Can toggle status between TODO and DONE, update the text, or both. Always re-search with roam_search_todos to get the current UID before modifying.",
+      input_schema: {
+        type: "object",
+        properties: {
+          uid: { type: "string", description: "Block UID of the TODO/DONE item to modify." },
+          status: { type: "string", enum: ["TODO", "DONE"], description: "New status. Toggles the {{[[TODO]]}}/{{[[DONE]]}} marker." },
+          text: { type: "string", description: "New text content (without the status marker — it will be managed automatically). If omitted, only status is changed." }
+        },
+        required: ["uid"]
+      },
+      execute: async ({ uid, status, text } = {}) => {
+        const blockUid = String(uid || "").trim();
+        if (!blockUid) throw new Error("uid is required");
+
+        const currentText = await queryRoamDatalog(
+          `[:find ?str . :where [?b :block/uid "${escapeForDatalog(blockUid)}"] [?b :block/string ?str]]`
+        );
+        if (currentText == null) throw new Error(`Block not found: ${blockUid}`);
+        const blockStr = String(currentText);
+
+        const todoMarker = "{{[[TODO]]}}";
+        const doneMarker = "{{[[DONE]]}}";
+        let currentStatus = null;
+        let stripped = blockStr;
+        if (blockStr.includes(todoMarker)) {
+          currentStatus = "TODO";
+          stripped = blockStr.replace(todoMarker, "").trim();
+        } else if (blockStr.includes(doneMarker)) {
+          currentStatus = "DONE";
+          stripped = blockStr.replace(doneMarker, "").trim();
+        }
+
+        const newStatus = status ? String(status).toUpperCase() : currentStatus;
+        if (newStatus !== "TODO" && newStatus !== "DONE") {
+          throw new Error("Block does not contain a TODO/DONE marker and no status was provided");
+        }
+
+        const newContent = (text != null) ? String(text).trim() : stripped;
+        const newMarker = newStatus === "DONE" ? doneMarker : todoMarker;
+        const newBlockStr = `${newMarker} ${newContent}`;
+
+        const api = requireRoamUpdateBlockApi(getRoamAlphaApi());
+        await withRoamWriteRetry(() =>
+          api.updateBlock({ block: { uid: blockUid, string: truncateRoamBlockText(newBlockStr) } })
+        );
+        return {
+          success: true,
+          uid: blockUid,
+          previous_status: currentStatus,
+          new_status: newStatus,
+          text: newBlockStr.slice(0, 200)
+        };
+      }
     }
   ];
   return roamNativeToolsCache;
@@ -5633,18 +5778,30 @@ function detectPromptSections(userMessage) {
   return sections;
 }
 
-function buildBetterTasksPromptSection() {
-  if (!hasBetterTasksAPI()) return "";
-  const tools = getBetterTasksTools();
-  if (!tools.length) return "";
-  const toolList = tools.map(t => `  - ${t.name}: ${t.description}`).join("\n");
-  return `## Better Tasks (via Extension Tools API)
+function buildTaskToolsPromptSection() {
+  if (hasBetterTasksAPI()) {
+    const tools = getBetterTasksTools();
+    if (tools.length) {
+      const toolList = tools.map(t => `  - ${t.name}: ${t.description}`).join("\n");
+      return `## Better Tasks (via Extension Tools API)
 
 Available tools:
 ${toolList}
 
 CRITICAL: When modifying a task, ALWAYS use the exact uid from the most recent search result. Never reuse UIDs from earlier turns — always re-search first.
 Use roam_bt_get_attributes to discover available attribute names if needed.`;
+    }
+  }
+
+  return `## Roam TODO Management
+
+For task/TODO management, use these tools that work with Roam's native {{[[TODO]]}} / {{[[DONE]]}} checkbox syntax:
+  - roam_search_todos: Search for TODO/DONE items by status and optional text filter
+  - roam_create_todo: Create a new TODO item (defaults to today's daily page if no parent_uid given)
+  - roam_modify_todo: Toggle a TODO between TODO/DONE status, or update its text (requires block UID)
+
+CRITICAL: When modifying a TODO, ALWAYS use the exact uid from the most recent roam_search_todos result. Never reuse UIDs from earlier turns — always re-search first.
+The text content should NOT include the {{[[TODO]]}}/{{[[DONE]]}} marker — it is handled automatically.`;
 }
 
 async function buildDefaultSystemPrompt(userMessage) {
@@ -5694,7 +5851,7 @@ No skills page found yet. Create [[Chief of Staff/Skills]] with one top-level bl
     ? buildToolkitSchemaPromptSection(sections)
     : "";
 
-  const btSchema = sections.has("bt_schema") ? buildBetterTasksPromptSection() : "";
+  const btSchema = sections.has("bt_schema") ? buildTaskToolsPromptSection() : "";
 
   const cronSection = sections.has("cron") ? buildCronJobsPromptSection() : "";
 
@@ -5702,7 +5859,7 @@ No skills page found yet. Create [[Chief of Staff/Skills]] with one top-level bl
 You are a productivity orchestrator with these capabilities:
 - **Extension Tools**: You automatically discover and can call tools from 14+ Roam extensions (workspaces, focus mode, deep research, export, etc.)
 - **Composio**: External service integration (Gmail, Calendar, Todoist, Slack, GitHub, etc.)
-- **Better Tasks**: Full task management — search, create, modify tasks with attributes, projects, due dates
+- **Task Management**: Native TODO/DONE checkboxes (always available) + Better Tasks for rich attributes, projects, due dates (when installed)
 - **Cron Jobs**: You can schedule recurring actions (briefings, sweeps, reminders) — use cos_cron_create even if no jobs exist yet
 - **Skills**: Reusable instruction sets stored in Roam that you can execute and iteratively improve
 - **Memory**: Persistent context across sessions stored in Roam pages
@@ -5741,9 +5898,9 @@ Summarise results clearly for the user.
 
 Today is ${formatRoamDate(new Date())}.
 ${pageCtx ? (pageCtx.type === "page"
-    ? `The user is currently viewing the page [[${pageCtx.title}]] (uid: ${pageCtx.uid}). When they say "this page" or "the current page", use this uid.`
-    : `The user is currently viewing a block (uid: ${pageCtx.uid}). When they say "this page" or "this block", use this uid.`)
-  : ""}
+      ? `The user is currently viewing the page [[${pageCtx.title}]] (uid: ${pageCtx.uid}). When they say "this page" or "the current page", use this uid.`
+      : `The user is currently viewing a block (uid: ${pageCtx.uid}). When they say "this page" or "this block", use this uid.`)
+      : ""}
 
 For Memory:
 - Your memory is loaded below from Roam pages and persists across sessions.
@@ -6859,7 +7016,9 @@ function isPotentiallyMutatingTool(toolName, args) {
     "ROAM_CREATE_BLOCK",
     "ROAM_CREATE_BLOCKS",
     "ROAM_BT_CREATE_TASK",
-    "ROAM_BT_CREATE_TASK_FROM_BLOCK"
+    "ROAM_BT_CREATE_TASK_FROM_BLOCK",
+    "ROAM_CREATE_TODO",
+    "ROAM_MODIFY_TODO"
   ]);
   if (roamLowRiskCreationTools.has(name)) {
     return false;
@@ -6867,7 +7026,7 @@ function isPotentiallyMutatingTool(toolName, args) {
 
   // Force approval for destructive Roam operations
   if (name === "ROAM_DELETE_BLOCK" || name === "ROAM_UPDATE_BLOCK" || name === "ROAM_LINK_MENTION" || name === "ROAM_MOVE_BLOCK" ||
-      name === "ROAM_BT_MODIFY_TASK" || name === "ROAM_BT_BULK_MODIFY" || name === "ROAM_BT_BULK_SNOOZE") {
+    name === "ROAM_BT_MODIFY_TASK" || name === "ROAM_BT_BULK_MODIFY" || name === "ROAM_BT_BULK_SNOOZE") {
     return true;
   }
 
@@ -8795,28 +8954,195 @@ async function bootstrapSkillsPage() {
   const pageUid = await ensurePageUidByTitle(title);
   const starterSkills = [
     {
-      name: "Weekly Planning",
+      name: "Brain Dump",
       steps: [
-        "Trigger: user asks planning/prioritisation for the week",
-        "Approach: list outcomes, sequence actions, identify blockers, assign next actions",
-        "Output format: concise bullets with priorities and due dates"
+        "Trigger: user provides messy, unstructured input (brain dump, meeting notes, voice memo transcript, random thoughts) and wants it organised and actioned.",
+        "If you don't have enough information to generate useful outputs, ask questions until you do.",
+        "Phase 1 — Organise: extract core ideas (3–5 main concepts), group key points by topic, identify undeveloped threads, surface questions and gaps. Preserve the user's original voice and wording. Mark interpretations with [INFERRED]. Flag contradictions with [TENSION: X vs Y].",
+        "Phase 2 — Extract & Route: for each task found, capture: task description (verb-first), owner (me / someone else / unclear), effort estimate (15 min / 1 hour / half day / multiple days), urgency (today / this week / soon / whenever), dependencies.",
+        "Routing: my tasks → create via bt_create (or roam_create_todo if BT unavailable) with project/due/effort attributes where known. Others' tasks → bt_create with assignee (or roam_create_todo with \"Delegated to [person]:\" prefix). Ideas/parking lot → [[Chief of Staff/Inbox]] via roam_create_block. Decisions → [[Chief of Staff/Decisions]] via roam_create_block. If input looks like a project, suggest creating a project page.",
+        "End with a summary of what was routed where and how many items were created.",
+        "Tool availability: works best with Better Tasks for rich task creation. If BT unavailable, use roam_create_todo / roam_search_todos. Never fabricate data from unavailable tools.",
+        "Rules: don't invent tasks not implied by input. Don't list already-done items as tasks. Distinguish 'I need to do X' from 'someone needs to do X' from 'X should happen but no one owns it'. Every output point must trace to original content."
+      ]
+    },
+    {
+      name: "Context Prep",
+      steps: [
+        "Trigger: user is about to talk to someone, work on a project, or make a decision and wants a quick briefing on everything relevant. Phrases like 'brief me on [X]', 'what do I need to know about [person/project/topic]', 'prep me for [thing]'.",
+        "If the entity is ambiguous (e.g. a name that could be a person or project), ask one clarifying question.",
+        "Sources — cast a wide net: bt_search (query: [ENTITY]) for related tasks. bt_get_projects if entity is a project. bt_search (assignee: [PERSON]) if entity is a person. cos_calendar_read for meetings involving entity. roam_search_text or roam_get_backlinks for [[ENTITY]] in the graph. [[Chief of Staff/Decisions]] and [[Chief of Staff/Memory]] for stored context.",
+        "Output — deliver in chat panel (do not write to DNP unless asked): Summary (one paragraph: who/what, current status, why it matters now). Recent History (last 2–4 interactions with dates). Open Items (tasks, waiting-for, unresolved questions). Upcoming (meetings, deadlines, next steps). Key Context (from memory, decisions, notes). Suggested Talking Points or Focus Areas.",
+        "Fallback: if any tool call fails, include section header with '⚠️ Could not retrieve [source] — [error reason]' rather than skipping silently.",
+        "Tool availability: works best with Better Tasks + Google Calendar. If BT unavailable, use roam_search_todos for task context. If calendar unavailable, skip that section and note it. Never fabricate data from unavailable tools.",
+        "Rules: keep it concise — prep brief, not a report. Distinguish facts from inferences (mark with [INFERRED]). If very little data exists, say so explicitly. Include source links for key claims."
+      ]
+    },
+    {
+      name: "Daily Briefing",
+      steps: [
+        "Trigger: user asks for a daily briefing or morning summary.",
+        "Approach: gather calendar events via cos_calendar_read, email signals via cos_email_fetch, urgent tasks via bt_search (due: today, status: TODO/DOING), overdue tasks via bt_search (due: overdue), project health via bt_get_projects (status: active, include_tasks: true), and weather via wc_get_forecast.",
+        "Output: produce a structured briefing with sections: 'Calendar', 'Email', 'Tasks', 'Projects', 'Weather', and 'Top Priorities'. Write to today's daily page automatically. Update chat panel to confirm it has been written.",
+        "Fallback: if any tool call fails, include section header with '⚠️ Could not retrieve [source] — [error reason]' rather than skipping silently.",
+        "Tool availability: works best with Better Tasks + Google Calendar + Gmail. If BT unavailable, use roam_search_todos (status: TODO) for task context. If calendar/email unavailable, skip those sections and note what's missing. Never fabricate data from unavailable tools.",
+        "Keep each section concise and actionable. Prefer tool calls over guessing."
+      ]
+    },
+    {
+      name: "Daily Page Triage",
+      steps: [
+        "Trigger: user asks to triage today's daily page, 'clean up today's page', 'process today's blocks', 'triage my DNP'. Can also be triggered as part of End-of-Day Reconciliation.",
+        "This is a mechanical routing skill, not a reflective one. Goal: classify every loose block on today's daily page and move or file it.",
+        "Sources: roam_get_block_children on today's daily page. bt_get_attributes for valid attribute names. bt_get_projects (status: active) for project assignment suggestions.",
+        "Process: read all blocks on today's page. Skip blocks under structured COS headings (Daily Briefing, Weekly Plan, etc.). For each loose block, classify as: Task → bt_create (or roam_create_todo). Waiting-for → bt_create with assignee (or roam_create_todo with prefix). Decision → [[Chief of Staff/Decisions]]. Reference/note → leave in place or suggest destination. Inbox → [[Chief of Staff/Inbox]]. Junk/duplicate → flag for deletion (never delete without confirmation).",
+        "Output: present triage summary in chat — one line per block: '[text snippet] → [category] → [destination]'. Ask for confirmation before executing. End with count: 'Triaged [N] blocks: [X] tasks, [Y] inbox, [Z] decisions, [W] left in place.'",
+        "Tool availability: works best with Better Tasks for rich task creation. If BT unavailable, use roam_create_todo for tasks. Never fabricate data from unavailable tools.",
+        "Rules: never delete without confirmation. Never modify blocks under structured headings. Default ambiguous blocks to Inbox. Preserve original text when creating tasks. Always present plan before executing — confirmation-first."
       ]
     },
     {
       name: "Decision Review",
       steps: [
-        "Trigger: user asks for recommendation between options",
-        "Approach: compare options, tradeoffs, risks, and reversibility",
-        "Output format: recommendation + rationale + next action"
+        "Trigger: user asks for recommendation between options.",
+        "Approach: before recommending, ask clarifying questions about constraints, timeline, reversibility, and what 'good enough' looks like. Then compare options on tradeoffs, risks, and reversibility.",
+        "Output format: recommendation + rationale + next action.",
+        "Routing: log the decision to [[Chief of Staff/Decisions]] via roam_create_block if the user confirms a choice. Create follow-up task via bt_create (or roam_create_todo if BT unavailable) if the decision implies an action.",
+        "Tool availability: this skill is primarily Roam-native. Better Tasks enhances it with task creation for follow-ups. If BT unavailable, use roam_create_todo. Never fabricate data from unavailable tools."
       ]
     },
     {
-      name: "Structured Daily Briefing",
+      name: "Delegation",
       steps: [
-        "Trigger: user asks for a daily briefing or morning summary",
-        "Approach: gather calendar events via cos_calendar_read, email signals via cos_email_fetch, and urgent tasks via bt_search",
-        "Output: produce a structured briefing with sections: \"Calendar\", \"Email\", \"Tasks\", and \"Top Priorities\". The system will write this to today's daily page automatically.",
-        "Keep each section concise and actionable. Prefer tool calls over guessing."
+        "Trigger: user wants to hand off a task. Phrases like 'delegate [X] to [person]', 'hand this off', 'assign this to [person]'.",
+        "If user hasn't specified who, ask. If the task is vague, run Intention Clarifier first.",
+        "Sources: bt_search for existing context on the task topic. bt_get_projects for project assignment. bt_search (assignee: [PERSON], status: TODO/DOING) to check the delegate's current load. cos_calendar_read for upcoming meetings with delegate. [[Chief of Staff/Memory]] for communication preferences.",
+        "Output: Task definition (verb-first, enough context to act without questions). Success criteria (2–3 concrete conditions). Boundaries (in/out of scope, decisions they can vs. can't make). Deadline (hard or soft). Check-in points (intermediate milestones for tasks >1 day). Handoff message draft (ready to send via Slack/email). Load check (flag if delegate has many open items).",
+        "Routing: create BT task via bt_create with assignee, project, due date. Create check-in task for myself if needed. Offer to send handoff message.",
+        "Tool availability: works best with Better Tasks (assignee tracking, load checking) + Google Calendar. If BT unavailable, use roam_create_todo with 'Delegated to [person]:' prefix and note that load checking is unavailable. Never fabricate data from unavailable tools.",
+        "Rules: always define success criteria. Always include a deadline. Flag heavy load on delegate. Never frame delegation as dumping."
+      ]
+    },
+    {
+      name: "End-of-Day Reconciliation",
+      steps: [
+        "Trigger: user wants to close out the day. Phrases like 'end of day', 'wrap up', 'reconcile today'.",
+        "Gather context: active projects and today's tasks via bt_get_projects + bt_search (due: today). Waiting-for items via bt_search (assignee ≠ me). Unprocessed [[Chief of Staff/Inbox]]. Recent [[Chief of Staff/Decisions]]. Today's calendar via cos_calendar_read. Today's daily page content.",
+        "If you don't have enough information, ask questions until you do.",
+        "Fallback: if any tool call fails, include section header with '⚠️ Could not retrieve [source]' rather than skipping.",
+        "Ask the user: What did you actually work on today? Anything captured in notes/inbox that needs processing? Any open loops bothering you?",
+        "Output — write to today's daily page under 'End-of-Day Reconciliation' heading: What Got Done Today (update BT tasks to DONE via bt_modify where confirmed). What Didn't Get Done (and why — ran out of time / blocked / deprioritised / avoided). Updates Made (projects, waiting-for, decisions, inbox items processed). Open Loops Closed + Open Loops Remaining. Tomorrow Setup: top 3 priorities, first task tomorrow morning, commitments/meetings tomorrow (via cos_calendar_read), anything to prep tonight.",
+        "Tool availability: works best with Better Tasks + Google Calendar. If BT unavailable, use roam_search_todos to review tasks and roam_modify_todo to mark complete. If calendar unavailable, skip that section. Never fabricate data from unavailable tools.",
+        "End with: 'Tomorrow is set up. Anything else on your mind, capture it now or let it go until morning.'"
+      ]
+    },
+    {
+      name: "Follow-up Drafter",
+      steps: [
+        "Trigger: user asks to follow up on a waiting-for item, 'nudge [person] about [thing]', 'draft a follow-up', 'chase up [task]'. Also triggered when other skills surface stale delegations.",
+        "If user doesn't specify who/what, search for stale waiting-for items via bt_search (assignee ≠ me, status: TODO/DOING) and present candidates.",
+        "Sources: bt_search for the specific task being followed up. cos_calendar_read for meetings with the person. roam_search_text or roam_get_backlinks for recent interactions. [[Chief of Staff/Memory]] for communication preferences.",
+        "Output: Context summary (what was delegated, when, days waiting). Suggested approach (channel + tone based on wait time and relationship). Draft message (short, specific, easy to reply to — includes what was asked, when, what's needed, suggested deadline). Alternative approach (escalation path if overdue >14 days).",
+        "Routing: create follow-up BT task via bt_create with due date today/tomorrow. Update original task via bt_modify if needed. If upcoming meeting exists, suggest adding to meeting prep instead.",
+        "Tool availability: works best with Better Tasks (delegation tracking) + Google Calendar. If BT unavailable, use roam_search_todos to find TODO items mentioning the person. Never fabricate data from unavailable tools.",
+        "Rules: default tone is friendly and professional, never passive-aggressive. Always include specific context — no vague 'just checking in'. Make it easy to respond (yes/no question or clear next step). Flag items waiting >14 days. Never send messages without explicit confirmation."
+      ]
+    },
+    {
+      name: "Intention Clarifier",
+      steps: [
+        "Trigger: user expresses a vague intention, nagging thought, or half-formed idea that needs clarifying before action.",
+        "If you don't have enough information, ask questions until you do.",
+        "Phase 1 — Reflect back: the core desire, the underlying tension or problem, 2–3 possible goals hiding in this. Ask: 'Is any of this wrong or missing something important?'",
+        "Phase 2 — Targeted questions (ask up to 7 relevant ones): Clarifying the WHAT (if resolved, what would be different? starting/changing/stopping? multiple things tangled?). Clarifying the WHY (why now? cost of inaction? want vs. should?). Clarifying the HOW (already tried? what would make it easy? scariest part?). Clarifying CONSTRAINTS (good enough? can't change? deadline?).",
+        "Clarified output: The Real Goal (one clear sentence). Why This, Why Now. What Success Looks Like. What's Actually In the Way. The First Concrete Step (next 24 hours). What This Unlocks.",
+        "Routing: Ready to act → bt_create (or roam_create_todo) with due date today/tomorrow. Needs breakdown → run Brain Dump. Needs delegation → bt_create with assignee (or roam_create_todo). Needs more thinking → bt_create 'Think through [topic]' + add to [[Chief of Staff/Inbox]]. Not important → confirm with user, then drop.",
+        "Tool availability: this skill is primarily Roam-native. Better Tasks enhances routing with richer task creation. If BT unavailable, use roam_create_todo. Never fabricate data from unavailable tools.",
+        "If still stuck: What would need to be true for this to feel clear? Is this actually one thing or multiple? What are you afraid of discovering?"
+      ]
+    },
+    {
+      name: "Meeting Processing",
+      steps: [
+        "Trigger: user mentions a meeting — either upcoming (prep mode) or just happened (processing mode). Two modes:",
+        "MODE: PRE-MEETING PREP — gather context: cos_calendar_read for meeting details, bt_search for tasks related to attendees/topics, bt_get_projects for project status, roam_search for past interactions with attendees. Output: context refresh (last interaction, history, their priorities), my goals for this meeting, questions to ask, potential landmines, preparation tasks.",
+        "MODE: POST-MEETING PROCESSING — extract and file outcomes from user's raw notes/transcript. Output: key decisions made (with context, rationale, revisit-if). Action items — mine (task, context, deadline, effort). Action items — others (task, owner, deadline). Follow-ups needed. Key information learned. Open questions. Relationship notes. Next meeting prep suggestions.",
+        "Routing (post-meeting): my actions → bt_create with project/due/assignee. Others' actions → bt_create with their name as assignee (waiting-for). Decisions → [[Chief of Staff/Decisions]]. Relationship notes → [[Chief of Staff/Memory]].",
+        "Tool availability: works best with Better Tasks + Google Calendar. If BT unavailable, use roam_create_todo for action items. If calendar unavailable in prep mode, ask user for meeting details manually. Never fabricate data from unavailable tools.",
+        "Rules: only extract action items actually assigned — don't invent tasks from general discussion. Use exact names for ownership. Mark uncertain commitments with [?]. Use 'TBD' for unspecified deadlines. Flag ambiguities rather than guessing."
+      ]
+    },
+    {
+      name: "Project Status",
+      steps: [
+        "Trigger: user asks for a project status update. If a project is named, report on that one. If none specified, report on all active projects.",
+        "Sources: bt_get_projects (status: active, include_tasks: true). bt_search by project for open tasks, completed tasks, overdue items, delegated items. [[Chief of Staff/Decisions]] for project-related decisions. cos_calendar_read for upcoming project meetings.",
+        "Fallback: if any tool call fails, include section header with '⚠️ Could not retrieve [source]' rather than skipping.",
+        "Write to today's daily page under 'Project Status — [NAME]' heading.",
+        "Output sections: Status at a Glance (ON TRACK / AT RISK / BLOCKED / COMPLETED + confidence level). Recent Progress (past 7 days — completions, decisions, plan changes). Current Focus (active work, next steps, target dates). Blockers and Risks (active blockers, risks, dependencies — what would resolve each). Resource Status (capacity, budget if documented). Upcoming Milestones (next 3–5 with dates). Decisions Needed. Attention Required (specific actions for reader).",
+        "Tool availability: works best with Better Tasks (project tracking, task counts) + Google Calendar. If BT unavailable, use roam_search_todos and roam_search_text for project-related blocks. Never fabricate data from unavailable tools.",
+        "Rules: base assessment on documented evidence only. Flag outdated (30+ day) sources with [STALE]. Distinguish documented facts from inferences. Don't minimise risks. Include 'Last updated' dates for sources."
+      ]
+    },
+    {
+      name: "Resume Context",
+      steps: [
+        "Trigger: user asks 'what was I doing?', 'where did I leave off?', 'resume context', or returns after a break. Distinct from Daily Briefing (forward-looking) and Context Prep (entity-specific). This is backward-looking: reconstruct what you were in the middle of.",
+        "Sources — gather in parallel, skip any that fail: roam_get_recent_changes (hours: 4) for recently touched pages. roam_get_right_sidebar_windows for open working context. roam_get_focused_block for current cursor position. bt_search (status: DOING) for in-progress tasks. bt_search (status: DONE, max_results: 5) for recently completed. bt_search (status: TODO, due: today) for tasks due today still open. Today's daily page top-level blocks.",
+        "Output — chat panel only (do NOT write to DNP, this is ephemeral): Where You Were (recently edited pages, open sidebar, focused block). What's In Flight (DOING tasks, tasks due today). What You Just Finished (recent completions). Suggested Next Action ('You were working on [X] and have [Y] due today. Pick up [most likely next step]?').",
+        "Fallback: if any tool fails, skip that section with '⚠️ Could not retrieve [section]' — never block on a single failure.",
+        "Tool availability: works with Roam-native tools (recent changes, sidebar, focused block) as baseline. Better Tasks adds in-progress/completed task context. If BT unavailable, use roam_search_todos (status: TODO) for open tasks. Never fabricate data from unavailable tools.",
+        "Rules: keep it short — scannable in 10 seconds. Don't repeat what's already visible on screen. Bias toward last 2–4 hours. If very little activity, suggest running Daily Briefing instead. Chat panel only — no DNP write."
+      ]
+    },
+    {
+      name: "Retrospective",
+      steps: [
+        "Trigger: a project completed, milestone reached, or something went wrong and user wants to learn from it. Phrases like 'retro on [project]', 'post-mortem', 'what did we learn from [X]'.",
+        "This is event-triggered and deeper than Weekly Review. Looks at a specific project/event holistically.",
+        "If user doesn't specify what to retrospect on, ask.",
+        "Sources: bt_search by project for completed/open/cancelled tasks. bt_get_projects for metadata. [[Chief of Staff/Decisions]] for project decisions. roam_search for project references. cos_calendar_read for timeline reconstruction.",
+        "Write to today's daily page under 'Retrospective — [PROJECT/EVENT]' heading.",
+        "Output: Timeline (key milestones and dates). What Went Well (specific, not vague). What Didn't Go Well (same specificity). Key Decisions Reviewed (which held up? which would you change?). What Was Dropped (cancelled items — right call?). Lessons to Carry Forward (3–5 concrete, actionable — not platitudes). Unfinished Business (open tasks, loose ends — continue, delegate, or drop?).",
+        "Routing: lessons → [[Chief of Staff/Memory]]. Unfinished items to continue → bt_create / bt_modify (or roam_create_todo). Items to delegate → run Delegation skill. Decision revisions → [[Chief of Staff/Decisions]]. Complete project → suggest updating status via bt_modify.",
+        "Tool availability: works best with Better Tasks (project history, task status tracking) + Google Calendar. If BT unavailable, use roam_search_todos and roam_search_text for project-related blocks. Never fabricate data from unavailable tools.",
+        "Rules: be honest, not kind — retros are for learning. Lessons must be specific and actionable. Distinguish systemic issues from one-off problems. Base claims on evidence, mark inferences with [INFERRED]. If documentation is sparse, say so."
+      ]
+    },
+    {
+      name: "Template Instantiation",
+      steps: [
+        "Trigger: user asks to create something from a template. Phrases like 'create a new project from my template', 'stamp out [template name]', 'use my [X] template'.",
+        "Process: ask which template page to use (or suggest from known template pages in the graph). Read the template page via roam_fetch_page. Ask the user for variable values (project name, dates, people, etc.). Create a new page with the template structure, replacing variables.",
+        "Output: new page created with filled-in template. Summary of what was created and any variables that weren't filled.",
+        "Tool availability: this skill is primarily Roam-native (page reads + block creation). Better Tasks enhances it by auto-creating tasks found in the template. If BT unavailable, tasks in templates become plain {{[[TODO]]}} blocks via roam_create_todo. Never fabricate data from unavailable tools.",
+        "Rules: never modify the source template page. Always confirm variable substitutions before creating. Preserve the template's structure exactly — only replace marked variables."
+      ]
+    },
+    {
+      name: "Weekly Planning",
+      steps: [
+        "Trigger: user asks for planning or prioritisation for the week.",
+        "Approach: gather upcoming tasks via bt_search (due: this-week and upcoming), overdue tasks via bt_search (due: overdue), active projects via bt_get_projects (status: active, include_tasks: true), and calendar commitments via cos_calendar_read for next 7 days. Check for stale delegations. 'Blockers' means: overdue tasks, waiting-for with no response, unresolved decisions, external dependencies.",
+        "Write to today's daily page under 'Weekly Plan' heading.",
+        "Output sections: This Week's Outcomes (3–5 concrete, tied to projects). Priority Actions (sequenced with due dates, urgency then importance). Blockers & Waiting-For (who owns them, suggested nudge/escalation). Calendar Load (meeting hours, flag days >4 hours as capacity-constrained). Not This Week (explicit deprioritisations with rationale). Monday First Action (single task to start with).",
+        "Tool availability: works best with Better Tasks + Google Calendar. If BT unavailable, use roam_search_todos for open tasks and skip project/delegation analysis. If calendar unavailable, skip Calendar Load section. Never fabricate data from unavailable tools.",
+        "Keep each section concise. Prefer tool calls over guessing."
+      ]
+    },
+    {
+      name: "Weekly Review",
+      steps: [
+        "Trigger: user asks for a weekly review or retrospective on the past week.",
+        "Context: read [[Chief of Staff/Memory]] first for personal context and strategic direction.",
+        "Sources: bt_get_projects (active, include_tasks: true). bt_search for completed tasks, overdue items, waiting-for items, upcoming deadlines. cos_calendar_read for this week + next week. [[Chief of Staff/Decisions]], [[Chief of Staff/Inbox]], [[Chief of Staff/Memory]].",
+        "Execution: this is a long skill. Phase 1: make all tool calls and gather raw data. Phase 2: synthesise into output. Don't start writing until all data is gathered.",
+        "Fallback: if any tool fails, include header with '⚠️ Could not retrieve [source]' — never skip silently.",
+        "Write to today's daily page under 'Weekly Review — [Date Range]' heading.",
+        "Output sections: Week in Review (what got done, what didn't, pattern recognition — energy, avoidance, interruption patterns). Current State Audit (project health check, stale delegations, inbox backlog, decisions needing review). Tasks Completed (grouped by project). What's Still Open (with overdue flags). Upcoming Deadlines (next 14 days). Meetings This Week (outcomes, open items). Commitments Made. Open Questions. Coming Week (non-negotiables by day, top 3 priorities with 'why now', explicit NOT doing list, time blocks to protect). Strategic Questions (right things? avoiding? highest leverage?). Week Setup Complete (Monday first three actions, single most important outcome).",
+        "Memory updates: propose updates for Memory, Decisions, Lessons Learned pages. Update project statuses via bt_modify. Create BT tasks for new follow-ups.",
+        "Tool availability: works best with Better Tasks + Google Calendar + Gmail. If BT unavailable, use roam_search_todos for task review and roam_search_text for project context. If calendar/email unavailable, skip those sections. Never fabricate data from unavailable tools.",
+        "Rules: only include items from past 7 days unless in 'Upcoming' sections. Link sources with dates. Mark ambiguous items with [CHECK]. De-duplicate across sections. Distinguish what I completed vs. what happened around me. If section is empty, write 'None found' — don't omit."
       ]
     }
   ];
@@ -9290,7 +9616,7 @@ function registerCommandPaletteCommands(extensionAPI) {
         const status = j.enabled ? "enabled" : "disabled";
         const schedule = j.type === "cron" ? j.expression
           : j.type === "interval" ? `every ${j.intervalMinutes}m`
-          : "once";
+            : "once";
         return `${j.name} (${status}) — ${schedule}`;
       }).join("\n");
       console.info("[Chief of Staff] Scheduled jobs:", jobs);

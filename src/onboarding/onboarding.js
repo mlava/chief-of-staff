@@ -23,6 +23,8 @@ let activeExtensionAPI = null;
 let activeDeps = null;
 let activeContentArea = null;
 let activeStepIndicator = null;
+// Mutable session state shared across steps (survives async settings timing)
+let sessionState = {};
 
 // ---------------------------------------------------------------------------
 // Resume logic
@@ -65,6 +67,7 @@ function renderStep(stepIndex) {
     skipToEnd: () => teardownOnboarding(),
     card: onboardingCardEl,
     contentArea: activeContentArea,
+    sessionState,
   };
 
   if (typeof step.skipIf === "function" && step.skipIf(ctx)) {
@@ -110,6 +113,7 @@ export function launchOnboarding(extensionAPI, deps) {
 
   activeExtensionAPI = extensionAPI;
   activeDeps = deps;
+  sessionState = {};
 
   const state = loadOnboardingState(extensionAPI, deps);
 
@@ -126,12 +130,26 @@ export function launchOnboarding(extensionAPI, deps) {
     },
     onDoLater: () => {
       // "Do this later" / close button
-      deps.iziToast.info({
-        title: "No worries",
-        message: "Without an API key I can\u2019t do much yet. You can add one in Settings \u2192 Chief of Staff.",
-        timeout: 5000,
-        position: "bottomRight",
-      });
+      const hasKey = !!(
+        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.anthropicApiKey, "") ||
+        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.openaiApiKey, "") ||
+        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.llmApiKey, "")
+      );
+      if (hasKey) {
+        deps.iziToast.info({
+          title: "No worries",
+          message: "You can finish setting up any time via the command palette: Chief of Staff: Run Onboarding.",
+          timeout: 5000,
+          position: "bottomRight",
+        });
+      } else {
+        deps.iziToast.info({
+          title: "No worries",
+          message: "Without an API key I can\u2019t do much yet. You can add one in Settings \u2192 Chief of Staff.",
+          timeout: 5000,
+          position: "bottomRight",
+        });
+      }
       teardownOnboarding();
     },
   });
@@ -170,6 +188,7 @@ export function teardownOnboarding() {
   activeContentArea = null;
   activeStepIndicator = null;
   currentStepIndex = 0;
+  sessionState = {};
 }
 
 /**

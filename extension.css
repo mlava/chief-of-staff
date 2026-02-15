@@ -277,7 +277,7 @@
 /* --- Card container --- */
 .cos-onboarding-card {
   position: fixed;
-  right: 24px;
+  left: 50%;
   bottom: 24px;
   width: 400px;
   max-width: calc(100vw - 48px);
@@ -295,18 +295,18 @@
   line-height: 1.55;
   overflow: hidden;
   opacity: 0;
-  transform: translateY(16px);
+  transform: translateX(-50%) translateY(16px);
   transition: opacity 0.3s ease, transform 0.3s ease;
 }
 
 .cos-onboarding-card.cos-onboarding-visible {
   opacity: 1;
-  transform: translateY(0);
+  transform: translateX(-50%);
 }
 
 .cos-onboarding-card.cos-onboarding-exit {
   opacity: 0;
-  transform: translateY(16px);
+  transform: translateX(-50%) translateY(16px);
   transition: opacity 0.25s ease, transform 0.25s ease;
   pointer-events: none;
 }
@@ -378,7 +378,7 @@
 }
 
 .cos-onboarding-step-indicator {
-  color: rgba(148, 163, 184, 0.6);
+  color: rgba(148, 163, 184, 0.85);
 }
 
 .cos-onboarding-footer-links {
@@ -387,7 +387,7 @@
 }
 
 .cos-onboarding-footer-link {
-  color: rgba(148, 163, 184, 0.6);
+  color: rgba(148, 163, 184, 0.85);
   text-decoration: none;
   cursor: pointer;
 }

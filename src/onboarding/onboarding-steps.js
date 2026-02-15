@@ -32,7 +32,7 @@ function detectProvider(key) {
 
 function openCommandPalette() {
   const platform = window.roamAlphaAPI?.platform || {};
-  const useMeta = platform.isIOS || (!platform.isPC && !platform.isDesktop);
+  const useMeta = !platform.isPC;
   const event = new KeyboardEvent("keydown", {
     key: "p",
     code: "KeyP",
@@ -232,7 +232,7 @@ const ONBOARDING_STEPS = [
     id: "better-tasks",
     skipIf: null,
     render(ctx) {
-      const { extensionAPI, deps, advanceStep } = ctx;
+      const { extensionAPI, deps, advanceStep, sessionState } = ctx;
       const frag = document.createDocumentFragment();
 
       frag.appendChild(createInfoText(
@@ -246,6 +246,7 @@ const ONBOARDING_STEPS = [
           label: "Yes, I use Better Tasks",
           primary: true,
           onClick: () => {
+            sessionState.betterTasksEnabled = true;
             extensionAPI.settings.set(deps.SETTINGS_KEYS.betterTasksEnabled, true);
             deps.iziToast.success({
               title: "Better Tasks",
@@ -260,6 +261,7 @@ const ONBOARDING_STEPS = [
           label: "No, just standard TODOs",
           primary: false,
           onClick: () => {
+            sessionState.betterTasksEnabled = false;
             extensionAPI.settings.set(deps.SETTINGS_KEYS.betterTasksEnabled, false);
             deps.iziToast.info({
               title: "Standard TODOs",
@@ -281,7 +283,7 @@ const ONBOARDING_STEPS = [
     id: "memory-pages",
     skipIf: null,
     render(ctx) {
-      const { extensionAPI, deps, advanceStep } = ctx;
+      const { extensionAPI, deps, advanceStep, sessionState } = ctx;
       const frag = document.createDocumentFragment();
 
       frag.appendChild(createInfoText(
@@ -294,12 +296,12 @@ const ONBOARDING_STEPS = [
         "<strong>[[Chief of Staff/Inbox]]</strong> \u2014 ideas and items to process later",
         "<strong>[[Chief of Staff/Decisions]]</strong> \u2014 decisions worth tracking",
         "<strong>[[Chief of Staff/Lessons Learned]]</strong> \u2014 patterns and insights over time",
-        "<strong>[[Chief of Staff/Improvement Requests]]</strong> \u2014 your feedback on how I can do better",
+        "<strong>[[Chief of Staff/Improvement Requests]]</strong> \u2014 capability gaps and issues I discover while working",
       ];
 
-      // Add extra pages if Better Tasks is not in use
-      const btEnabled = extensionAPI.settings.get(deps.SETTINGS_KEYS.betterTasksEnabled);
-      if (!btEnabled && !deps.hasBetterTasksAPI()) {
+      // Only show Projects page if user doesn't use Better Tasks
+      const usesBT = sessionState.betterTasksEnabled || deps.hasBetterTasksAPI();
+      if (!usesBT) {
         pages.push(
           "<strong>[[Chief of Staff/Projects]]</strong> \u2014 your active projects"
         );
@@ -343,7 +345,16 @@ const ONBOARDING_STEPS = [
   // ---- Step 5: Memory Questionnaire ----
   {
     id: "memory-questionnaire",
-    skipIf: null,
+    skipIf() {
+      // Skip if memory page doesn't exist (user declined creation in step 4)
+      try {
+        const result = window.roamAlphaAPI?.data?.pull?.(
+          "[:node/title]",
+          '[:node/title "Chief of Staff/Memory"]'
+        );
+        return !result?.[":node/title"];
+      } catch { return true; }
+    },
     render(ctx) {
       const { advanceStep, deps } = ctx;
       const frag = document.createDocumentFragment();
@@ -418,7 +429,7 @@ const ONBOARDING_STEPS = [
                 position: "bottomRight",
               });
             }, 300);
-            setTimeout(() => advanceStep(), 2500);
+            setTimeout(() => advanceStep(), 8000);
           },
         },
         {
@@ -483,7 +494,7 @@ const ONBOARDING_STEPS = [
     id: "skills",
     skipIf: null,
     render(ctx) {
-      const { deps, advanceStep } = ctx;
+      const { extensionAPI, deps, advanceStep, sessionState } = ctx;
       const frag = document.createDocumentFragment();
 
       frag.appendChild(createInfoText(
@@ -505,10 +516,27 @@ const ONBOARDING_STEPS = [
                   page: { title: "Chief of Staff/Skills" },
                 });
               } catch { /* ignore */ }
+
+              // Contextual toast based on user's setup choices
+              const hasBT = sessionState.betterTasksEnabled || deps.hasBetterTasksAPI();
+              const composioUrl = deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.composioMcpUrl, "");
+              const hasComposio = !!composioUrl && composioUrl !== "enter your composio mcp url here";
+
+              let toastMsg;
+              if (hasBT && hasComposio) {
+                toastMsg = "16 skills installed \u2713 \u2014 you\u2019re fully loaded. Every skill will work at full capability.";
+              } else if (hasBT) {
+                toastMsg = "16 skills installed \u2713 \u2014 most work beautifully with your graph and Better Tasks. Skills like Daily Briefing and Weekly Review will be even more powerful once you connect external tools.";
+              } else if (hasComposio) {
+                toastMsg = "16 skills installed \u2713 \u2014 all will work using your connected tools and Roam\u2019s built-in TODO system. Install Better Tasks any time for richer task management.";
+              } else {
+                toastMsg = "16 skills installed \u2713 \u2014 several work right away (Brain Dump, Resume Context, Intention Clarifier, and more). Others will unlock their full potential as you add Better Tasks or connect external tools.";
+              }
+
               deps.iziToast.success({
                 title: "Skills installed",
-                message: "Browse them and try one out.",
-                timeout: 4000,
+                message: toastMsg,
+                timeout: 6000,
                 position: "bottomRight",
               });
             } catch (e) {
@@ -597,7 +625,7 @@ const ONBOARDING_STEPS = [
               primary: true,
               onClick: () => {
                 try {
-                  window.open("https://github.com/mlavercombe/roam-extensions/tree/main/chief-of-staff#2-connect-composio-optional", "_blank", "noopener");
+                  window.open("https://github.com/mlava/chief-of-staff#2-connect-composio-optional", "_blank", "noopener");
                 } catch { /* ignore */ }
                 advanceStep();
               },
@@ -622,7 +650,7 @@ const ONBOARDING_STEPS = [
     id: "finish",
     skipIf: null,
     render(ctx) {
-      const { extensionAPI, deps, skipToEnd } = ctx;
+      const { extensionAPI, deps, skipToEnd, sessionState } = ctx;
       const frag = document.createDocumentFragment();
 
       const userName = deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.userName, "");
@@ -663,11 +691,11 @@ const ONBOARDING_STEPS = [
         skillsCreated
       ));
 
-      // Better Tasks
-      const btDetected = deps.hasBetterTasksAPI();
+      // Better Tasks — check both runtime API and user's onboarding choice
+      const usesBT = sessionState.betterTasksEnabled || deps.hasBetterTasksAPI();
       summaryContainer.appendChild(createSummaryItem(
-        `Better Tasks: ${btDetected ? "Detected" : "Not using"}`,
-        btDetected
+        `Better Tasks: ${usesBT ? "Enabled" : "Not using"}`,
+        usesBT
       ));
 
       // External tools
