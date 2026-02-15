@@ -13,7 +13,7 @@
   border: 1px solid rgba(148, 163, 184, 0.4);
   border-radius: 10px;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
-  z-index: 17;
+  z-index: 16;
   display: flex;
   flex-direction: column;
   color: #e2e8f0;
@@ -92,6 +92,18 @@
   border: 1px solid rgba(148, 163, 184, 0.28);
 }
 
+/* Scheduled/cron job message bubble */
+.chief-msg--scheduled {
+  border-left: 3px solid rgba(245, 158, 11, 0.6);
+  background: rgba(245, 158, 11, 0.08);
+}
+.chief-msg-scheduled-header {
+  font-size: 0.75rem;
+  color: rgba(245, 158, 11, 0.9);
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+
 /* Save-to-daily-page button */
 .chief-msg-save-btn {
   display: block;
@@ -152,6 +164,7 @@
 /* --- Markdown: Inline Code --- */
 .chief-inline-code {
   background: rgba(148, 163, 184, 0.2);
+  color: #e2e8f0;
   padding: 1px 4px;
   border-radius: 4px;
 }
@@ -160,12 +173,14 @@
 .chief-code-block {
   overflow: auto;
   background: rgba(15, 23, 42, 0.45);
+  color: #e2e8f0;
   padding: 8px;
   border-radius: 6px;
 }
 
 .chief-code-block code {
   background: none;
+  color: #e2e8f0;
   padding: 0;
 }
 
@@ -253,6 +268,286 @@
   background: rgba(0, 0, 0, 0.05);
   padding: 6px;
   border-radius: 4px;
+}
+
+/* ==========================================================================
+   Chief of Staff — Onboarding Card Styles
+   ========================================================================== */
+
+/* --- Card container --- */
+.cos-onboarding-card {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  width: 400px;
+  max-width: calc(100vw - 48px);
+  max-height: 80vh;
+  background: rgba(15, 23, 42, 0.96);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 12px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.4);
+  z-index: 17;
+  display: flex;
+  flex-direction: column;
+  color: #e2e8f0;
+  font-family: Inter, system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  line-height: 1.55;
+  overflow: hidden;
+  opacity: 0;
+  transform: translateY(16px);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.cos-onboarding-card.cos-onboarding-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.cos-onboarding-card.cos-onboarding-exit {
+  opacity: 0;
+  transform: translateY(16px);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  pointer-events: none;
+}
+
+/* --- Header --- */
+.cos-onboarding-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+  cursor: move;
+  user-select: none;
+}
+
+.cos-onboarding-header-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.cos-onboarding-header-close {
+  background: none;
+  border: none;
+  color: rgba(148, 163, 184, 0.7);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.cos-onboarding-header-close:hover {
+  color: #e2e8f0;
+}
+
+/* --- Content area --- */
+.cos-onboarding-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+/* Content swap animations */
+@keyframes cos-onboarding-fade-in {
+  from { opacity: 0; transform: translateX(8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes cos-onboarding-fade-out {
+  from { opacity: 1; transform: translateX(0); }
+  to   { opacity: 0; transform: translateX(-8px); }
+}
+
+.cos-onboarding-content.cos-onboarding-content-enter {
+  animation: cos-onboarding-fade-in 0.2s ease forwards;
+}
+
+.cos-onboarding-content.cos-onboarding-content-exit {
+  animation: cos-onboarding-fade-out 0.15s ease forwards;
+}
+
+/* --- Footer --- */
+.cos-onboarding-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  border-top: 1px solid rgba(148, 163, 184, 0.2);
+  font-size: 11px;
+}
+
+.cos-onboarding-step-indicator {
+  color: rgba(148, 163, 184, 0.6);
+}
+
+.cos-onboarding-footer-links {
+  display: flex;
+  gap: 12px;
+}
+
+.cos-onboarding-footer-link {
+  color: rgba(148, 163, 184, 0.6);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.cos-onboarding-footer-link:hover {
+  color: #e2e8f0;
+  text-decoration: underline;
+}
+
+/* --- Text blocks --- */
+.cos-onboarding-text {
+  margin-bottom: 10px;
+  color: #cbd5e1;
+}
+
+.cos-onboarding-text strong {
+  color: #e2e8f0;
+}
+
+.cos-onboarding-text small {
+  color: rgba(148, 163, 184, 0.7);
+  font-size: 11px;
+}
+
+.cos-onboarding-text a {
+  color: #5c7cfa;
+  text-decoration: underline;
+}
+
+.cos-onboarding-text a:hover {
+  color: #748ffc;
+}
+
+/* --- Input fields --- */
+.cos-onboarding-field {
+  margin-bottom: 12px;
+}
+
+.cos-onboarding-label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: #e2e8f0;
+  font-size: 13px;
+}
+
+.cos-onboarding-input {
+  width: 100%;
+  padding: 8px 10px;
+  background: rgba(30, 41, 59, 0.8);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 6px;
+  color: #e2e8f0;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.cos-onboarding-input:focus {
+  border-color: rgba(92, 124, 250, 0.6);
+  box-shadow: 0 0 0 2px rgba(92, 124, 250, 0.15);
+}
+
+.cos-onboarding-input::placeholder {
+  color: rgba(148, 163, 184, 0.5);
+}
+
+/* --- Buttons --- */
+.cos-onboarding-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.cos-onboarding-btn {
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.cos-onboarding-btn--primary {
+  background: #5c7cfa;
+  color: #fff;
+}
+
+.cos-onboarding-btn--primary:hover {
+  background: #4c6ef5;
+}
+
+.cos-onboarding-btn--secondary {
+  background: rgba(148, 163, 184, 0.15);
+  color: #94a3b8;
+}
+
+.cos-onboarding-btn--secondary:hover {
+  background: rgba(148, 163, 184, 0.25);
+  color: #cbd5e1;
+}
+
+/* --- Inline error --- */
+.cos-onboarding-error {
+  color: #f87171;
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+/* --- Bullet list --- */
+.cos-onboarding-list {
+  margin: 6px 0 10px 0;
+  padding-left: 18px;
+  color: #cbd5e1;
+}
+
+.cos-onboarding-list li {
+  margin-bottom: 4px;
+}
+
+/* --- Summary (finish step) --- */
+.cos-onboarding-summary {
+  margin: 10px 0;
+}
+
+.cos-onboarding-summary-item {
+  padding: 3px 0;
+  font-size: 13px;
+}
+
+.cos-onboarding-summary-check {
+  color: #34d399;
+  font-weight: 600;
+  margin-right: 6px;
+}
+
+.cos-onboarding-summary-pending {
+  color: rgba(148, 163, 184, 0.5);
+  margin-right: 6px;
+}
+
+/* --- Scrollbar (matches chat panel) --- */
+.cos-onboarding-content::-webkit-scrollbar {
+  width: 6px;
+}
+
+.cos-onboarding-content::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.cos-onboarding-content::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.3);
+  border-radius: 3px;
+}
+
+.cos-onboarding-content::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.5);
 }
 
 /*

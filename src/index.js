@@ -1,6 +1,8 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import iziToast from "izitoast";
+import { Cron } from "croner";
+import { launchOnboarding, teardownOnboarding } from "./onboarding/onboarding.js";
 
 const DEFAULT_COMPOSIO_MCP_URL = "enter your composio mcp url here";
 const DEFAULT_COMPOSIO_API_KEY = "enter your composio api key here";
@@ -23,7 +25,11 @@ const SETTINGS_KEYS = {
   toolPreferences: "tool-preferences",
   toolPacksEnabled: "tool-packs-enabled",
   toolsSchemaVersion: "tools-schema-version",
-  toolkitSchemaRegistry: "toolkit-schema-registry"
+  toolkitSchemaRegistry: "toolkit-schema-registry",
+  cronJobs: "cron-jobs",
+  userName: "user-name",
+  onboardingComplete: "onboarding-complete",
+  betterTasksEnabled: "better-tasks-enabled"
 };
 const TOOLS_SCHEMA_VERSION = 3;
 const AUTH_POLL_INTERVAL_MS = 9000;
@@ -37,6 +43,7 @@ const MAX_AGENT_MESSAGES_CHAR_BUDGET = 50000; // Conservative budget (20% safety
 const MIN_AGENT_MESSAGES_TO_KEEP = 6;
 const ANTHROPIC_MAX_OUTPUT_TOKENS = 1200;
 const OPENAI_MAX_OUTPUT_TOKENS = 1200;
+const POWER_MAX_OUTPUT_TOKENS = 4096;
 const LLM_MAX_RETRIES = 3;
 const LLM_RETRY_BASE_DELAY_MS = 700;
 const LLM_STREAM_CHUNK_TIMEOUT_MS = 60_000; // 60s per-chunk timeout for streaming reads
@@ -84,7 +91,8 @@ const MEMORY_PAGE_TITLES_BASE = [
   "Chief of Staff/Memory",
   "Chief of Staff/Inbox",
   "Chief of Staff/Decisions",
-  "Chief of Staff/Lessons Learned"
+  "Chief of Staff/Lessons Learned",
+  "Chief of Staff/Improvement Requests"
 ];
 function getActiveMemoryPageTitles() {
   if (hasBetterTasksAPI()) return MEMORY_PAGE_TITLES_BASE;
@@ -93,7 +101,8 @@ function getActiveMemoryPageTitles() {
     "Chief of Staff/Inbox",
     "Chief of Staff/Projects",
     "Chief of Staff/Decisions",
-    "Chief of Staff/Lessons Learned"
+    "Chief of Staff/Lessons Learned",
+    "Chief of Staff/Improvement Requests"
   ];
 }
 const MEMORY_MAX_CHARS_PER_PAGE = 3000;
@@ -118,6 +127,11 @@ const TOOLKIT_SCHEMA_MAX_TOOLKITS = 30;
 const TOOLKIT_SCHEMA_MAX_PROMPT_CHARS = 8000;
 const MAX_ROAM_BLOCK_CHARS = 100000; // Conservative limit for Roam block size
 const MAX_CREATE_BLOCKS_TOTAL = 50; // Hard cap on total blocks created in one roam_create_blocks call
+const CRON_TICK_INTERVAL_MS = 60_000; // Check due jobs every 60 seconds
+const CRON_LEADER_KEY = "chief-of-staff-cron-leader";
+const CRON_LEADER_HEARTBEAT_MS = 30_000; // 30s heartbeat for multi-tab leader lock
+const CRON_LEADER_STALE_MS = 90_000; // 90s without heartbeat = stale, claim leadership
+const CRON_MAX_JOBS = 20; // Soft cap on total scheduled jobs
 
 let mcpClient = null;
 let commandPaletteRegistered = false;
@@ -141,6 +155,8 @@ let chatPanelDragState = null;
 let chatPanelIsSending = false;
 let chatPanelIsOpen = false;
 let chatPanelHistory = [];
+let chatInputHistoryIndex = -1; // -1 = current draft, 0 = most recent user message, etc.
+let chatInputDraft = ""; // saves in-progress text when navigating history
 const startupAuthPollTimeoutIds = [];
 const activeToastKeyboards = new Set();
 let reconcileInFlightPromise = null;
@@ -148,10 +164,20 @@ let composioAutoConnectTimeoutId = null;
 let chatPanelPersistTimeoutId = null;
 let extensionBroadcastCleanups = [];
 let lastKnownPageContext = null; // { uid, title } — for detecting page navigation between turns
+let cronTickIntervalId = null;
+let cronLeaderHeartbeatId = null;
+let cronLeaderTabId = null; // random string identifying this tab's leader claim
+let cronStorageHandler = null; // "storage" event listener for cross-tab leader detection
+let cronInitialTickTimeoutId = null; // initial 5s tick after scheduler start
+let cronSchedulerRunning = false;
+const cronRunningJobs = new Set(); // job IDs currently executing (prevent overlap)
 const approvedToolsThisSession = new Set(); // tools approved once skip future prompts
 let roamNativeToolsCache = null;
 const activePullWatches = []; // { name, cleanup } for onunload
 let pullWatchDebounceTimers = {}; // keyed by cache type
+// Note: totalCostUsd accumulates via floating-point addition, so after many API calls
+// it may drift by fractions of a cent. This is acceptable for a session-scoped UI indicator
+// that displays at most 2 decimal places and resets on reload.
 const sessionTokenUsage = {
   totalInputTokens: 0,
   totalOutputTokens: 0,
@@ -453,7 +479,7 @@ function renderInlineMarkdown(text) {
 function renderMarkdownToSafeHtml(markdownText) {
   const lines = String(markdownText || "").replace(/\r\n/g, "\n").split("\n");
   const html = [];
-  let inUl = false;
+  let ulStack = []; // stack of indent levels for nested ULs
   let inOl = false;
   let inCode = false;
   let inBlockquote = false;
@@ -474,12 +500,18 @@ function renderMarkdownToSafeHtml(markdownText) {
     }
   };
 
+  const closeAllUl = () => {
+    while (ulStack.length > 0) {
+      html.push("</li></ul>");
+      ulStack.pop();
+    }
+  };
+
   const closeLists = () => {
-    if (inUl) {
-      html.push("</ul>");
+    if (ulStack.length > 0) {
+      closeAllUl();
       // If nested inside an <ol> <li>, close that li too
       if (inOl) closeOlLi();
-      inUl = false;
     }
     if (inOl) {
       closeOlLi();
@@ -537,27 +569,39 @@ function renderMarkdownToSafeHtml(markdownText) {
     }
     if (inBlockquote) closeBlockquote();
 
-    const ulMatch = line.match(/^\s*[-*]\s+(.+)$/);
+    const ulMatch = line.match(/^(\s*)[-*]\s+(.+)$/);
     if (ulMatch) {
-      // If we're inside an <ol>, nest this <ul> inside the current <li>
-      if (inOl && !inUl) {
-        // Don't close the <ol> — start a nested <ul> inside the current <li>
+      const indent = ulMatch[1].length;
+      const content = ulMatch[2];
+
+      if (ulStack.length === 0) {
+        // Start a new list (possibly nested inside an OL)
+        const cls = inOl ? "chief-list chief-list--nested" : "chief-list";
+        html.push(`<ul class="${cls}">`);
+        ulStack.push(indent);
+      } else if (indent > ulStack[ulStack.length - 1] && ulStack.length < 20) {
+        // Deeper nesting — open nested <ul> inside current open <li> (cap at 20 levels)
         html.push('<ul class="chief-list chief-list--nested">');
-        inUl = true;
-      } else if (!inOl && !inUl) {
-        html.push('<ul class="chief-list">');
-        inUl = true;
+        ulStack.push(indent);
+      } else {
+        // Same or shallower — close deeper levels first
+        while (ulStack.length > 1 && indent < ulStack[ulStack.length - 1]) {
+          html.push("</li></ul>");
+          ulStack.pop();
+        }
+        // Close the <li> at the current level
+        html.push("</li>");
       }
-      html.push(`<li>${renderInlineMarkdown(ulMatch[1])}</li>`);
+      // Open a new <li> (left open for potential nested <ul>)
+      html.push(`<li>${renderInlineMarkdown(content)}`);
       return;
     }
 
     const olMatch = line.match(/^\s*\d+\.\s+(.+)$/);
     if (olMatch) {
       // Close any nested <ul> first
-      if (inUl) {
-        html.push("</ul>");
-        inUl = false;
+      if (ulStack.length > 0) {
+        closeAllUl();
       }
       // Close previous <ol> <li> if open
       closeOlLi();
@@ -572,7 +616,7 @@ function renderMarkdownToSafeHtml(markdownText) {
 
     if (!line.trim()) {
       // blank lines inside an open list are swallowed so numbered items don't restart at 1
-      if (!inUl && !inOl) html.push("<br/>");
+      if (ulStack.length === 0 && !inOl) html.push("<br/>");
       return;
     }
 
@@ -593,9 +637,10 @@ function renderMarkdownToSafeHtml(markdownText) {
   return html.join("");
 }
 
-function createChatPanelMessageElement(role, text) {
+function createChatPanelMessageElement(role, text, { variant } = {}) {
   const item = document.createElement("div");
   item.classList.add("chief-msg", role === "user" ? "chief-msg--user" : "chief-msg--assistant");
+  if (variant === "scheduled") item.classList.add("chief-msg--scheduled");
   item.innerHTML = renderMarkdownToSafeHtml(text);
   return item;
 }
@@ -682,7 +727,7 @@ function flushPersistChatPanelHistory(extensionAPI = extensionAPIRef) {
 function clearChatPanelHistory(extensionAPI = extensionAPIRef) {
   chatPanelHistory = [];
   flushPersistChatPanelHistory(extensionAPI);
-  if (chatPanelMessages) chatPanelMessages.innerHTML = "";
+  if (chatPanelMessages) chatPanelMessages.textContent = "";
 }
 
 function clearStartupAuthPollTimers() {
@@ -712,15 +757,9 @@ function hasValidChatPanelElementRefs() {
 function setChiefNamespaceGlobals() {
   window[CHIEF_NAMESPACE] = {
     ask: (message, options = {}) => askChiefOfStaff(message, options),
-    briefing: () => askChiefOfStaff("use skill Structured Daily Briefing"),
     toggleChat: () => toggleChatPanel(),
     memory: async () => getAllMemoryContent({ force: true }),
-    skills: async () => getSkillsContent({ force: true }),
-    mcpClient: () => mcpClient,
-    schemas: () => getToolkitSchemaRegistry(),
-    discoverSchemas: () => discoverAllConnectedToolkitSchemas(extensionAPIRef, { force: true }),
-    discoverToolkit: (name) => discoverToolkitSchema(name, { force: true }),
-    buildArgs: (slug, args) => buildToolArgs(slug, args)
+    skills: async () => getSkillsContent({ force: true })
   };
 }
 
@@ -757,18 +796,21 @@ function updateChatPanelCostIndicator() {
 
 async function handleChatPanelSend() {
   refreshChatPanelElementRefs();
-  if (chatPanelIsSending || !chatPanelInput) return;
+  if (chatPanelIsSending || activeAgentAbortController || !chatPanelInput) return;
   const message = String(chatPanelInput.value || "").trim();
   if (!message) return;
 
   appendChatPanelMessage("user", message);
   appendChatPanelHistory("user", message);
   chatPanelInput.value = "";
+  chatInputHistoryIndex = -1;
+  chatInputDraft = "";
   setChatPanelSendingState(true);
 
   // Create a live streaming message element
   let streamingEl = null;
-  let streamedChunks = "";
+  const streamChunks = []; // array-based accumulation avoids O(n²) string concat
+  let streamRenderPending = false;
 
   function ensureStreamingEl() {
     if (streamingEl) return;
@@ -780,37 +822,44 @@ async function handleChatPanelSend() {
     chatPanelMessages.appendChild(streamingEl);
   }
 
+  function flushStreamRender() {
+    streamRenderPending = false;
+    if (!streamingEl || !document.body.contains(streamingEl)) return;
+    streamingEl.innerHTML = renderMarkdownToSafeHtml(streamChunks.join(""));
+    if (chatPanelMessages) chatPanelMessages.scrollTop = chatPanelMessages.scrollHeight;
+  }
+
   try {
     const result = await askChiefOfStaff(message, {
       suppressToasts: true,
       onTextChunk: (chunk) => {
         ensureStreamingEl();
-        streamedChunks += chunk;
-        // Re-render markdown on each chunk for live formatting
-        if (streamingEl) {
-          streamingEl.innerHTML = renderMarkdownToSafeHtml(streamedChunks);
-          if (chatPanelMessages) chatPanelMessages.scrollTop = chatPanelMessages.scrollHeight;
+        streamChunks.push(chunk);
+        // Debounce renders via rAF so rapid chunks don't cause redundant DOM writes
+        if (!streamRenderPending) {
+          streamRenderPending = true;
+          requestAnimationFrame(flushStreamRender);
         }
       }
     });
     const responseText = String(result?.text || "").trim() || "No response generated.";
 
-    if (streamingEl) {
+    if (streamingEl && document.body.contains(streamingEl)) {
       // Final render with complete text (in case of minor differences)
       streamingEl.innerHTML = renderMarkdownToSafeHtml(responseText);
       addSaveToDailyPageButton(streamingEl, message, responseText);
-    } else {
+    } else if (!streamingEl) {
       // Non-streaming fallback (Anthropic or deterministic route)
       const el = appendChatPanelMessage("assistant", responseText);
-      addSaveToDailyPageButton(el, message, responseText);
+      if (el) addSaveToDailyPageButton(el, message, responseText);
     }
     appendChatPanelHistory("assistant", responseText);
     updateChatPanelCostIndicator();
   } catch (error) {
     const errorText = getUserFacingLlmErrorMessage(error, "Chat");
-    if (streamingEl) {
+    if (streamingEl && document.body.contains(streamingEl)) {
       streamingEl.innerHTML = renderMarkdownToSafeHtml(`Error: ${errorText}`);
-    } else {
+    } else if (!streamingEl) {
       appendChatPanelMessage("assistant", `Error: ${errorText}`);
     }
     appendChatPanelHistory("assistant", `Error: ${errorText}`);
@@ -862,7 +911,7 @@ function applyChatPanelGeometry(panelEl) {
 function installChatPanelDragBehavior(handleEl, panelEl) {
   // --- Drag (via header) ---
   const onDragMove = (event) => {
-    if (!chatPanelDragState) return;
+    if (!chatPanelDragState || !document.body.contains(panelEl)) return;
     panelEl.style.left = `${Math.max(0, event.clientX - chatPanelDragState.offsetX)}px`;
     panelEl.style.top = `${Math.max(0, event.clientY - chatPanelDragState.offsetY)}px`;
     panelEl.style.right = "auto";
@@ -943,7 +992,7 @@ function installChatPanelDragBehavior(handleEl, panelEl) {
   };
 
   const onResizeMove = (event) => {
-    if (!resizeState) return;
+    if (!resizeState || !document.body.contains(panelEl)) return;
     const { edge, startX, startY, startLeft, startTop, startWidth, startHeight } = resizeState;
     const dx = event.clientX - startX;
     const dy = event.clientY - startY;
@@ -1096,7 +1145,39 @@ function ensureChatPanel() {
   const inputKeydownHandler = (event) => {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
+      chatInputHistoryIndex = -1;
+      chatInputDraft = "";
       handleChatPanelSend();
+      return;
+    }
+    // Up/Down arrow: cycle through user message history
+    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      const userMessages = chatPanelHistory.filter(m => m.role === "user").map(m => m.text);
+      if (!userMessages.length) return;
+      // Only activate on ArrowUp when cursor is at the start (or field is empty)
+      if (event.key === "ArrowUp" && chatInputHistoryIndex === -1) {
+        const el = event.target;
+        if (el.selectionStart !== 0 || el.selectionStart !== el.selectionEnd) return;
+      }
+      if (event.key === "ArrowUp") {
+        if (chatInputHistoryIndex === -1) {
+          chatInputDraft = input.value || "";
+          chatInputHistoryIndex = 0;
+        } else if (chatInputHistoryIndex < userMessages.length - 1) {
+          chatInputHistoryIndex += 1;
+        } else {
+          return; // already at oldest
+        }
+      } else { // ArrowDown
+        if (chatInputHistoryIndex <= -1) return; // already at draft
+        chatInputHistoryIndex -= 1;
+      }
+      event.preventDefault();
+      if (chatInputHistoryIndex === -1) {
+        input.value = chatInputDraft;
+      } else {
+        input.value = userMessages[userMessages.length - 1 - chatInputHistoryIndex] || "";
+      }
     }
   };
   input.addEventListener("keydown", inputKeydownHandler);
@@ -1412,16 +1493,9 @@ function promptTextWithToast({
       resolve(value);
     };
 
-    const escapedValue = String(initialValue || "")
-      .replace(/&/g, "&amp;")
-      .replace(/"/g, "&quot;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
-    const escapedPlaceholder = String(placeholder || "")
-      .replace(/&/g, "&amp;")
-      .replace(/"/g, "&quot;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
+    const escapedValue = escapeHtml(String(initialValue || ""));
+    const escapedPlaceholder = escapeHtml(String(placeholder || ""));
+    const escapedConfirmLabel = escapeHtml(String(confirmLabel || ""));
     let activeInstance = null;
     let activeToast = null;
     const confirmAction = (instance, toast) => {
@@ -1457,7 +1531,7 @@ function promptTextWithToast({
       drag: false,
       buttons: [
         [
-          `<button>${confirmLabel}</button>`,
+          `<button>${escapedConfirmLabel}</button>`,
           (instance, toast) => confirmAction(instance, toast),
           true
         ],
@@ -1502,20 +1576,11 @@ function promptInstalledToolSlugWithToast(
       resolve(value);
     };
 
+    const escapedConfirmLabel = escapeHtml(String(confirmLabel || ""));
     const optionsHtml = installedTools
       .map((tool) => {
-        const slug = String(tool.slug || "");
-        const label = String(tool.label || slug);
-        const escapedSlug = slug
-          .replace(/&/g, "&amp;")
-          .replace(/"/g, "&quot;")
-          .replace(/</g, "&lt;")
-          .replace(/>/g, "&gt;");
-        const escapedLabel = label
-          .replace(/&/g, "&amp;")
-          .replace(/"/g, "&quot;")
-          .replace(/</g, "&lt;")
-          .replace(/>/g, "&gt;");
+        const escapedSlug = escapeHtml(String(tool.slug || ""));
+        const escapedLabel = escapeHtml(String(tool.label || tool.slug || ""));
         return `<option value="${escapedSlug}">${escapedLabel}</option>`;
       })
       .join("");
@@ -1554,7 +1619,7 @@ function promptInstalledToolSlugWithToast(
       drag: false,
       buttons: [
         [
-          `<button>${confirmLabel}</button>`,
+          `<button>${escapedConfirmLabel}</button>`,
           (instance, toast) => confirmAction(instance, toast),
           true
         ],
@@ -1594,10 +1659,7 @@ function promptToolExecutionApproval(toolName, args) {
 
     const argsPreview = safeJsonStringify(args, 600);
     const escapedToolName = escapeHtml(String(toolName || ""));
-    const escapedArgsPreview = String(argsPreview || "")
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
+    const escapedArgsPreview = escapeHtml(String(argsPreview || ""));
     let activeInstance = null;
     let activeToast = null;
     const confirmAction = (instance, toast) => {
@@ -2166,69 +2228,11 @@ async function discoverAllConnectedToolkitSchemas(extensionAPI = extensionAPIRef
   const batchSize = 5;
   for (let i = 0; i < unique.length; i += batchSize) {
     const batch = unique.slice(i, i + batchSize);
-    await Promise.allSettled(batch.map(tk => discoverToolkitSchema(tk, { force })));
+    const results = await Promise.allSettled(batch.map(tk => discoverToolkitSchema(tk, { force })));
+    results.forEach((r, idx) => {
+      if (r.status === "rejected") debugLog("[Chief flow] Toolkit schema discovery failed:", batch[idx], r.reason?.message);
+    });
   }
-}
-
-/**
- * Get the correct parameter name for a concept across different toolkits.
- * E.g., getParamName("GMAIL_FETCH_EMAILS", "max_results") → "max_results"
- *        getParamName("GOOGLECALENDAR_EVENTS_LIST", "max_results") → "maxResults"
- */
-function getSchemaParamName(toolSlug, conceptName) {
-  const schema = getToolSchema(toolSlug);
-  if (!schema?.input_schema?.properties) return conceptName;
-  const props = schema.input_schema.properties;
-  // Direct match
-  if (props[conceptName]) return conceptName;
-  // Try common casing variants
-  const variants = [
-    conceptName,
-    conceptName.replace(/_([a-z])/g, (_, c) => c.toUpperCase()), // snake → camel
-    conceptName.replace(/([A-Z])/g, "_$1").toLowerCase().replace(/^_/, ""), // camel → snake
-    conceptName.toLowerCase(),
-    conceptName.toUpperCase()
-  ];
-  for (const v of variants) {
-    if (props[v]) return v;
-  }
-  return conceptName;
-}
-
-/**
- * Build a parameter object for a tool call using the cached schema.
- * Maps concept names to the tool's actual parameter names.
- * Filters out unknown params and applies type coercion based on schema.
- */
-function buildToolArgs(toolSlug, conceptArgs = {}) {
-  const schema = getToolSchema(toolSlug);
-  if (!schema?.input_schema?.properties) {
-    debugLog("[Chief flow] Schema registry: no schema for", toolSlug, "— passing args as-is");
-    return conceptArgs;
-  }
-  const props = schema.input_schema.properties;
-  const result = {};
-
-  for (const [concept, value] of Object.entries(conceptArgs)) {
-    if (value === undefined || value === null) continue;
-    const paramName = getSchemaParamName(toolSlug, concept);
-    if (!props[paramName]) {
-      debugLog("[Chief flow] Schema registry: skipping unknown param", concept, "for", toolSlug);
-      continue;
-    }
-    // Type coercion based on schema
-    const propSchema = props[paramName];
-    if (propSchema.type === "integer" && typeof value === "number") {
-      result[paramName] = Math.round(value);
-    } else if (propSchema.type === "boolean" && typeof value !== "boolean") {
-      result[paramName] = !!value;
-    } else if (propSchema.type === "string" && typeof value !== "string") {
-      result[paramName] = String(value);
-    } else {
-      result[paramName] = value;
-    }
-  }
-  return result;
 }
 
 /**
@@ -3068,10 +3072,11 @@ async function getCurrentPageContext() {
       const todayTitle = formatRoamDate(now);
       return { uid: todayUid, title: todayTitle, type: "page" };
     }
-    const rows = api.q?.(`[:find ?t :where [?e :block/uid "${uid}"] [?e :node/title ?t]]`) || [];
+    const escapedUid = escapeForDatalog(uid);
+    const rows = api.q?.(`[:find ?t :where [?e :block/uid "${escapedUid}"] [?e :node/title ?t]]`) || [];
     const title = String(rows?.[0]?.[0] || "").trim();
     if (title) return { uid, title, type: "page" };
-    const blockRows = api.q?.(`[:find ?s :where [?b :block/uid "${uid}"] [?b :block/string ?s]]`) || [];
+    const blockRows = api.q?.(`[:find ?s :where [?b :block/uid "${escapedUid}"] [?b :block/string ?s]]`) || [];
     const blockText = String(blockRows?.[0]?.[0] || "").trim();
     return { uid, title: blockText || uid, type: "block" };
   } catch {
@@ -3112,7 +3117,7 @@ function formatRoamDate(date) {
   return `${months[date.getMonth()]} ${day}${suffix}, ${date.getFullYear()}`;
 }
 
-function flattenBlockTree(block) {
+function flattenBlockTree(block, depth = 0) {
   const uid = block?.[":block/uid"] ?? block?.uid ?? "";
   const text = block?.[":block/string"] ?? block?.string ?? "";
   const orderRaw = block?.[":block/order"] ?? block?.order;
@@ -3121,8 +3126,8 @@ function flattenBlockTree(block) {
     uid: String(uid || ""),
     text: String(text || ""),
     order: Number.isFinite(orderRaw) ? orderRaw : 0,
-    children: Array.isArray(childrenRaw)
-      ? childrenRaw.map(flattenBlockTree).sort((left, right) => left.order - right.order)
+    children: depth < 30 && Array.isArray(childrenRaw)
+      ? childrenRaw.map(c => flattenBlockTree(c, depth + 1)).sort((left, right) => left.order - right.order)
       : []
   };
 }
@@ -3191,6 +3196,23 @@ async function getPageTreeByTitleAsync(title) {
   };
 }
 
+async function getPageTreeByUidAsync(uid) {
+  const escapedUid = escapeForDatalog(uid);
+  const pageResult = await queryRoamDatalog(`[:find (pull ?p [:node/title :block/uid {:block/children [:block/uid :block/string :block/order {:block/children [:block/uid :block/string :block/order {:block/children [:block/uid :block/string :block/order {:block/children ...}]}]}]}]) .
+    :where
+    [?p :block/uid "${escapedUid}"]
+    [?p :node/title]]`);
+  if (!pageResult) {
+    return { title: null, uid, children: [] };
+  }
+  const title = String(pageResult?.[":node/title"] || "");
+  const pageChildren = pageResult?.[":block/children"] || pageResult?.children || [];
+  const children = Array.isArray(pageChildren)
+    ? pageChildren.map((item) => flattenBlockTree(item)).sort((left, right) => left.order - right.order)
+    : [];
+  return { title, uid, children };
+}
+
 function truncateRoamBlockText(text) {
   const originalText = String(text || "");
   const safeText = originalText.slice(0, MAX_ROAM_BLOCK_CHARS);
@@ -3233,22 +3255,23 @@ async function createRoamBlock(parentUid, text, order = "last") {
   });
 }
 
-function countBlockTreeNodes(blockDefs) {
-  if (!Array.isArray(blockDefs)) return 0;
+function countBlockTreeNodes(blockDefs, depth = 0) {
+  if (!Array.isArray(blockDefs) || depth >= 30) return 0;
   let count = 0;
   for (const def of blockDefs) {
     count += 1;
-    if (Array.isArray(def?.children)) count += countBlockTreeNodes(def.children);
+    if (Array.isArray(def?.children)) count += countBlockTreeNodes(def.children, depth + 1);
   }
   return count;
 }
 
-async function createRoamBlockTree(parentUid, blockDef, order = "last") {
+async function createRoamBlockTree(parentUid, blockDef, order = "last", depth = 0) {
   const text = String(blockDef?.text || "");
   const uid = await createRoamBlock(parentUid, text, order);
+  if (depth >= 30) return uid;
   const children = Array.isArray(blockDef?.children) ? blockDef.children : [];
   for (let index = 0; index < children.length; index += 1) {
-    await createRoamBlockTree(uid, children[index], index);
+    await createRoamBlockTree(uid, children[index], index, depth + 1);
   }
   return uid;
 }
@@ -3644,7 +3667,10 @@ function resolveMemoryPageTitle(page) {
     decisions: "Chief of Staff/Decisions",
     lessons: "Chief of Staff/Lessons Learned",
     lessons_learned: "Chief of Staff/Lessons Learned",
-    "lessons learned": "Chief of Staff/Lessons Learned"
+    "lessons learned": "Chief of Staff/Lessons Learned",
+    improvements: "Chief of Staff/Improvement Requests",
+    "improvement requests": "Chief of Staff/Improvement Requests",
+    improvement_requests: "Chief of Staff/Improvement Requests"
   };
   return pageMap[key] || null;
 }
@@ -3848,6 +3874,13 @@ async function bootstrapMemoryPages() {
         "Format: problem → fix → prevention/guardrail.",
         `[[${formatRoamDate(new Date())}]] Initialised lessons learned log.`
       ]
+    },
+    {
+      title: "Chief of Staff/Improvement Requests",
+      lines: [
+        "Capability gaps and friction logged by Chief of Staff during real tasks.",
+        "Format: what was attempted → what was missing → workaround used."
+      ]
     }
   ];
 
@@ -3876,13 +3909,15 @@ function getBetterTasksTools() {
     "bt_search": "roam_bt_search_tasks",
     "bt_create": "roam_bt_create_task",
     "bt_modify": "roam_bt_modify_task",
+    "bt_bulk_modify": "roam_bt_bulk_modify",
+    "bt_bulk_snooze": "roam_bt_bulk_snooze",
     "bt_get_projects": "roam_bt_get_projects",
     "bt_get_waiting_for": "roam_bt_get_waiting_for",
     "bt_get_context": "roam_bt_get_context",
     "bt_get_attributes": "roam_bt_get_attributes"
   };
 
-  return ext.tools
+  const mapped = ext.tools
     .filter(t => t?.name && nameMap[t.name])
     .map(t => ({
       name: nameMap[t.name],
@@ -3897,6 +3932,47 @@ function getBetterTasksTools() {
         }
       }
     }));
+
+  // Composite glue tool: create a task from an existing block
+  const btCreateTool = ext.tools.find(t => t?.name === "bt_create");
+  if (btCreateTool && typeof btCreateTool.execute === "function") {
+    mapped.push({
+      name: "roam_bt_create_task_from_block",
+      description: "Convert an existing Roam block into a Better Tasks task. Reads the block text and creates a task from it. Optionally pass the focused block by omitting uid.",
+      input_schema: {
+        type: "object",
+        properties: {
+          uid: { type: "string", description: "Block UID to convert. If omitted, uses the currently focused block." },
+          status: { type: "string", enum: ["TODO", "DONE"], description: "Task status. Default TODO." },
+          attributes: { type: "object", description: "Task attributes (due, project, priority, etc.)." }
+        }
+      },
+      execute: async ({ uid, status = "TODO", attributes } = {}) => {
+        let blockUid = String(uid || "").trim();
+        if (!blockUid) {
+          const api = getRoamAlphaApi();
+          const focused = api?.ui?.getFocusedBlock?.();
+          blockUid = focused?.["block-uid"] || "";
+          if (!blockUid) throw new Error("No uid provided and no block is currently focused");
+        }
+        // Read block text
+        const escapedUid = escapeForDatalog(blockUid);
+        const blockResult = await queryRoamDatalog(`[:find ?str . :where [?b :block/uid "${escapedUid}"] [?b :block/string ?str]]`);
+        if (!blockResult) throw new Error(`Block not found: ${blockUid}`);
+        const text = String(blockResult || "").trim();
+        if (!text) throw new Error(`Block ${blockUid} has no text content`);
+
+        const createArgs = { text, status, parent_uid: blockUid };
+        if (attributes && typeof attributes === "object") createArgs.attributes = attributes;
+        const result = await btCreateTool.execute(createArgs);
+        return result && typeof result === "object"
+          ? { ...result, source_block_uid: blockUid }
+          : { result, source_block_uid: blockUid };
+      }
+    });
+  }
+
+  return mapped;
 }
 
 function getRoamNativeTools() {
@@ -3942,18 +4018,19 @@ function getRoamNativeTools() {
     },
     {
       name: "roam_get_page",
-      description: "Get a page block tree by exact page title.",
+      description: "Get a page block tree by exact page title or UID. Provide one of title or uid.",
       input_schema: {
         type: "object",
         properties: {
-          title: { type: "string", description: "Exact page title." }
-        },
-        required: ["title"]
+          title: { type: "string", description: "Exact page title." },
+          uid: { type: "string", description: "Page UID." }
+        }
       },
-      execute: async ({ title } = {}) => {
+      execute: async ({ title, uid } = {}) => {
         const pageTitle = String(title || "").trim();
-        if (!pageTitle) throw new Error("title is required");
-        return getPageTreeByTitleAsync(pageTitle);
+        const pageUid = String(uid || "").trim();
+        if (!pageTitle && !pageUid) throw new Error("Either title or uid is required");
+        return pageUid ? getPageTreeByUidAsync(pageUid) : getPageTreeByTitleAsync(pageTitle);
       }
     },
     {
@@ -4043,15 +4120,445 @@ function getRoamNativeTools() {
       }
     },
     {
-      name: "roam_create_blocks",
-      description: "Create multiple blocks (with optional nested children) under a parent UID.",
+      name: "roam_update_block",
+      description: "Update the text content of an existing block in Roam by UID.",
       input_schema: {
         type: "object",
         properties: {
-          parent_uid: { type: "string", description: "Parent block or page UID." },
+          uid: { type: "string", description: "Block UID to update." },
+          text: { type: "string", description: "New text content for the block." }
+        },
+        required: ["uid", "text"]
+      },
+      execute: async ({ uid, text } = {}) => {
+        const blockUid = String(uid || "").trim();
+        if (!blockUid) throw new Error("uid is required");
+        const newText = String(text ?? "");
+        const api = requireRoamUpdateBlockApi(getRoamAlphaApi());
+        await withRoamWriteRetry(() => api.updateBlock({ block: { uid: blockUid, string: truncateRoamBlockText(newText) } }));
+        return { success: true, updated_uid: blockUid };
+      }
+    },
+    {
+      name: "roam_move_block",
+      description: "Move an existing block to a new parent in Roam.",
+      input_schema: {
+        type: "object",
+        properties: {
+          uid: { type: "string", description: "Block UID to move." },
+          parent_uid: { type: "string", description: "New parent block or page UID." },
+          order: { type: "string", description: "\"first\" or \"last\". Default \"last\"." }
+        },
+        required: ["uid", "parent_uid"]
+      },
+      execute: async ({ uid, parent_uid, order = "last" } = {}) => {
+        const blockUid = String(uid || "").trim();
+        const parentUid = String(parent_uid || "").trim();
+        if (!blockUid) throw new Error("uid is required");
+        if (!parentUid) throw new Error("parent_uid is required");
+        const api = getRoamAlphaApi();
+        if (!api?.moveBlock) throw new Error("Roam moveBlock API unavailable");
+        await withRoamWriteRetry(() => api.moveBlock({
+          location: { "parent-uid": parentUid, order: order === "first" ? 0 : "last" },
+          block: { uid: blockUid }
+        }));
+        return { success: true, moved_uid: blockUid, new_parent_uid: parentUid };
+      }
+    },
+    {
+      name: "roam_get_block_children",
+      description: "Get a block and its full child tree by UID.",
+      input_schema: {
+        type: "object",
+        properties: {
+          uid: { type: "string", description: "Block UID." }
+        },
+        required: ["uid"]
+      },
+      execute: async ({ uid } = {}) => {
+        const blockUid = String(uid || "").trim();
+        if (!blockUid) throw new Error("uid is required");
+        const escapedUid = escapeForDatalog(blockUid);
+        const result = await queryRoamDatalog(`[:find (pull ?b [:block/uid :block/string :block/order {:block/children [:block/uid :block/string :block/order {:block/children [:block/uid :block/string :block/order {:block/children ...}]}]}]) .
+          :where [?b :block/uid "${escapedUid}"]]`);
+        if (!result) return { uid: blockUid, text: null, children: [] };
+        return flattenBlockTree(result);
+      }
+    },
+    {
+      name: "roam_get_block_context",
+      description: "Get a block's surrounding context: the block itself, its parent chain up to the page, and its siblings. Useful for understanding where a block lives before acting on it. UIDs are returned as ((uid)) block references and page titles as [[title]] — preserve this exact notation when presenting results.",
+      input_schema: {
+        type: "object",
+        properties: {
+          uid: { type: "string", description: "Block UID to get context for." }
+        },
+        required: ["uid"]
+      },
+      execute: async ({ uid } = {}) => {
+        const blockUid = String(uid || "").trim();
+        if (!blockUid) throw new Error("uid is required");
+        const escaped = escapeForDatalog(blockUid);
+
+        const getOrder = (b) => { const o = b?.[":block/order"] ?? b?.["block/order"] ?? b?.order; return Number.isFinite(o) ? o : 0; };
+        const getTitle = (b) => b?.[":node/title"] ?? b?.["node/title"] ?? b?.title ?? null;
+
+        // Get the block itself + its children
+        const block = await queryRoamDatalog(`[:find (pull ?b [:block/uid :block/string :block/order {:block/children [:block/uid :block/string :block/order]}]) .
+          :where [?b :block/uid "${escaped}"]]`);
+        if (!block) return { uid: blockUid, error: "Block not found" };
+
+        const blockText = getBlockString(block);
+        const blockOrder = getOrder(block);
+
+        // Format block as "((uid)): text" display string
+        const fmtBlock = (uid, text) => `((${uid})): ${text.slice(0, 200)}`;
+        const fmtPage = (uid, title) => `[[${title}]] ((${uid}))`;
+
+        // Block's own children
+        const ownChildren = getBlockChildren(block)
+          .map(c => ({ block: fmtBlock(getBlockUid(c), getBlockString(c)), order: getOrder(c) }))
+          .sort((a, b) => a.order - b.order)
+          .map(c => c.block);
+
+        // Walk up the parent chain using sequential queries.
+        // Note: :block/parent is reliable in Datalog WHERE clauses but NOT in pull specs
+        // (see ROAM_EXTENSION_PATTERNS.md "Avoid unreliable :block/parent pulls").
+        // Each iteration issues one query that finds the parent and pulls its data + children.
+        const chain = [];
+        let siblings = [];
+        const MAX_DEPTH = 20;
+        let currentUid = blockUid;
+        for (let i = 0; i < MAX_DEPTH; i++) {
+          const escapedCurrent = escapeForDatalog(currentUid);
+          const parent = await queryRoamDatalog(`[:find (pull ?p [:block/uid :block/string :block/order :node/title
+              {:block/children [:block/uid :block/string :block/order]}]) .
+            :where [?b :block/uid "${escapedCurrent}"] [?b :block/parent ?p]]`);
+          if (!parent) break;
+
+          const parentUid = getBlockUid(parent);
+          const parentTitle = getTitle(parent);
+          const parentText = getBlockString(parent);
+
+          // On first iteration, extract siblings (excluding the block itself)
+          if (i === 0) {
+            siblings = getBlockChildren(parent)
+              .map(c => ({ block: fmtBlock(getBlockUid(c), getBlockString(c)), order: getOrder(c), uid: getBlockUid(c) }))
+              .filter(c => c.uid !== blockUid)
+              .sort((a, b) => a.order - b.order)
+              .map(c => c.block);
+          }
+
+          const label = parentTitle != null
+            ? fmtPage(parentUid, parentTitle)
+            : fmtBlock(parentUid, parentText);
+          chain.push(label);
+          if (parentTitle != null) break; // reached page level
+          currentUid = parentUid;
+        }
+
+        // Nest the ancestor chain: page > grandparent > parent
+        let ancestorTree = null;
+        for (let i = chain.length - 1; i >= 0; i--) {
+          if (ancestorTree) {
+            ancestorTree = { block: chain[i], parent: ancestorTree };
+          } else {
+            ancestorTree = { block: chain[i] };
+          }
+        }
+
+        return {
+          block: fmtBlock(blockUid, blockText),
+          order: blockOrder,
+          parent: ancestorTree,
+          siblings,
+          children: ownChildren,
+          depth: chain.length
+        };
+      }
+    },
+    {
+      name: "roam_get_page_metadata",
+      description: "Get metadata for a page: creation time, last edit time, word count, block count, and reference count.",
+      input_schema: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Exact page title." },
+          uid: { type: "string", description: "Page UID. Takes priority over title." }
+        }
+      },
+      execute: async ({ title, uid } = {}) => {
+        const pageUid = String(uid || "").trim();
+        const pageTitle = String(title || "").trim();
+        if (!pageUid && !pageTitle) throw new Error("Either title or uid is required");
+
+        const whereClause = pageUid
+          ? `[?p :block/uid "${escapeForDatalog(pageUid)}"]`
+          : `[?p :node/title "${escapeForDatalog(pageTitle)}"]`;
+
+        // Page-level times and title
+        const pageMeta = await queryRoamDatalog(`[:find (pull ?p [:node/title :block/uid :create/time :edit/time]) .
+          :where ${whereClause}]`);
+        if (!pageMeta) return { title: pageTitle || pageUid, found: false };
+
+        const resolvedTitle = pageMeta[":node/title"] || pageTitle || "";
+        const resolvedUid = pageMeta[":block/uid"] || pageUid || "";
+        const createTime = pageMeta[":create/time"] || null;
+        const editTime = pageMeta[":edit/time"] || null;
+
+        // Block count via aggregate (avoids materialising all block strings just to count rows)
+        const blockCountRow = await queryRoamDatalog(`[:find (count ?b) .
+          :where ${whereClause}
+          [?b :block/page ?p]]`);
+        const blockCount = typeof blockCountRow === "number" ? blockCountRow : 0;
+
+        // Word count: fetches all block strings on the page. This is inherently expensive
+        // on large pages (1,000+ blocks) but irreducible — you can't count words without
+        // reading the text. The word-count extension (wc_get_page_count) pays the same cost
+        // via an ancestor-rule query that is arguably heavier. This tool is only invoked by
+        // the LLM on explicit request, never in a hot loop, and the Roam API 20-second
+        // query timeout provides a natural ceiling.
+        const blockStrings = await queryRoamDatalog(`[:find ?str
+          :where ${whereClause}
+          [?b :block/page ?p]
+          [?b :block/string ?str]]`);
+        let wordCount = 0;
+        if (Array.isArray(blockStrings)) {
+          for (const [str] of blockStrings) {
+            if (str) wordCount += String(str).split(/\s+/).filter(Boolean).length;
+          }
+        }
+
+        // Reference count — how many blocks across the graph reference this page
+        const refRows = await queryRoamDatalog(`[:find (count ?b) .
+          :where ${whereClause}
+          [?b :block/refs ?p]]`);
+        const referenceCount = typeof refRows === "number" ? refRows : 0;
+
+        return {
+          title: resolvedTitle,
+          uid: resolvedUid,
+          created: createTime ? new Date(createTime).toISOString() : null,
+          edited: editTime ? new Date(editTime).toISOString() : null,
+          block_count: blockCount,
+          word_count: wordCount,
+          reference_count: referenceCount
+        };
+      }
+    },
+    {
+      name: "roam_get_recent_changes",
+      description: "Get pages modified within a time window, sorted by most recent first.",
+      input_schema: {
+        type: "object",
+        properties: {
+          hours: { type: "number", description: "Look-back window in hours. Default 24." },
+          exclude_daily_notes: { type: "boolean", description: "Exclude daily note pages (e.g. 'February 15th, 2026'). Default false." },
+          limit: { type: "number", description: "Max results to return. Default 20." }
+        }
+      },
+      execute: async ({ hours = 24, exclude_daily_notes = false, limit = 20 } = {}) => {
+        const floor = Date.now() - (hours * 60 * 60 * 1000);
+        const results = await queryRoamDatalog(
+          `[:find ?title ?uid ?time
+            :where
+            [?p :node/title ?title]
+            [?p :block/uid ?uid]
+            [?p :edit/time ?time]
+            [(> ?time ${floor})]]`
+        );
+        if (!results?.length) return { pages: [], count: 0 };
+
+        let pages = results
+          .map(([title, uid, time]) => ({ title, uid, edited: new Date(time).toISOString() }))
+          .sort((a, b) => new Date(b.edited) - new Date(a.edited));
+
+        if (exclude_daily_notes) {
+          const api = getRoamAlphaApi();
+          if (api?.util?.pageTitleToDate) {
+            pages = pages.filter(p => !api.util.pageTitleToDate(p.title));
+          }
+        }
+
+        const trimmed = pages.slice(0, limit);
+        return { pages: trimmed, count: trimmed.length, total: pages.length };
+      }
+    },
+    {
+      name: "roam_link_suggestions",
+      description: "Scan all blocks on a page for existing page titles that aren't linked. Returns suggestions grouped by block with UIDs. To create a link, call roam_link_mention with the block uid and title from the results.",
+      input_schema: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Page title to scan." },
+          uid: { type: "string", description: "Page UID. Takes priority over title." },
+          min_title_length: { type: "number", description: "Minimum page title length to consider. Default 3." }
+        }
+      },
+      execute: async ({ title, uid, min_title_length = 3 } = {}) => {
+        const pageUid = String(uid || "").trim();
+        const pageTitle = String(title || "").trim();
+        if (!pageUid && !pageTitle) throw new Error("Either title or uid is required");
+
+        const minLen = Number.isFinite(min_title_length) ? Math.max(1, min_title_length) : 3;
+        const whereClause = pageUid
+          ? `[?p :block/uid "${escapeForDatalog(pageUid)}"]`
+          : `[?p :node/title "${escapeForDatalog(pageTitle)}"]`;
+
+        // Verify page exists
+        const pageCheck = await queryRoamDatalog(`[:find ?uid . :where ${whereClause} [?p :block/uid ?uid]]`);
+        if (!pageCheck) {
+          return { found: false, title: pageTitle || pageUid, error: "Page not found" };
+        }
+
+        // Get all block strings on the page
+        const blockRows = await queryRoamDatalog(`[:find ?uid ?str
+          :where ${whereClause}
+          [?b :block/page ?p]
+          [?b :block/uid ?uid]
+          [?b :block/string ?str]]`);
+        if (!Array.isArray(blockRows) || !blockRows.length) {
+          return { found: true, title: pageTitle || pageUid, blocks_scanned: 0, suggestions: [] };
+        }
+
+        // Performance note: this fetches ALL page titles in the graph. On large graphs
+        // (5,000+ pages) this is an expensive query. We considered three mitigations:
+        //   1. Adding a :limit or .slice() cap — rejected because silently dropping titles
+        //      gives incomplete results without telling the user, breaking the tool's promise.
+        //   2. Moving the JS-side filters (daily pages, short titles, single lowercase words)
+        //      into the Datalog query — not feasible, Datascript doesn't support regex in :where.
+        //   3. Removing the tool entirely — the LLM can spot unlinked mentions via roam_get_page
+        //      and call roam_link_mention directly, but the dedicated scan is significantly more
+        //      reliable and thorough.
+        // We accept the cost because: (a) the aggressive JS-side filtering below (daily pages,
+        // short titles, single-word lowercase) reduces the candidate set to typically <200 even
+        // on large graphs; (b) this tool is only invoked on explicit user request, never in a
+        // hot loop; (c) the Roam API 20-second query timeout provides a natural ceiling.
+        const titleRows = await queryRoamDatalog(`[:find ?t :where [?p :node/title ?t]]`);
+        if (!Array.isArray(titleRows) || !titleRows.length) {
+          return { found: true, title: pageTitle || pageUid, blocks_scanned: blockRows.length, suggestions: [] };
+        }
+
+        // Filter candidate titles: skip short, daily pages, the page itself,
+        // and noisy single-word titles. Single-word titles only pass if they are:
+        //   - ALL CAPS (acronyms like "CHEST", "API")
+        //   - Mixed internal case (camelCase/PascalCase like "SmartBlock", "YouTube")
+        // Regular Title Case single words ("Evening", "Article") are filtered as noise.
+        // Multi-word titles always pass ("San Francisco", "Better Tasks").
+        const selfTitle = (pageTitle || "").toLowerCase();
+        const candidateTitles = [];
+        for (const [t] of titleRows) {
+          if (!t || t.length < minLen) continue;
+          if (t.toLowerCase() === selfTitle) continue;
+          if (/^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d/.test(t)) continue;
+          // Single-word filter: only pass acronyms (ALL CAPS) or mixed-case (internal uppercase)
+          if (!/\s/.test(t)) {
+            const isAllCaps = /^[A-Z][A-Z0-9]+$/.test(t);
+            const hasMixedCase = /[a-z]/.test(t) && /[A-Z]/.test(t.slice(1));
+            if (!isAllCaps && !hasMixedCase) continue;
+          }
+          candidateTitles.push(t);
+        }
+        if (!candidateTitles.length) return { title: pageTitle || pageUid, suggestions: [] };
+
+        // Pre-compile regexes for all candidates
+        const candidateRegexes = [];
+        for (const t of candidateTitles) {
+          try {
+            const escaped = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            candidateRegexes.push({ title: t, re: new RegExp(`\\b${escaped}\\b`, "i") });
+          } catch { /* skip */ }
+        }
+
+        // Scan each block
+        const results = [];
+        for (const [bUid, bStr] of blockRows) {
+          const text = String(bStr || "");
+          if (!text.trim()) continue;
+
+          // Collect already-linked titles in this block
+          const linkedTitles = new Set();
+          let match;
+          const linkPattern = /\[\[([^\]]+)\]\]/g;
+          while ((match = linkPattern.exec(text)) !== null) linkedTitles.add(match[1].toLowerCase());
+          const hashBracketPattern = /#\[\[([^\]]+)\]\]/g;
+          while ((match = hashBracketPattern.exec(text)) !== null) linkedTitles.add(match[1].toLowerCase());
+          const tagPattern = /#([^\s\[\]]+)/g;
+          while ((match = tagPattern.exec(text)) !== null) linkedTitles.add(match[1].toLowerCase());
+
+          const blockSuggestions = [];
+          for (const { title: t, re } of candidateRegexes) {
+            if (linkedTitles.has(t.toLowerCase())) continue;
+            if (re.test(text)) blockSuggestions.push(t);
+          }
+          if (blockSuggestions.length) {
+            results.push({ uid: bUid, text: text.slice(0, 120), suggestions: blockSuggestions });
+          }
+        }
+
+        const totalSuggestions = results.reduce((sum, r) => sum + r.suggestions.length, 0);
+        return { found: true, title: pageTitle || pageUid, blocks_scanned: blockRows.length, blocks_with_suggestions: results.length, total_suggestions: totalSuggestions, results };
+      }
+    },
+    {
+      name: "roam_link_mention",
+      description: "Atomically wrap an unlinked mention of a page title in [[...]] within a block. Reads the block text, finds the first unlinked occurrence, replaces it, and updates the block.",
+      input_schema: {
+        type: "object",
+        properties: {
+          uid: { type: "string", description: "Block UID containing the unlinked mention." },
+          title: { type: "string", description: "Page title to link (e.g. 'San Francisco'). Will be wrapped as [[San Francisco]]." }
+        },
+        required: ["uid", "title"]
+      },
+      execute: async ({ uid, title } = {}) => {
+        const blockUid = String(uid || "").trim();
+        const pageTitle = String(title || "").trim();
+        if (!blockUid) throw new Error("uid is required");
+        if (!pageTitle) throw new Error("title is required");
+
+        // Read current block text
+        const rows = await queryRoamDatalog(
+          `[:find ?str . :where [?b :block/uid "${escapeForDatalog(blockUid)}"] [?b :block/string ?str]]`
+        );
+        if (rows == null) throw new Error(`Block not found: ${blockUid}`);
+        const originalText = String(rows);
+
+        // Build regex that matches the title but NOT inside existing [[...]] or #[[...]]
+        const escaped = pageTitle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const re = new RegExp(`\\b${escaped}\\b`, "i");
+
+        // Strip out existing [[...]] and #[[...]] to find unlinked positions.
+        // Replace linked references with \x00 placeholders of equal length to preserve indices.
+        // Assumes Roam block text never contains literal null bytes (safe in practice).
+        const placeholderText = originalText.replace(/\#?\[\[[^\]]*\]\]/g, (m) => "\x00".repeat(m.length));
+
+        const match = re.exec(placeholderText);
+        if (!match) {
+          return { success: false, uid: blockUid, title: pageTitle, error: "No unlinked mention found in block text." };
+        }
+
+        // Replace at the matched position in the original text
+        const before = originalText.slice(0, match.index);
+        const original = originalText.slice(match.index, match.index + match[0].length);
+        const after = originalText.slice(match.index + match[0].length);
+        const newText = `${before}[[${original}]]${after}`;
+
+        const api = requireRoamUpdateBlockApi(getRoamAlphaApi());
+        await withRoamWriteRetry(() => api.updateBlock({ block: { uid: blockUid, string: truncateRoamBlockText(newText) } }));
+        return { success: true, uid: blockUid, title: pageTitle, updated_text: newText.slice(0, 200) };
+      }
+    },
+    {
+      name: "roam_create_blocks",
+      description: "Create multiple blocks (with optional nested children). Use parent_uid + blocks for a single location, or batches for multiple independent locations in one call.",
+      input_schema: {
+        type: "object",
+        properties: {
+          parent_uid: { type: "string", description: "Parent block or page UID (single-location mode)." },
           blocks: {
             type: "array",
-            description: "List of block definitions.",
+            description: "List of block definitions (single-location mode).",
             items: {
               type: "object",
               properties: {
@@ -4079,29 +4586,57 @@ function getRoamNativeTools() {
               },
               required: ["text"]
             }
+          },
+          batches: {
+            type: "array",
+            description: "Array of { parent_uid, blocks } for writing to multiple locations in one call.",
+            items: {
+              type: "object",
+              properties: {
+                parent_uid: { type: "string", description: "Parent block or page UID." },
+                blocks: { type: "array", description: "Block definitions for this parent.", items: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } }
+              },
+              required: ["parent_uid", "blocks"]
+            }
           }
-        },
-        required: ["parent_uid", "blocks"]
+        }
       },
-      execute: async ({ parent_uid, blocks } = {}) => {
-        const parentUid = String(parent_uid || "").trim();
-        if (!parentUid) throw new Error("parent_uid is required");
-        if (!Array.isArray(blocks) || !blocks.length) throw new Error("blocks must be a non-empty array");
-        const totalNodes = countBlockTreeNodes(blocks);
+      execute: async ({ parent_uid, blocks, batches } = {}) => {
+        // Normalise into a list of { parentUid, blocks } work items
+        const workItems = [];
+        if (Array.isArray(batches) && batches.length) {
+          for (const batch of batches) {
+            const pUid = String(batch?.parent_uid || "").trim();
+            if (!pUid) throw new Error("Each batch requires a parent_uid");
+            if (!Array.isArray(batch.blocks) || !batch.blocks.length) throw new Error(`Batch for ${pUid}: blocks must be a non-empty array`);
+            workItems.push({ parentUid: pUid, blocks: batch.blocks });
+          }
+        } else {
+          const parentUid = String(parent_uid || "").trim();
+          if (!parentUid) throw new Error("parent_uid is required (or use batches)");
+          if (!Array.isArray(blocks) || !blocks.length) throw new Error("blocks must be a non-empty array");
+          workItems.push({ parentUid, blocks });
+        }
+
+        const allBlocks = workItems.flatMap(w => w.blocks);
+        const totalNodes = countBlockTreeNodes(allBlocks);
         if (totalNodes > MAX_CREATE_BLOCKS_TOTAL) {
           throw new Error(`Too many blocks (${totalNodes}). Maximum is ${MAX_CREATE_BLOCKS_TOTAL} per call.`);
         }
 
-        const created = [];
-        for (let index = 0; index < blocks.length; index += 1) {
-          const uid = await createRoamBlockTree(parentUid, blocks[index], index);
-          created.push(uid);
+        const results = [];
+        for (const { parentUid, blocks: batchBlocks } of workItems) {
+          const created = [];
+          for (let index = 0; index < batchBlocks.length; index += 1) {
+            const uid = await createRoamBlockTree(parentUid, batchBlocks[index], index);
+            created.push(uid);
+          }
+          results.push({ parent_uid: parentUid, created_count: created.length, created_uids: created });
         }
         return {
           success: true,
-          created_count: created.length,
-          created_uids: created,
-          parent_uid: parentUid
+          total_created: results.reduce((sum, r) => sum + r.created_count, 0),
+          results
         };
       }
     },
@@ -4161,6 +4696,166 @@ function getRoamNativeTools() {
         required: ["page", "action", "content"]
       },
       execute: async (args = {}) => updateChiefMemory(args)
+    },
+    {
+      name: "roam_get_backlinks",
+      description: "Get all blocks that reference a page (backlinks). Returns the referring blocks with their page context.",
+      input_schema: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Page title to find backlinks for." },
+          uid: { type: "string", description: "Page UID. Takes priority over title." },
+          max_results: { type: "number", description: "Maximum backlinks to return. Default 50." }
+        }
+      },
+      execute: async ({ title, uid, max_results = 50 } = {}) => {
+        const pageUid = String(uid || "").trim();
+        const pageTitle = String(title || "").trim();
+        if (!pageUid && !pageTitle) throw new Error("Either title or uid is required");
+        const limit = Number.isFinite(max_results) ? Math.max(1, Math.min(500, max_results)) : 50;
+
+        const whereClause = pageUid
+          ? `[?p :block/uid "${escapeForDatalog(pageUid)}"]`
+          : `[?p :node/title "${escapeForDatalog(pageTitle)}"]`;
+        // Note: Datascript doesn't support :limit in :find clauses, so the full result set
+        // is materialised and truncated in JS. For heavily-referenced pages (1,000+ backlinks)
+        // this fetches more rows than needed. We return `total` so the LLM knows truncation
+        // occurred. The Roam API 20-second query timeout provides a natural ceiling, and the
+        // max_results parameter (capped at 500) keeps the returned payload bounded.
+        const results = await queryRoamDatalog(`[:find ?ref-uid ?ref-str ?ref-page-title
+          :where
+          ${whereClause}
+          [?b :block/refs ?p]
+          [?b :block/uid ?ref-uid]
+          [?b :block/string ?ref-str]
+          [?b :block/page ?rp]
+          [?rp :node/title ?ref-page-title]]`);
+        if (!Array.isArray(results) || !results.length) return { title: pageTitle || pageUid, backlinks: [] };
+        const backlinks = results.slice(0, limit).map(([bUid, bStr, bPage]) => ({
+          uid: bUid, text: String(bStr || ""), page: String(bPage || "")
+        }));
+        return { title: pageTitle || pageUid, count: backlinks.length, total: results.length, backlinks };
+      }
+    },
+    {
+      name: "roam_undo",
+      description: "Undo the last action in Roam. Use when the user asks to undo a recent change.",
+      input_schema: { type: "object", properties: {} },
+      execute: async () => {
+        const api = getRoamAlphaApi();
+        if (api?.data?.undo) {
+          await api.data.undo();
+          return { success: true, action: "undo" };
+        }
+        throw new Error("Roam undo API unavailable");
+      }
+    },
+    {
+      name: "roam_get_focused_block",
+      description: "Get the block currently focused (being edited) in Roam.",
+      input_schema: { type: "object", properties: {} },
+      execute: async () => {
+        const api = getRoamAlphaApi();
+        if (!api?.ui?.getFocusedBlock) throw new Error("Roam getFocusedBlock API unavailable");
+        const result = api.ui.getFocusedBlock();
+        if (!result || !result["block-uid"]) return { focused: false };
+        return { focused: true, uid: result["block-uid"] };
+      }
+    },
+    {
+      name: "roam_open_right_sidebar",
+      description: "Open the right sidebar in Roam.",
+      input_schema: { type: "object", properties: {} },
+      execute: async () => {
+        const api = getRoamAlphaApi();
+        if (!api?.ui?.rightSidebar?.open) throw new Error("Roam sidebar open API unavailable");
+        await api.ui.rightSidebar.open();
+        return { success: true };
+      }
+    },
+    {
+      name: "roam_close_right_sidebar",
+      description: "Close the right sidebar in Roam.",
+      input_schema: { type: "object", properties: {} },
+      execute: async () => {
+        const api = getRoamAlphaApi();
+        if (!api?.ui?.rightSidebar?.close) throw new Error("Roam sidebar close API unavailable");
+        await api.ui.rightSidebar.close();
+        return { success: true };
+      }
+    },
+    {
+      name: "roam_get_right_sidebar_windows",
+      description: "Get the list of currently open right sidebar windows in Roam.",
+      input_schema: { type: "object", properties: {} },
+      execute: async () => {
+        const api = getRoamAlphaApi();
+        if (!api?.ui?.rightSidebar?.getWindows) throw new Error("Roam sidebar API unavailable");
+        const windows = api.ui.rightSidebar.getWindows();
+        if (!Array.isArray(windows) || !windows.length) return { windows: [] };
+        const items = windows.map(w => ({
+          type: w?.type || w?.["window-type"] || "unknown",
+          uid: w?.["block-uid"] || w?.["page-uid"] || w?.uid || null,
+          order: w?.order ?? null
+        }));
+        return { count: items.length, windows: items };
+      }
+    },
+    {
+      name: "roam_add_right_sidebar_window",
+      description: "Add a window to the right sidebar. Supports outline, block, mentions, graph, and search-query types.",
+      input_schema: {
+        type: "object",
+        properties: {
+          type: { type: "string", enum: ["mentions", "block", "outline", "graph", "search-query"], description: "Window type." },
+          block_uid: { type: "string", description: "Block or page UID. Required for all types except search-query." },
+          search_query: { type: "string", description: "Search string. Required when type is search-query." },
+          order: { type: "number", description: "Position in sidebar. Optional — defaults to top." }
+        },
+        required: ["type"]
+      },
+      execute: async ({ type, block_uid, search_query, order } = {}) => {
+        const api = getRoamAlphaApi();
+        if (!api?.ui?.rightSidebar?.addWindow) throw new Error("Roam sidebar addWindow API unavailable");
+        const windowDef = { type };
+        if (type === "search-query") {
+          if (!search_query) throw new Error("search_query is required for search-query type");
+          windowDef["search-query-str"] = search_query;
+        } else {
+          if (!block_uid) throw new Error("block_uid is required for this window type");
+          windowDef["block-uid"] = block_uid;
+        }
+        if (order != null) windowDef.order = order;
+        await api.ui.rightSidebar.addWindow({ window: windowDef });
+        return { success: true, type, uid: block_uid || search_query };
+      }
+    },
+    {
+      name: "roam_remove_right_sidebar_window",
+      description: "Remove a window from the right sidebar.",
+      input_schema: {
+        type: "object",
+        properties: {
+          type: { type: "string", enum: ["mentions", "block", "outline", "graph", "search-query"], description: "Window type." },
+          block_uid: { type: "string", description: "Block or page UID. Required for all types except search-query." },
+          search_query: { type: "string", description: "Search string. Required when type is search-query." }
+        },
+        required: ["type"]
+      },
+      execute: async ({ type, block_uid, search_query } = {}) => {
+        const api = getRoamAlphaApi();
+        if (!api?.ui?.rightSidebar?.removeWindow) throw new Error("Roam sidebar removeWindow API unavailable");
+        const windowDef = { type };
+        if (type === "search-query") {
+          if (!search_query) throw new Error("search_query is required for search-query type");
+          windowDef["search-query-str"] = search_query;
+        } else {
+          if (!block_uid) throw new Error("block_uid is required for this window type");
+          windowDef["block-uid"] = block_uid;
+        }
+        await api.ui.rightSidebar.removeWindow({ window: windowDef });
+        return { success: true, type, removed: block_uid || search_query };
+      }
     }
   ];
   return roamNativeToolsCache;
@@ -4230,6 +4925,583 @@ function getCosIntegrationTools() {
   ];
 }
 
+// ─── Cron Scheduler: Helpers ───────────────────────────────────────────────────
+
+function getDefaultBrowserTimezone() {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (tz && typeof tz === "string") return tz;
+  } catch { /* ignore */ }
+  return "Australia/Melbourne";
+}
+
+function normaliseCronJob(input) {
+  if (!input || typeof input !== "object") return null;
+  const id = String(input.id || "").trim();
+  if (!id) return null;
+  const type = ["cron", "interval", "once"].includes(input.type) ? input.type : "cron";
+  return {
+    id,
+    name: String(input.name || id).trim().slice(0, 100),
+    type,
+    expression: type === "cron" ? String(input.expression || "").trim() : "",
+    intervalMinutes: type === "interval" ? Math.max(1, Math.round(Number(input.intervalMinutes) || 60)) : 0,
+    timezone: String(input.timezone || getDefaultBrowserTimezone()).trim(),
+    prompt: String(input.prompt || "").trim().slice(0, 2000),
+    enabled: input.enabled !== false,
+    createdAt: Number.isFinite(input.createdAt) ? input.createdAt : Date.now(),
+    lastRun: Number.isFinite(input.lastRun) ? input.lastRun : 0,
+    runCount: Number.isFinite(input.runCount) ? input.runCount : 0,
+    runAt: type === "once" && Number.isFinite(input.runAt) ? input.runAt : 0,
+    lastRunError: input.lastRunError ? String(input.lastRunError).slice(0, 200) : null
+  };
+}
+
+function loadCronJobs(extensionAPI = extensionAPIRef) {
+  const raw = getSettingArray(extensionAPI, SETTINGS_KEYS.cronJobs, []);
+  return raw.map(normaliseCronJob).filter(Boolean);
+}
+
+function saveCronJobs(jobs, extensionAPI = extensionAPIRef) {
+  const normalised = jobs.map(normaliseCronJob).filter(Boolean);
+  extensionAPI?.settings?.set?.(SETTINGS_KEYS.cronJobs, normalised);
+}
+
+function generateCronJobId(name) {
+  const base = String(name || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 40);
+  if (!base) return `job-${Date.now()}`;
+  return base;
+}
+
+function ensureUniqueCronJobId(id, existingJobs) {
+  const ids = new Set(existingJobs.map(j => j.id));
+  if (!ids.has(id)) return id;
+  for (let i = 2; i <= 99; i++) {
+    const candidate = `${id}-${i}`;
+    if (!ids.has(candidate)) return candidate;
+  }
+  return `${id}-${Date.now()}`;
+}
+
+// ─── Cron Scheduler: Leader Election ───────────────────────────────────────────
+
+function cronTryClaimLeadership() {
+  try {
+    const now = Date.now();
+    const raw = localStorage.getItem(CRON_LEADER_KEY);
+    if (raw) {
+      const data = JSON.parse(raw);
+      if (data.heartbeat && (now - data.heartbeat) < CRON_LEADER_STALE_MS) {
+        // Another tab is the active leader — don't usurp
+        if (data.tabId !== cronLeaderTabId) return false;
+        // We are already the leader
+        return true;
+      }
+    }
+    // Claim leadership
+    cronLeaderTabId = Math.random().toString(36).slice(2, 10);
+    localStorage.setItem(CRON_LEADER_KEY, JSON.stringify({
+      tabId: cronLeaderTabId,
+      heartbeat: now
+    }));
+    // Re-read to detect race condition with another tab
+    const check = JSON.parse(localStorage.getItem(CRON_LEADER_KEY) || "{}");
+    if (check.tabId === cronLeaderTabId) {
+      debugLog("[Chief cron] Claimed leadership:", cronLeaderTabId);
+      return true;
+    }
+    cronLeaderTabId = null;
+    return false;
+  } catch {
+    // localStorage unavailable — assume leader (single-tab fallback)
+    cronLeaderTabId = "fallback";
+    return true;
+  }
+}
+
+function cronIsLeader() {
+  return cronLeaderTabId !== null;
+}
+
+function cronHeartbeat() {
+  if (!cronIsLeader()) return;
+  try {
+    const raw = localStorage.getItem(CRON_LEADER_KEY);
+    if (!raw) { cronLeaderTabId = null; return; }
+    const data = JSON.parse(raw);
+    if (data.tabId !== cronLeaderTabId) { cronLeaderTabId = null; return; }
+    data.heartbeat = Date.now();
+    localStorage.setItem(CRON_LEADER_KEY, JSON.stringify(data));
+    // Re-verify after write to detect near-simultaneous claims
+    const check = JSON.parse(localStorage.getItem(CRON_LEADER_KEY) || "{}");
+    if (check.tabId !== cronLeaderTabId) { cronLeaderTabId = null; }
+  } catch { /* ignore */ }
+}
+
+function cronReleaseLeadership() {
+  try {
+    const raw = localStorage.getItem(CRON_LEADER_KEY);
+    if (raw) {
+      const data = JSON.parse(raw);
+      // Only remove if we own it
+      if (data.tabId === cronLeaderTabId) {
+        localStorage.removeItem(CRON_LEADER_KEY);
+      }
+    }
+  } catch { /* ignore */ }
+  cronLeaderTabId = null;
+}
+
+// ─── Cron Scheduler: Tick Loop ─────────────────────────────────────────────────
+
+function isCronJobDue(job, now) {
+  if (!job.enabled) return false;
+  const nowMs = now.getTime();
+
+  if (job.type === "once") {
+    if (job.lastRun > 0) return false; // already fired
+    return job.runAt > 0 && nowMs >= job.runAt;
+  }
+
+  if (job.type === "interval") {
+    if (!job.intervalMinutes || job.intervalMinutes < 1) return false;
+    const intervalMs = job.intervalMinutes * 60_000;
+    // If never run, due immediately (or after createdAt + interval)
+    if (job.lastRun === 0) return (nowMs - job.createdAt) >= intervalMs;
+    return (nowMs - job.lastRun) >= intervalMs;
+  }
+
+  if (job.type === "cron") {
+    if (!job.expression) return false;
+    try {
+      const cron = new Cron(job.expression, { timezone: job.timezone || getDefaultBrowserTimezone() });
+      // Find next occurrence after lastRun (or createdAt if never run)
+      const since = job.lastRun > 0 ? new Date(job.lastRun) : new Date(job.createdAt);
+      const nextDue = cron.nextRun(since);
+      if (!nextDue) return false;
+      return nextDue.getTime() <= nowMs;
+    } catch (e) {
+      debugLog("[Chief cron] Invalid cron expression for job", job.id, ":", e?.message);
+      return false;
+    }
+  }
+
+  return false;
+}
+
+async function fireCronJob(job) {
+  debugLog("[Chief cron] Firing job:", job.id, job.name);
+  const timeLabel = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+
+  // Show toast regardless of chat panel state
+  showInfoToast("Scheduled job", `Running: ${job.name}`);
+
+  // Render in chat panel if open
+  refreshChatPanelElementRefs();
+  let streamingEl = null;
+  const streamChunks = [];
+  let streamRenderPending = false;
+
+  if (chatPanelMessages) {
+    // Header element
+    const headerEl = document.createElement("div");
+    headerEl.classList.add("chief-msg", "chief-msg--assistant", "chief-msg--scheduled");
+    const headerInner = document.createElement("div");
+    headerInner.classList.add("chief-msg-scheduled-header");
+    headerInner.textContent = `Scheduled: ${job.name} (${timeLabel})`;
+    headerEl.appendChild(headerInner);
+    chatPanelMessages.appendChild(headerEl);
+
+    // Streaming response element
+    streamingEl = document.createElement("div");
+    streamingEl.classList.add("chief-msg", "chief-msg--assistant", "chief-msg--scheduled");
+    streamingEl.textContent = "";
+    chatPanelMessages.appendChild(streamingEl);
+    chatPanelMessages.scrollTop = chatPanelMessages.scrollHeight;
+  }
+
+  function flushCronStreamRender() {
+    streamRenderPending = false;
+    if (!streamingEl || !document.body.contains(streamingEl)) return;
+    streamingEl.innerHTML = renderMarkdownToSafeHtml(streamChunks.join(""));
+    refreshChatPanelElementRefs();
+    if (chatPanelMessages) chatPanelMessages.scrollTop = chatPanelMessages.scrollHeight;
+  }
+
+  try {
+    const result = await askChiefOfStaff(job.prompt, {
+      suppressToasts: true,
+      onTextChunk: (chunk) => {
+        if (!streamingEl) return;
+        streamChunks.push(chunk);
+        if (!streamRenderPending) {
+          streamRenderPending = true;
+          requestAnimationFrame(flushCronStreamRender);
+        }
+      }
+    });
+    const responseText = String(result?.text || "").trim() || "No response generated.";
+
+    if (streamingEl && document.body.contains(streamingEl)) {
+      streamingEl.innerHTML = renderMarkdownToSafeHtml(responseText);
+      addSaveToDailyPageButton(streamingEl, `[Scheduled: ${job.name}] ${job.prompt}`, responseText);
+    }
+    appendChatPanelHistory("assistant", `[Scheduled: ${job.name}]\n${responseText}`);
+    updateChatPanelCostIndicator();
+    return null; // no error
+  } catch (error) {
+    const errorText = getUserFacingLlmErrorMessage(error, "Scheduled job");
+    if (streamingEl && document.body.contains(streamingEl)) {
+      streamingEl.innerHTML = renderMarkdownToSafeHtml(`Error: ${errorText}`);
+    }
+    appendChatPanelHistory("assistant", `[Scheduled: ${job.name}] Error: ${errorText}`);
+    showErrorToast("Scheduled job failed", `${job.name}: ${errorText}`);
+    return errorText;
+  }
+}
+
+async function cronTick() {
+  if (!cronIsLeader()) {
+    // Passive tab — try to claim if leader is stale
+    cronTryClaimLeadership();
+    if (!cronIsLeader()) return;
+  }
+
+  // Guard: don't fire if agent is already running
+  if (chatPanelIsSending || activeAgentAbortController) {
+    debugLog("[Chief cron] Skipping tick — agent loop in progress");
+    return;
+  }
+  if (unloadInProgress) return;
+
+  const now = new Date();
+  const jobs = loadCronJobs();
+  const dueJobs = jobs.filter(j => isCronJobDue(j, now) && !cronRunningJobs.has(j.id));
+
+  if (!dueJobs.length) return;
+
+  // Re-verify leadership right before executing (belt-and-suspenders for TOCTOU)
+  cronHeartbeat();
+  if (!cronIsLeader()) return;
+
+  debugLog("[Chief cron] Due jobs:", dueJobs.map(j => j.id));
+
+  // Fire sequentially to avoid concurrent agent loops
+  for (const job of dueJobs) {
+    if (unloadInProgress) break;
+    if (chatPanelIsSending || activeAgentAbortController) {
+      debugLog("[Chief cron] Deferring remaining due jobs — agent loop started during execution");
+      break;
+    }
+
+    cronRunningJobs.add(job.id);
+    try {
+      const errorText = await fireCronJob(job);
+
+      // Update lastRun and runCount (re-read to avoid stale writes)
+      const freshJobs = loadCronJobs();
+      const idx = freshJobs.findIndex(j => j.id === job.id);
+      if (idx >= 0) {
+        freshJobs[idx].lastRun = Date.now();
+        freshJobs[idx].runCount = (freshJobs[idx].runCount || 0) + 1;
+        freshJobs[idx].lastRunError = errorText || null;
+        // Disable one-shot jobs after execution
+        if (job.type === "once") freshJobs[idx].enabled = false;
+        saveCronJobs(freshJobs);
+      }
+    } finally {
+      cronRunningJobs.delete(job.id);
+    }
+  }
+}
+
+function startCronScheduler() {
+  if (cronSchedulerRunning) return;
+  cronSchedulerRunning = true;
+
+  cronTryClaimLeadership();
+
+  // Cross-tab leader detection: if another tab writes to our key, check immediately.
+  // This closes the TOCTOU window — even if two tabs briefly both claim leadership,
+  // the loser's storage event fires before the next tick executes any jobs.
+  cronStorageHandler = (event) => {
+    if (event.key !== CRON_LEADER_KEY || !cronLeaderTabId) return;
+    try {
+      const data = event.newValue ? JSON.parse(event.newValue) : null;
+      if (!data || data.tabId !== cronLeaderTabId) {
+        debugLog("[Chief cron] Leadership lost (storage event from another tab)");
+        cronLeaderTabId = null;
+      }
+    } catch { /* ignore */ }
+  };
+  window.addEventListener("storage", cronStorageHandler);
+
+  // Heartbeat: maintain leadership or try to claim if leader is stale
+  cronLeaderHeartbeatId = window.setInterval(() => {
+    if (cronIsLeader()) cronHeartbeat();
+    else cronTryClaimLeadership();
+  }, CRON_LEADER_HEARTBEAT_MS);
+
+  // Tick loop: check due jobs every 60 seconds
+  cronTickIntervalId = window.setInterval(() => cronTick(), CRON_TICK_INTERVAL_MS);
+
+  // Initial tick after a short delay (let extension finish loading, catch missed jobs)
+  cronInitialTickTimeoutId = window.setTimeout(() => {
+    cronInitialTickTimeoutId = null;
+    if (cronSchedulerRunning && !unloadInProgress) cronTick();
+  }, 5000);
+
+  debugLog("[Chief cron] Scheduler started, leader:", cronIsLeader());
+}
+
+function stopCronScheduler() {
+  cronSchedulerRunning = false;
+  if (cronInitialTickTimeoutId) {
+    window.clearTimeout(cronInitialTickTimeoutId);
+    cronInitialTickTimeoutId = null;
+  }
+  if (cronStorageHandler) {
+    window.removeEventListener("storage", cronStorageHandler);
+    cronStorageHandler = null;
+  }
+  if (cronTickIntervalId) {
+    window.clearInterval(cronTickIntervalId);
+    cronTickIntervalId = null;
+  }
+  if (cronLeaderHeartbeatId) {
+    window.clearInterval(cronLeaderHeartbeatId);
+    cronLeaderHeartbeatId = null;
+  }
+  cronReleaseLeadership();
+  cronRunningJobs.clear();
+  debugLog("[Chief cron] Scheduler stopped");
+}
+
+// ─── Cron Scheduler: COS Tools ─────────────────────────────────────────────────
+
+function getCronTools() {
+  return [
+    {
+      name: "cos_cron_list",
+      description: "List all scheduled cron jobs with their status, schedule, and next run time.",
+      input_schema: {
+        type: "object",
+        properties: {
+          enabled_only: { type: "boolean", description: "If true, only return enabled jobs." }
+        }
+      },
+      execute: async ({ enabled_only } = {}) => {
+        const jobs = loadCronJobs();
+        const filtered = enabled_only ? jobs.filter(j => j.enabled) : jobs;
+        return {
+          jobs: filtered.map(j => {
+            let nextRun = null;
+            try {
+              if (j.type === "cron" && j.expression && j.enabled) {
+                const cron = new Cron(j.expression, { timezone: j.timezone || getDefaultBrowserTimezone() });
+                const next = cron.nextRun();
+                if (next) nextRun = next.toISOString();
+              } else if (j.type === "interval" && j.enabled) {
+                const base = j.lastRun > 0 ? j.lastRun : j.createdAt;
+                nextRun = new Date(base + j.intervalMinutes * 60_000).toISOString();
+              } else if (j.type === "once" && j.runAt && j.lastRun === 0) {
+                nextRun = new Date(j.runAt).toISOString();
+              }
+            } catch { /* ignore */ }
+            return {
+              id: j.id,
+              name: j.name,
+              type: j.type,
+              expression: j.expression || undefined,
+              intervalMinutes: j.intervalMinutes || undefined,
+              timezone: j.timezone,
+              prompt: j.prompt,
+              enabled: j.enabled,
+              lastRun: j.lastRun ? new Date(j.lastRun).toISOString() : null,
+              lastRunError: j.lastRunError || null,
+              nextRun,
+              runCount: j.runCount
+            };
+          }),
+          total: filtered.length
+        };
+      }
+    },
+    {
+      name: "cos_cron_create",
+      description: "Create a new scheduled job. Types: 'cron' (5-field expression with timezone), 'interval' (every N minutes), 'once' (one-shot at a specific time). The job prompt is sent to Chief of Staff as if the user typed it.",
+      input_schema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Human-readable job name." },
+          type: { type: "string", enum: ["cron", "interval", "once"], description: "Schedule type." },
+          cron: { type: "string", description: "5-field cron expression (required for type 'cron'). E.g. '0 8 * * 1-5' for weekdays at 08:00." },
+          interval_minutes: { type: "number", description: "Interval in minutes (required for type 'interval')." },
+          run_at: { type: "string", description: "ISO 8601 datetime for one-shot execution (required for type 'once')." },
+          timezone: { type: "string", description: "IANA timezone. Default: auto-detected from browser." },
+          prompt: { type: "string", description: "The instruction to send to Chief of Staff when the job fires." }
+        },
+        required: ["name", "type", "prompt"]
+      },
+      execute: async ({ name, type, cron: cronExpr, interval_minutes, run_at, timezone, prompt } = {}) => {
+        if (!name || !type || !prompt) return { error: "name, type, and prompt are required." };
+
+        const jobs = loadCronJobs();
+        if (jobs.length >= CRON_MAX_JOBS) return { error: `Maximum ${CRON_MAX_JOBS} scheduled jobs reached. Delete unused jobs first.` };
+
+        // Validate cron expression
+        if (type === "cron") {
+          if (!cronExpr) return { error: "cron expression is required for type 'cron'." };
+          try { new Cron(cronExpr); } catch (e) {
+            return { error: `Invalid cron expression "${cronExpr}": ${e?.message || "parse error"}` };
+          }
+        }
+        if (type === "interval" && (!interval_minutes || interval_minutes < 1)) {
+          return { error: "interval_minutes must be at least 1." };
+        }
+        if (type === "once" && !run_at) {
+          return { error: "run_at (ISO 8601 datetime) is required for type 'once'." };
+        }
+
+        const baseId = generateCronJobId(name);
+        const id = ensureUniqueCronJobId(baseId, jobs);
+        const tz = timezone || getDefaultBrowserTimezone();
+
+        const newJob = normaliseCronJob({
+          id,
+          name,
+          type,
+          expression: cronExpr || "",
+          intervalMinutes: interval_minutes || 0,
+          timezone: tz,
+          prompt,
+          enabled: true,
+          createdAt: Date.now(),
+          lastRun: 0,
+          runCount: 0,
+          runAt: type === "once" && run_at ? new Date(run_at).getTime() : 0
+        });
+
+        if (!newJob) return { error: "Failed to create job — invalid parameters." };
+
+        jobs.push(newJob);
+        saveCronJobs(jobs);
+
+        // Compute next run for confirmation
+        let nextRun = null;
+        try {
+          if (type === "cron" && cronExpr) nextRun = new Cron(cronExpr, { timezone: tz }).nextRun()?.toISOString();
+          else if (type === "interval") nextRun = new Date(Date.now() + (interval_minutes || 60) * 60_000).toISOString();
+          else if (type === "once" && run_at) nextRun = new Date(run_at).toISOString();
+        } catch { /* ignore */ }
+
+        return { created: true, id: newJob.id, name: newJob.name, type: newJob.type, nextRun, timezone: tz };
+      }
+    },
+    {
+      name: "cos_cron_update",
+      description: "Update an existing scheduled job. Pass the job ID and any fields to change (name, cron, interval_minutes, timezone, prompt, enabled).",
+      input_schema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Job ID to update." },
+          name: { type: "string", description: "New display name." },
+          cron: { type: "string", description: "New cron expression (for cron-type jobs)." },
+          interval_minutes: { type: "number", description: "New interval in minutes (for interval-type jobs)." },
+          timezone: { type: "string", description: "New IANA timezone." },
+          prompt: { type: "string", description: "New prompt text." },
+          enabled: { type: "boolean", description: "Enable or disable the job." }
+        },
+        required: ["id"]
+      },
+      execute: async ({ id, name, cron: cronExpr, interval_minutes, timezone, prompt, enabled } = {}) => {
+        if (!id) return { error: "id is required." };
+        const jobs = loadCronJobs();
+        const idx = jobs.findIndex(j => j.id === id);
+        if (idx < 0) return { error: `Job not found: ${id}` };
+
+        const job = { ...jobs[idx] };
+        if (name !== undefined) job.name = String(name).trim().slice(0, 100);
+        if (cronExpr !== undefined) {
+          try { new Cron(cronExpr); } catch (e) {
+            return { error: `Invalid cron expression "${cronExpr}": ${e?.message || "parse error"}` };
+          }
+          job.expression = cronExpr;
+        }
+        if (interval_minutes !== undefined) job.intervalMinutes = Math.max(1, Math.round(interval_minutes));
+        if (timezone !== undefined) job.timezone = String(timezone).trim();
+        if (prompt !== undefined) job.prompt = String(prompt).trim().slice(0, 2000);
+        if (enabled !== undefined) job.enabled = Boolean(enabled);
+
+        jobs[idx] = normaliseCronJob(job);
+        saveCronJobs(jobs);
+
+        return { updated: true, id: jobs[idx].id, name: jobs[idx].name, enabled: jobs[idx].enabled };
+      }
+    },
+    {
+      name: "cos_cron_delete",
+      description: "Delete a scheduled job by ID.",
+      input_schema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Job ID to delete." }
+        },
+        required: ["id"]
+      },
+      execute: async ({ id } = {}) => {
+        if (!id) return { error: "id is required." };
+        const jobs = loadCronJobs();
+        const idx = jobs.findIndex(j => j.id === id);
+        if (idx < 0) return { error: `Job not found: ${id}` };
+        const removed = jobs.splice(idx, 1)[0];
+        saveCronJobs(jobs);
+        return { deleted: true, id: removed.id, name: removed.name };
+      }
+    }
+  ];
+}
+
+// ─── Cron Scheduler: System Prompt Section ─────────────────────────────────────
+
+function buildCronJobsPromptSection() {
+  const jobs = loadCronJobs();
+  if (!jobs.length) return "";
+
+  const enabledJobs = jobs.filter(j => j.enabled);
+  if (!enabledJobs.length) {
+    return `## Scheduled Jobs\n\nAll ${jobs.length} scheduled job(s) are currently disabled. Use cos_cron_update to re-enable or cos_cron_delete to remove them.`;
+  }
+
+  const lines = enabledJobs.map(j => {
+    let schedule = "";
+    if (j.type === "cron") schedule = `cron: ${j.expression} (${j.timezone})`;
+    else if (j.type === "interval") schedule = `every ${j.intervalMinutes} min`;
+    else if (j.type === "once") schedule = `once at ${j.runAt ? new Date(j.runAt).toISOString() : "TBD"}`;
+
+    let nextRun = "";
+    try {
+      if (j.type === "cron" && j.expression) {
+        const next = new Cron(j.expression, { timezone: j.timezone || getDefaultBrowserTimezone() }).nextRun();
+        if (next) nextRun = ` | next: ${next.toLocaleString("en-GB")}`;
+      }
+    } catch { /* ignore */ }
+
+    const lastRunStr = j.lastRun > 0 ? ` | last: ${new Date(j.lastRun).toLocaleString("en-GB")}` : "";
+    return `- **${j.name}** (${j.id}) — ${schedule}${nextRun}${lastRunStr} — "${j.prompt.slice(0, 80)}"`;
+  });
+
+  return `## Scheduled Jobs
+
+You have access to cron job tools (cos_cron_list, cos_cron_create, cos_cron_update, cos_cron_delete).
+The user currently has ${enabledJobs.length} active scheduled job(s):
+${lines.join("\n")}`;
+}
+
 async function getAvailableToolSchemas() {
   const metaTools = getComposioMetaToolsForLlm();
   const registry = getToolkitSchemaRegistry();
@@ -4259,7 +5531,7 @@ async function getAvailableToolSchemas() {
     }
   }
 
-  const tools = [...adjustedMetaTools, ...getRoamNativeTools(), ...getBetterTasksTools(), ...getCosIntegrationTools(), ...getExternalExtensionTools()];
+  const tools = [...adjustedMetaTools, ...getRoamNativeTools(), ...getBetterTasksTools(), ...getCosIntegrationTools(), ...getCronTools(), ...getExternalExtensionTools()];
   return tools;
 }
 
@@ -4326,6 +5598,11 @@ function detectPromptSections(userMessage) {
     sections.add("skills");
   }
 
+  // Cron / scheduled jobs
+  if (/\b(cron|schedule[ds]?|recurring|every\s+\d+\s+(min|hour)|hourly|timer|remind\s+me\s+in)\b/.test(text)) {
+    sections.add("cron");
+  }
+
   // If nothing specific detected, check if this is a follow-up to a previous query
   if (sections.size <= 1) {
     if (lastPromptSections && lastPromptSections.size > 1) {
@@ -4341,6 +5618,7 @@ function detectPromptSections(userMessage) {
   if (sections.size <= 1) {
     sections.add("composio");
     sections.add("bt_schema");
+    sections.add("cron");
     // Include all toolkit schemas
     const registry = getToolkitSchemaRegistry();
     for (const tk of Object.keys(registry.toolkits || {})) {
@@ -4418,8 +5696,17 @@ No skills page found yet. Create [[Chief of Staff/Skills]] with one top-level bl
 
   const btSchema = sections.has("bt_schema") ? buildBetterTasksPromptSection() : "";
 
+  const cronSection = sections.has("cron") ? buildCronJobsPromptSection() : "";
+
   const coreInstructions = `You are Chief of Staff, an AI assistant embedded in Roam Research.
-You orchestrate work across Composio tools and the user's Roam graph.
+You are a productivity orchestrator with these capabilities:
+- **Extension Tools**: You automatically discover and can call tools from 14+ Roam extensions (workspaces, focus mode, deep research, export, etc.)
+- **Composio**: External service integration (Gmail, Calendar, Todoist, Slack, GitHub, etc.)
+- **Better Tasks**: Full task management — search, create, modify tasks with attributes, projects, due dates
+- **Cron Jobs**: You can schedule recurring actions (briefings, sweeps, reminders) — use cos_cron_create even if no jobs exist yet
+- **Skills**: Reusable instruction sets stored in Roam that you can execute and iteratively improve
+- **Memory**: Persistent context across sessions stored in Roam pages
+- **Roam Graph**: Full read/write access to the user's knowledge base
 
 Use available tools when needed. Be concise and practical.
 Ask for confirmation before actions that send, modify, or delete external data.
@@ -4442,6 +5729,12 @@ For Roam:
 - Use roam_open_page to navigate the user to a page in Roam's main window
 - When referencing Roam pages in your response, use [[Page Title]] syntax — these become clickable links in the chat panel
 - Use roam_create_block only when the user asks to save/write into Roam
+- Use roam_create_blocks with batches param to write to multiple locations in one call
+- Use roam_update_block to edit existing block text by UID
+- Use roam_link_mention to atomically wrap an unlinked page mention in [[...]] within a block — use the block uid and title from roam_link_suggestions results. NEVER use roam_update_block for linking; always use roam_link_mention instead
+- Use roam_move_block to move a block under a new parent by UID
+- Use roam_get_block_children to read a block and its full child tree by UID
+- Use roam_get_block_context to understand where a block sits — returns the block, its parent chain up to the page, and its siblings
 - Use roam_delete_block to delete blocks or Better Tasks by UID. The BT search results include the task UID — use that UID directly for deletion.
 
 Summarise results clearly for the user.
@@ -4458,6 +5751,7 @@ For Memory:
 - Use the inbox memory page for quick note/idea/capture items from chat.
 - Also use cos_update_memory for genuinely useful preference, project, decision, or lessons-learned changes.
 - Do not write memory on every interaction.
+- When you encounter a limitation that prevents you from completing a task efficiently — a missing tool, a capability gap, or excessive workarounds — log a brief note to [[Chief of Staff/Improvement Requests]] using cos_update_memory (page: "improvements"). Include: what you tried, what was missing, and the workaround used (if any). Rules: only log genuine friction encountered during actual tasks, not speculative wishes; check existing entries first to avoid duplicates; keep entries to one or two lines.
 
 Always use British English spelling and conventions (e.g. organise, prioritise, colour, behaviour, centre, recognised).
 `;
@@ -4505,7 +5799,7 @@ Always use British English spelling and conventions (e.g. organise, prioritise, 
     debugLog("[Chief flow] Extension tools summary failed:", e?.message);
   }
 
-  const parts = [coreInstructions, memorySection, projectContext, extToolsSummary, skillsSection, schemaSection, btSchema].filter(Boolean);
+  const parts = [coreInstructions, memorySection, projectContext, extToolsSummary, skillsSection, cronSection, schemaSection, btSchema].filter(Boolean);
   const fullPrompt = parts.join("\n\n");
 
   debugLog("[Chief flow] System prompt breakdown:", {
@@ -4516,6 +5810,7 @@ Always use British English spelling and conventions (e.g. organise, prioritise, 
     skills: skillsSection.length,
     toolkitSchemas: schemaSection.length,
     btSchema: btSchema.length,
+    cronSection: cronSection.length,
     total: fullPrompt.length,
     sectionsIncluded: [...sections].join(", ")
   });
@@ -5395,7 +6690,8 @@ async function runDeterministicMemorySave(intent) {
     skills: "Chief of Staff/Skills",
     projects: "Chief of Staff/Projects",
     decisions: "Chief of Staff/Decisions",
-    lessons: "Chief of Staff/Lessons Learned"
+    lessons: "Chief of Staff/Lessons Learned",
+    improvements: "Chief of Staff/Improvement Requests"
   };
   const label = pageNameByKey[pageKey] || String(result?.page || "Chief of Staff/Memory");
   return `Saved to [[${label}]]${result?.uid ? ` (uid: ${result.uid})` : ""}.`;
@@ -5557,18 +6853,21 @@ function isPotentiallyMutatingTool(toolName, args) {
     return false;
   }
 
-  // ROAM_DELETE_BLOCK, ROAM_UPDATE_BLOCK, and ROAM_BT_MODIFY_TASK are destructive
-  // and MUST require approval. Only skip approval for low-risk creation operations.
+  // Destructive Roam/BT operations MUST require approval.
+  // Only skip approval for low-risk creation operations.
   const roamLowRiskCreationTools = new Set([
     "ROAM_CREATE_BLOCK",
-    "ROAM_CREATE_BLOCKS"
+    "ROAM_CREATE_BLOCKS",
+    "ROAM_BT_CREATE_TASK",
+    "ROAM_BT_CREATE_TASK_FROM_BLOCK"
   ]);
   if (roamLowRiskCreationTools.has(name)) {
     return false;
   }
 
   // Force approval for destructive Roam operations
-  if (name === "ROAM_DELETE_BLOCK" || name === "ROAM_UPDATE_BLOCK" || name === "ROAM_BT_MODIFY_TASK") {
+  if (name === "ROAM_DELETE_BLOCK" || name === "ROAM_UPDATE_BLOCK" || name === "ROAM_LINK_MENTION" || name === "ROAM_MOVE_BLOCK" ||
+      name === "ROAM_BT_MODIFY_TASK" || name === "ROAM_BT_BULK_MODIFY" || name === "ROAM_BT_BULK_SNOOZE") {
     return true;
   }
 
@@ -5704,6 +7003,7 @@ async function executeToolCall(toolName, args) {
   const roamTool = getRoamNativeTools().find((tool) => tool.name === toolName)
     || getBetterTasksTools().find((tool) => tool.name === toolName)
     || getCosIntegrationTools().find((tool) => tool.name === toolName)
+    || getCronTools().find((tool) => tool.name === toolName)
     || getExternalExtensionTools().find((tool) => tool.name === toolName)
     || getComposioMetaToolsForLlm().find((tool) => tool.name === toolName);
   if (roamTool?.execute) {
@@ -5858,6 +7158,7 @@ function isExternalDataToolCall(toolName) {
     name.startsWith("COMPOSIO_") ||
     name.startsWith("COS_EMAIL_") ||
     name.startsWith("COS_CALENDAR_") ||
+    name.startsWith("COS_CRON_") ||
     name === "COS_UPDATE_MEMORY" ||
     name === "COS_GET_SKILL" ||
     name === "ROAM_SEARCH" ||
@@ -6087,7 +7388,7 @@ async function callAnthropic(apiKey, model, system, messages, tools, options = {
       },
       body: JSON.stringify({
         model,
-        max_tokens: ANTHROPIC_MAX_OUTPUT_TOKENS,
+        max_tokens: options.maxOutputTokens || ANTHROPIC_MAX_OUTPUT_TOKENS,
         system,
         messages,
         tools: tools.map((tool) => ({
@@ -6122,7 +7423,7 @@ async function callOpenAI(apiKey, model, system, messages, tools, options = {}) 
             parameters: tool.input_schema
           }
         })),
-        max_tokens: OPENAI_MAX_OUTPUT_TOKENS
+        max_tokens: options.maxOutputTokens || OPENAI_MAX_OUTPUT_TOKENS
       })
     },
     "OpenAI",
@@ -6154,7 +7455,7 @@ async function callOpenAIStreaming(apiKey, model, system, messages, tools, onTex
           parameters: tool.input_schema
         }
       })),
-      max_tokens: OPENAI_MAX_OUTPUT_TOKENS,
+      max_tokens: options.maxOutputTokens || OPENAI_MAX_OUTPUT_TOKENS,
       stream: true,
       stream_options: { include_usage: true }
     })
@@ -6172,65 +7473,69 @@ async function callOpenAIStreaming(apiKey, model, system, messages, tools, onTex
   const toolCallDeltas = {}; // index -> { id, name, arguments }
   let usage = null;
 
-  while (true) {
-    let chunkTimeoutId;
-    const chunkTimeout = new Promise((_, reject) => {
-      chunkTimeoutId = setTimeout(() => reject(new Error("OpenAI streaming chunk timeout")), LLM_STREAM_CHUNK_TIMEOUT_MS);
-    });
-    let done, value;
-    try {
-      ({ done, value } = await Promise.race([reader.read(), chunkTimeout]));
-    } finally {
-      clearTimeout(chunkTimeoutId);
-    }
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || ""; // keep incomplete line in buffer
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed === "data: [DONE]") continue;
-      if (!trimmed.startsWith("data: ")) continue;
-
-      let parsed;
-      try { parsed = JSON.parse(trimmed.slice(6)); } catch { continue; }
-
-      // Usage comes in the final chunk
-      if (parsed.usage) {
-        usage = parsed.usage;
+  try {
+    while (true) {
+      let chunkTimeoutId;
+      const chunkTimeout = new Promise((_, reject) => {
+        chunkTimeoutId = setTimeout(() => reject(new Error("OpenAI streaming chunk timeout")), LLM_STREAM_CHUNK_TIMEOUT_MS);
+      });
+      let done, value;
+      try {
+        ({ done, value } = await Promise.race([reader.read(), chunkTimeout]));
+      } finally {
+        clearTimeout(chunkTimeoutId);
       }
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
 
-      const delta = parsed.choices?.[0]?.delta;
-      if (!delta) continue;
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || ""; // keep incomplete line in buffer
 
-      // Text content
-      if (delta.content) {
-        textContent += delta.content;
-        if (onTextChunk) onTextChunk(delta.content);
-      }
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed === "data: [DONE]") continue;
+        if (!trimmed.startsWith("data: ")) continue;
 
-      // Tool call deltas — accumulate arguments
-      if (Array.isArray(delta.tool_calls)) {
-        for (const tc of delta.tool_calls) {
-          const idx = tc.index ?? 0;
-          if (!toolCallDeltas[idx]) {
-            toolCallDeltas[idx] = { id: tc.id || "", name: tc.function?.name || "", arguments: "" };
+        let parsed;
+        try { parsed = JSON.parse(trimmed.slice(6)); } catch { continue; }
+
+        // Usage comes in the final chunk
+        if (parsed.usage) {
+          usage = parsed.usage;
+        }
+
+        const delta = parsed.choices?.[0]?.delta;
+        if (!delta) continue;
+
+        // Text content
+        if (delta.content) {
+          textContent += delta.content;
+          if (onTextChunk) onTextChunk(delta.content);
+        }
+
+        // Tool call deltas — accumulate arguments
+        if (Array.isArray(delta.tool_calls)) {
+          for (const tc of delta.tool_calls) {
+            const idx = tc.index ?? 0;
+            if (!toolCallDeltas[idx]) {
+              toolCallDeltas[idx] = { id: tc.id || "", name: tc.function?.name || "", arguments: "" };
+            }
+            if (tc.id) toolCallDeltas[idx].id = tc.id;
+            if (tc.function?.name) toolCallDeltas[idx].name = tc.function.name;
+            if (tc.function?.arguments) toolCallDeltas[idx].arguments += tc.function.arguments;
           }
-          if (tc.id) toolCallDeltas[idx].id = tc.id;
-          if (tc.function?.name) toolCallDeltas[idx].name = tc.function.name;
-          if (tc.function?.arguments) toolCallDeltas[idx].arguments += tc.function.arguments;
         }
       }
     }
+  } finally {
+    try { reader.cancel(); } catch { /* ignore */ }
   }
 
   const toolCalls = Object.values(toolCallDeltas)
     .filter((tc) => tc.name)
     .map((tc) => {
       let args = {};
-      try { args = JSON.parse(tc.arguments); } catch { /* ignore */ }
+      try { args = JSON.parse(tc.arguments); } catch (e) { debugLog("[Chief flow] Tool argument JSON parse failed:", tc.name, e?.message); }
       return { id: tc.id, name: tc.name, arguments: args };
     });
 
@@ -6259,6 +7564,7 @@ async function runAgentLoop(userMessage, options = {}) {
   const apiKey = getApiKeyForProvider(extensionAPI, provider);
   const baseModel = getLlmModel(extensionAPI, provider);
   const model = powerMode ? getPowerModel(provider) : baseModel;
+  const maxOutputTokens = powerMode ? POWER_MAX_OUTPUT_TOKENS : undefined;
   if (!apiKey) {
     throw new Error("No LLM API key configured. Set it in Chief of Staff settings.");
   }
@@ -6351,7 +7657,7 @@ async function runAgentLoop(userMessage, options = {}) {
       let response, toolCalls, streamedText;
 
       if (useStreaming) {
-        const streamResult = await callOpenAIStreaming(apiKey, model, system, messages, tools, onTextChunk, { signal: activeAgentAbortController?.signal });
+        const streamResult = await callOpenAIStreaming(apiKey, model, system, messages, tools, onTextChunk, { signal: activeAgentAbortController?.signal, maxOutputTokens });
         streamedText = streamResult.textContent || "";
         toolCalls = streamResult.toolCalls || [];
         const usage = streamResult.usage;
@@ -6391,7 +7697,7 @@ async function runAgentLoop(userMessage, options = {}) {
           usage: streamResult.usage
         };
       } else {
-        response = await callLlm(provider, apiKey, model, system, messages, tools, { signal: activeAgentAbortController?.signal });
+        response = await callLlm(provider, apiKey, model, system, messages, tools, { signal: activeAgentAbortController?.signal, maxOutputTokens });
         const usage = response?.usage;
         if (usage) {
           const inputTokens = usage.prompt_tokens || usage.input_tokens || 0;
@@ -6777,6 +8083,16 @@ function buildSettingsConfig(extensionAPI) {
         }
       },
       {
+        id: SETTINGS_KEYS.userName,
+        name: "Your Name",
+        description: "How Chief of Staff addresses you.",
+        action: {
+          type: "input",
+          value: getSettingString(extensionAPI, SETTINGS_KEYS.userName, ""),
+          placeholder: "Your name"
+        }
+      },
+      {
         id: SETTINGS_KEYS.assistantName,
         name: "Assistant Name",
         description: "Display name used in chat UI and assistant toasts.",
@@ -6932,7 +8248,9 @@ async function connectComposio(extensionAPI, options = {}) {
       if (!suppressConnectedToast) showConnectedToast();
       await reconcileInstalledToolsWithComposio(extensionAPI);
       // Discover schemas for all connected toolkits in background
-      discoverAllConnectedToolkitSchemas(extensionAPI).catch(() => { });
+      discoverAllConnectedToolkitSchemas(extensionAPI).catch(e => {
+        debugLog("[Chief flow] Post-connect schema discovery failed:", e?.message);
+      });
 
       return mcpClient;
     } catch (error) {
@@ -7087,7 +8405,7 @@ function startToolAuthPolling(extensionAPI, toolSlug) {
       showInfoToast("Authentication complete", `${key} is now connected and ready.`);
       clearAuthPollForSlug(key);
       // Discover toolkit schemas in background
-      discoverToolkitSchema(inferToolkitFromSlug(key), { force: true }).catch(() => { });
+      discoverToolkitSchema(inferToolkitFromSlug(key), { force: true }).catch(e => { debugLog("[Chief flow] Post-auth schema discovery failed:", key, e?.message); });
     } catch (error) {
       console.error("[Chief of Staff] Auth poll error:", { toolSlug: key, error });
     } finally {
@@ -7183,7 +8501,7 @@ async function installComposioTool(extensionAPI, requestedSlug) {
     showConnectedToast();
     showInfoToast("Tool installed", `${installSlug} is now available.`);
     // Discover toolkit schemas in background (non-blocking)
-    discoverToolkitSchema(inferToolkitFromSlug(installSlug)).catch(() => { });
+    discoverToolkitSchema(inferToolkitFromSlug(installSlug)).catch(e => { debugLog("[Chief flow] Post-install schema discovery failed:", installSlug, e?.message); });
   } catch (error) {
     upsertInstalledTool(extensionAPI, {
       slug: installSlug,
@@ -7408,6 +8726,7 @@ async function deregisterComposioTool(extensionAPI, requestedSlug) {
     return;
   }
 
+  clearAuthPollForSlug(toolSlug);
   invalidateInstalledToolsFetchCache();
   const state = getToolsConfigState(extensionAPI);
   const nextInstalledTools = state.installedTools.filter((tool) => tool.slug !== toolSlug);
@@ -7683,7 +9002,9 @@ async function tryRunDeterministicAskIntent(prompt, context = {}) {
 
   const skillIntent = parseSkillInvocationIntent(prompt);
   // Also detect natural-language briefing requests and route to the Daily Briefing skill
-  const briefingIntent = !skillIntent && /\b(daily\s*)?briefing\b/i.test(prompt)
+  // Skip this shortcut if the prompt is clearly about scheduling/cron (let agent loop handle it)
+  const isCronIntent = /\b(cron|schedule[ds]?|recurring|every\s+\d+\s+(min|hour)|set up a?\s*(job|timer|remind))\b/i.test(prompt);
+  const briefingIntent = !skillIntent && !isCronIntent && /\b(daily\s*)?briefing\b/i.test(prompt)
     ? { skillName: "Daily Briefing", targetText: "", originalPrompt: prompt }
     : null;
   const resolvedSkillIntent = skillIntent || briefingIntent;
@@ -7716,10 +9037,17 @@ async function tryRunDeterministicAskIntent(prompt, context = {}) {
 
 async function askChiefOfStaff(userMessage, options = {}) {
   const { offerWriteToDailyPage = false, suppressToasts = false, onTextChunk = null } = options;
-  const prompt = String(userMessage || "").trim();
+  const rawPrompt = String(userMessage || "").trim();
+  if (!rawPrompt) return;
+
+  // Detect /power flag — can appear at start or end of message
+  const powerFlag = /(?:^|\s)\/power(?:\s|$)/i.test(rawPrompt);
+  const prompt = powerFlag ? rawPrompt.replace(/(?:^|\s)\/power(?:\s|$)/i, " ").trim() : rawPrompt;
   if (!prompt) return;
+
   debugLog("[Chief flow] askChiefOfStaff start:", {
     promptPreview: prompt.slice(0, 160),
+    powerMode: powerFlag,
     offerWriteToDailyPage,
     suppressToasts
   });
@@ -7746,8 +9074,10 @@ async function askChiefOfStaff(userMessage, options = {}) {
     hasContext ? "Using recent conversation context." : "Starting fresh context.",
     suppressToasts
   );
+  if (powerFlag) showInfoToastIfAllowed("Power Mode", "Using power model for this request.", suppressToasts);
   showInfoToastIfAllowed("Thinking...", prompt.slice(0, 72), suppressToasts);
   const result = await runAgentLoop(prompt, {
+    powerMode: powerFlag,
     onToolCall: (name) => {
       showInfoToastIfAllowed("Using tool", name, suppressToasts);
     },
@@ -7790,6 +9120,25 @@ async function promptAskChiefOfStaff() {
   }
 }
 
+function buildOnboardingDeps(extensionAPI) {
+  return {
+    showInfoToast,
+    showErrorToast,
+    runBootstrapMemoryPages,
+    bootstrapSkillsPage,
+    toggleChatPanel,
+    appendChatPanelMessage,
+    appendChatPanelHistory,
+    chatPanelIsOpen: () => chatPanelIsOpen,
+    hasBetterTasksAPI,
+    getAssistantDisplayName,
+    getSettingString,
+    registerMemoryPullWatches,
+    iziToast,
+    SETTINGS_KEYS,
+  };
+}
+
 function registerCommandPaletteCommands(extensionAPI) {
   if (commandPaletteRegistered) return;
   if (!extensionAPI?.ui?.commandPalette?.addCommand) return;
@@ -7801,6 +9150,10 @@ function registerCommandPaletteCommands(extensionAPI) {
   extensionAPI.ui.commandPalette.addCommand({
     label: "Chief of Staff: Toggle Chat Panel",
     callback: () => toggleChatPanel()
+  });
+  extensionAPI.ui.commandPalette.addCommand({
+    label: "Chief of Staff: Run Onboarding",
+    callback: () => launchOnboarding(extensionAPI, buildOnboardingDeps(extensionAPI))
   });
   extensionAPI.ui.commandPalette.addCommand({
     label: "Chief of Staff: Bootstrap Memory Pages",
@@ -7925,6 +9278,26 @@ function registerCommandPaletteCommands(extensionAPI) {
     }
   });
 
+  extensionAPI.ui.commandPalette.addCommand({
+    label: "Chief of Staff: Show Scheduled Jobs",
+    callback: () => {
+      const jobs = loadCronJobs();
+      if (!jobs.length) {
+        showInfoToast("Scheduled Jobs", "No jobs configured. Ask the assistant to create one.");
+        return;
+      }
+      const summary = jobs.map(j => {
+        const status = j.enabled ? "enabled" : "disabled";
+        const schedule = j.type === "cron" ? j.expression
+          : j.type === "interval" ? `every ${j.intervalMinutes}m`
+          : "once";
+        return `${j.name} (${status}) — ${schedule}`;
+      }).join("\n");
+      console.info("[Chief of Staff] Scheduled jobs:", jobs);
+      showInfoToast("Scheduled Jobs", `${jobs.length} job(s). See console for details.\n${summary}`);
+    }
+  });
+
   commandPaletteRegistered = true;
 }
 
@@ -8032,6 +9405,7 @@ function onload({ extensionAPI }) {
       const timeoutId = window.setTimeout(() => {
         const timeoutIndex = startupAuthPollTimeoutIds.indexOf(timeoutId);
         if (timeoutIndex >= 0) startupAuthPollTimeoutIds.splice(timeoutIndex, 1);
+        if (unloadInProgress || extensionAPIRef === null) return;
         startToolAuthPolling(extensionAPI, tool.slug);
       }, delayMs);
       startupAuthPollTimeoutIds.push(timeoutId);
@@ -8044,21 +9418,37 @@ function onload({ extensionAPI }) {
   // Register live watches on memory/skills pages for auto-invalidation
   try { registerMemoryPullWatches(); } catch (e) {
     console.warn("[Chief of Staff] Pull watch setup failed:", e?.message || e);
+    showInfoToast("Chief of Staff", "Memory live-sync unavailable — changes may take a few minutes to appear.");
   }
   setupExtensionBroadcastListeners();
+  startCronScheduler();
   // Restore chat panel if it was open before reload
   try {
     if (localStorage.getItem("chief-of-staff-panel-open") === "1") {
       setChatPanelOpen(true);
     }
   } catch { /* ignore */ }
+  // First-run onboarding
+  setTimeout(() => {
+    if (unloadInProgress || extensionAPIRef === null) return;
+    const hasCompleted = extensionAPI.settings.get(SETTINGS_KEYS.onboardingComplete);
+    const hasAnthropicKey = getSettingString(extensionAPI, SETTINGS_KEYS.anthropicApiKey, "");
+    const hasOpenaiKey = getSettingString(extensionAPI, SETTINGS_KEYS.openaiApiKey, "");
+    const hasLegacyKey = getSettingString(extensionAPI, SETTINGS_KEYS.llmApiKey, "");
+    const hasAnyKey = hasAnthropicKey || hasOpenaiKey || hasLegacyKey;
+    if (!hasCompleted && !hasAnyKey) {
+      launchOnboarding(extensionAPI, buildOnboardingDeps(extensionAPI));
+    }
+  }, 1500);
 }
 
 function onunload() {
   if (extensionAPIRef === null) return;
   unloadInProgress = true;
   debugLog("Chief of Staff unloaded");
+  teardownOnboarding();
   teardownExtensionBroadcastListeners();
+  stopCronScheduler();
   // Abort any in-flight LLM requests immediately
   if (activeAgentAbortController) {
     activeAgentAbortController.abort();
@@ -8071,12 +9461,14 @@ function onunload() {
   flushPersistChatPanelHistory(api);
   activeToastKeyboards.forEach((kb) => kb.detach());
   activeToastKeyboards.clear();
+  approvedToolsThisSession.clear();
   destroyChatPanel();
   clearConversationContext();
   clearStartupAuthPollTimers();
   clearComposioAutoConnectTimer();
   clearAllAuthPolls();
   invalidateInstalledToolsFetchCache();
+  latestEmailActionCache = { updatedAt: 0, messages: [], unreadEstimate: null, requestedCount: 0, returnedCount: 0, query: "" };
   roamNativeToolsCache = null;
   toolkitSchemaRegistryCache = null;
   if (connectInFlightPromise) {
@@ -8089,6 +9481,9 @@ function onunload() {
   }
   clearChiefNamespaceGlobals();
   teardownPullWatches();
+  lastAgentRunTrace = null;
+  lastPromptSections = null;
+  lastKnownPageContext = null;
   commandPaletteRegistered = false;
 }
 

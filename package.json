@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
+    "croner": "^9.0.0",
     "izitoast": "^1.4.0"
   }
 }
