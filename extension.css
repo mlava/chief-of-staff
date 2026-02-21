@@ -9,14 +9,14 @@
   bottom: 20px;
   width: 360px;
   height: 80%;
-  background: rgba(15, 23, 42, 0.95);
-  border: 1px solid rgba(148, 163, 184, 0.4);
+  background: #ffffff;
+  border: 1px solid rgba(203, 213, 225, 0.5);
   border-radius: 10px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
   z-index: 16;
   display: flex;
   flex-direction: column;
-  color: #e2e8f0;
+  color: #1e293b;
   font-family: Inter, system-ui, -apple-system, sans-serif;
   overflow: hidden;
 }
@@ -27,7 +27,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 10px 12px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.25);
+  border-bottom: 1px solid rgba(203, 213, 225, 0.4);
   cursor: move;
 }
 
@@ -39,7 +39,7 @@
 [data-chief-chat-cost] {
   font-size: 10px;
   font-weight: 400;
-  color: rgba(148, 163, 184, 0.7);
+  color: rgba(100, 116, 139, 0.7);
   margin-left: 8px;
 }
 
@@ -82,24 +82,24 @@
 
 /* User bubble */
 .chief-msg--user {
-  background: rgba(59, 130, 246, 0.2);
-  border: 1px solid rgba(59, 130, 246, 0.4);
+  background: rgba(59, 130, 246, 0.07);
+  border: 1px solid rgba(59, 130, 246, 0.18);
 }
 
 /* Assistant bubble */
 .chief-msg--assistant {
-  background: rgba(148, 163, 184, 0.16);
-  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: rgba(100, 116, 139, 0.06);
+  border: 1px solid rgba(100, 116, 139, 0.14);
 }
 
 /* Scheduled/cron job message bubble */
 .chief-msg--scheduled {
-  border-left: 3px solid rgba(245, 158, 11, 0.6);
-  background: rgba(245, 158, 11, 0.08);
+  border-left: 3px solid rgba(217, 119, 6, 0.5);
+  background: rgba(245, 158, 11, 0.06);
 }
 .chief-msg-scheduled-header {
   font-size: 0.75rem;
-  color: rgba(245, 158, 11, 0.9);
+  color: rgba(180, 83, 9, 0.9);
   margin-bottom: 4px;
   font-weight: 600;
 }
@@ -126,7 +126,7 @@
 
 .chief-msg-save-btn:hover {
   opacity: 1 !important;
-  background: rgba(148, 163, 184, 0.2);
+  background: rgba(100, 116, 139, 0.1);
 }
 
 .chief-msg-save-btn--done {
@@ -134,9 +134,26 @@
   cursor: default;
 }
 
+/* Thinking indicator */
+.chief-msg-thinking {
+  color: rgba(100, 116, 139, 0.6);
+  font-size: 0.85rem;
+  font-style: italic;
+}
+.chief-msg-thinking::after {
+  content: "";
+  animation: chief-thinking-dots 1.5s steps(4, end) infinite;
+}
+@keyframes chief-thinking-dots {
+  0%   { content: ""; }
+  25%  { content: "."; }
+  50%  { content: ".."; }
+  75%  { content: "..."; }
+}
+
 /* --- Composer Bar --- */
 .chief-panel-composer {
-  border-top: 1px solid rgba(148, 163, 184, 0.25);
+  border-top: 1px solid rgba(203, 213, 225, 0.4);
   padding: 10px;
   display: flex;
   gap: 8px;
@@ -147,9 +164,9 @@
   flex: 1;
   line-height: 21px;
   resize: none;
-  background: rgba(15, 23, 42, 0.85);
-  color: #e2e8f0;
-  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: #f8fafc;
+  color: #1e293b;
+  border: 1px solid rgba(203, 213, 225, 0.6);
   border-radius: 6px;
   padding: 8px;
 }
@@ -163,8 +180,8 @@
 
 /* --- Markdown: Inline Code --- */
 .chief-inline-code {
-  background: rgba(148, 163, 184, 0.2);
-  color: #e2e8f0;
+  background: rgba(100, 116, 139, 0.1);
+  color: #334155;
   padding: 1px 4px;
   border-radius: 4px;
 }
@@ -172,22 +189,35 @@
 /* --- Markdown: Code Blocks --- */
 .chief-code-block {
   overflow: auto;
-  background: rgba(15, 23, 42, 0.45);
-  color: #e2e8f0;
+  background: #f1f5f9;
+  color: #334155;
   padding: 8px;
   border-radius: 6px;
 }
 
 .chief-code-block code {
   background: none;
-  color: #e2e8f0;
+  color: #334155;
   padding: 0;
+}
+
+/* --- Markdown: Horizontal Rule --- */
+.chief-hr {
+  border: none;
+  border-top: 1px solid rgba(203, 213, 225, 0.5);
+  margin: 8px 0;
 }
 
 /* --- Markdown: Headings --- */
 .chief-heading {
-  margin: 6px 0 4px;
+  margin: 14px 0 6px;
 }
+.chief-heading:first-child {
+  margin-top: 0;
+}
+h4.chief-heading { font-size: 0.92em; }
+h5.chief-heading { font-size: 0.85em; }
+h6.chief-heading { font-size: 0.8em; }
 
 /* --- Markdown: Lists --- */
 .chief-list {
@@ -207,27 +237,27 @@
 .chief-blockquote {
   margin: 6px 0;
   padding: 4px 12px;
-  border-left: 3px solid rgba(92, 124, 250, 0.5);
-  color: rgba(255, 255, 255, 0.8);
+  border-left: 3px solid rgba(79, 70, 229, 0.4);
+  color: rgba(30, 41, 59, 0.75);
   font-style: italic;
 }
 
 /* --- Markdown: Page References --- */
 .chief-page-ref,
 .chief-block-ref {
-  color: #5c7cfa;
+  color: #4c6ef5;
   text-decoration: none;
   cursor: pointer;
 }
 
 /* --- Markdown: External Links --- */
 .chief-external-link {
-  color: #5c7cfa;
+  color: #4c6ef5;
   text-decoration: underline;
   word-break: break-all;
 }
 
-/* --- Scrollbar (dark theme) --- */
+/* --- Scrollbar (light theme) --- */
 [data-chief-chat-messages]::-webkit-scrollbar {
   width: 6px;
 }
@@ -237,12 +267,12 @@
 }
 
 [data-chief-chat-messages]::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.3);
+  background: rgba(148, 163, 184, 0.25);
   border-radius: 3px;
 }
 
 [data-chief-chat-messages]::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, 0.5);
+  background: rgba(148, 163, 184, 0.4);
 }
 
 /* --- Toast Inline Inputs --- */

@@ -27,6 +27,7 @@ function detectProvider(key) {
   if (!key) return null;
   if (key.startsWith("sk-ant-")) return "anthropic";
   if (key.startsWith("sk-")) return "openai";
+  if (key.startsWith("AIza")) return "gemini";
   return null;
 }
 
@@ -160,6 +161,8 @@ const ONBOARDING_STEPS = [
       return !!(
         deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.anthropicApiKey, "") ||
         deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.openaiApiKey, "") ||
+        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.geminiApiKey, "") ||
+        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.mistralApiKey, "") ||
         deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.llmApiKey, "")
       );
     },
@@ -168,17 +171,41 @@ const ONBOARDING_STEPS = [
       const frag = document.createDocumentFragment();
 
       frag.appendChild(createInfoText(
-        "In order for me to think and work, I need access to an AI model. I support Anthropic Claude and OpenAI GPT \u2014 you can use either, or both."
+        "In order for me to think and work, I need access to an AI model. I support Anthropic Claude, OpenAI GPT, Google Gemini, and Mistral \u2014 you can use any of them."
       ));
       frag.appendChild(createInfoText(
-        "Paste an API key below. I\u2019ll recognise which provider it belongs to and configure everything automatically."
+        "Paste an API key below. I\u2019ll recognise which provider it belongs to and configure everything automatically. For Mistral keys (which have no distinctive prefix), choose your provider from the dropdown."
       ));
 
       const keyField = createInputField({
-        placeholder: "sk-...",
+        placeholder: "sk-... / AIza...",
         type: "password",
       });
       frag.appendChild(keyField.wrapper);
+
+      // Manual provider selector for keys that can't be auto-detected
+      const providerSelectWrapper = document.createElement("div");
+      providerSelectWrapper.style.cssText = "margin: 8px 0; display: none;";
+      const providerSelectLabel = document.createElement("label");
+      providerSelectLabel.textContent = "Provider: ";
+      providerSelectLabel.style.cssText = "font-size: 13px; margin-right: 6px;";
+      const providerSelect = document.createElement("select");
+      providerSelect.style.cssText = "font-size: 13px; padding: 2px 6px;";
+      for (const opt of ["mistral", "anthropic", "openai", "gemini"]) {
+        const el = document.createElement("option");
+        el.value = opt;
+        el.textContent = opt.charAt(0).toUpperCase() + opt.slice(1);
+        providerSelect.appendChild(el);
+      }
+      providerSelectWrapper.appendChild(providerSelectLabel);
+      providerSelectWrapper.appendChild(providerSelect);
+      frag.appendChild(providerSelectWrapper);
+
+      // Show/hide manual selector based on whether we can auto-detect
+      keyField.input.addEventListener("input", () => {
+        const detected = detectProvider(keyField.input.value.trim());
+        providerSelectWrapper.style.display = (!detected && keyField.input.value.trim()) ? "block" : "none";
+      });
 
       frag.appendChild(createInfoText(
         "<small>Your key is stored locally in Roam and is only sent directly to your AI provider. It never passes through any other server.</small>"
@@ -196,24 +223,27 @@ const ONBOARDING_STEPS = [
               showInlineError(btnContainer, "Please paste an API key.");
               return;
             }
-            const provider = detectProvider(key);
+            const provider = detectProvider(key) || providerSelect.value;
             if (!provider) {
               showInlineError(
                 btnContainer,
-                "I don\u2019t recognise that key format. Anthropic keys start with sk-ant- and OpenAI keys start with sk-. Please check and try again."
+                "Please select a provider for this key."
               );
               return;
             }
             clearInlineError(btnContainer);
             // Write to provider-specific key field
-            const keySettingId = provider === "openai"
-              ? deps.SETTINGS_KEYS.openaiApiKey
-              : deps.SETTINGS_KEYS.anthropicApiKey;
-            extensionAPI.settings.set(keySettingId, key);
+            const keySettingMap = {
+              openai: deps.SETTINGS_KEYS.openaiApiKey,
+              anthropic: deps.SETTINGS_KEYS.anthropicApiKey,
+              gemini: deps.SETTINGS_KEYS.geminiApiKey,
+              mistral: deps.SETTINGS_KEYS.mistralApiKey
+            };
+            extensionAPI.settings.set(keySettingMap[provider], key);
             extensionAPI.settings.set(deps.SETTINGS_KEYS.llmProvider, provider);
-            const providerLabel = provider === "anthropic" ? "Anthropic" : "OpenAI";
+            const providerLabels = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Gemini", mistral: "Mistral" };
             deps.iziToast.success({
-              title: `${providerLabel} key saved`,
+              title: `${providerLabels[provider]} key saved`,
               message: "I\u2019m ready to think.",
               timeout: 4000,
               position: "bottomRight",
@@ -316,7 +346,7 @@ const ONBOARDING_STEPS = [
           primary: true,
           onClick: async () => {
             try {
-              await deps.runBootstrapMemoryPages();
+              await deps.runBootstrapMemoryPages({ silent: true });
             } catch (e) {
               deps.showErrorToast("Bootstrap failed", e?.message || "Unknown error");
             }
@@ -429,7 +459,10 @@ const ONBOARDING_STEPS = [
                 position: "bottomRight",
               });
             }, 300);
-            setTimeout(() => advanceStep(), 8000);
+            sessionState._hotkeyTimerId = setTimeout(() => {
+              delete sessionState._hotkeyTimerId;
+              advanceStep();
+            }, 8000);
           },
         },
         {
@@ -509,7 +542,7 @@ const ONBOARDING_STEPS = [
           primary: true,
           onClick: async () => {
             try {
-              await deps.bootstrapSkillsPage();
+              await deps.bootstrapSkillsPage({ silent: true });
               deps.registerMemoryPullWatches();
               try {
                 window.roamAlphaAPI.ui.mainWindow.openPage({
@@ -542,7 +575,8 @@ const ONBOARDING_STEPS = [
             } catch (e) {
               deps.showErrorToast("Skills install failed", e?.message || "Unknown error");
             }
-            advanceStep();
+            // Brief delay to let Roam settle after creating many blocks
+            setTimeout(() => advanceStep(), 500);
           },
         },
         {
@@ -654,16 +688,21 @@ const ONBOARDING_STEPS = [
       const frag = document.createDocumentFragment();
 
       const userName = deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.userName, "");
+      const safeName = userName ? ", " + deps.escapeHtml(userName) : "";
       frag.appendChild(createInfoText(
-        `We\u2019re all set${userName ? ", " + userName : ""}. Here\u2019s a quick summary of what\u2019s configured:`
+        `We\u2019re all set${safeName}. Here\u2019s a quick summary of what\u2019s configured:`
       ));
 
       // Build summary
       const provider = deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.llmProvider, "");
-      const hasAnthropicKey = !!deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.anthropicApiKey, "");
-      const hasOpenaiKey = !!deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.openaiApiKey, "");
-      const hasAnyKey = hasAnthropicKey || hasOpenaiKey;
-      const providerLabel = provider === "openai" ? "OpenAI" : provider === "anthropic" ? "Anthropic" : "Not set";
+      const hasAnyKey = !!(
+        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.anthropicApiKey, "") ||
+        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.openaiApiKey, "") ||
+        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.geminiApiKey, "") ||
+        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.mistralApiKey, "")
+      );
+      const providerLabels = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Gemini", mistral: "Mistral" };
+      const providerLabel = providerLabels[provider] || "Not set";
 
       const summaryContainer = document.createElement("div");
       summaryContainer.className = "cos-onboarding-summary";
@@ -699,8 +738,8 @@ const ONBOARDING_STEPS = [
       ));
 
       // External tools
-      const hasComposioUrl = !!deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.composioMcpUrl, "");
-      const composioConfigured = hasComposioUrl && hasComposioUrl !== "enter your composio mcp url here";
+      const composioUrl = deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.composioMcpUrl, "");
+      const composioConfigured = !!composioUrl && composioUrl !== "enter your composio mcp url here";
       summaryContainer.appendChild(createSummaryItem(
         `External tools: ${composioConfigured ? "Configured" : "Set up later"}`,
         composioConfigured

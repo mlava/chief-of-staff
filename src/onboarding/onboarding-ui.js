@@ -121,10 +121,22 @@ export function createOnboardingCard({ onSkip, onDoLater, title = "Chief of Staf
 /**
  * Replace contentArea children with the given fragment, animating the swap.
  */
+/** Timer IDs from transitionCardContent safety fallbacks. */
+const transitionTimers = new Set();
+
+/** Clear all pending transition timers (call on onboarding teardown). */
+export function clearTransitionTimers() {
+  for (const id of transitionTimers) clearTimeout(id);
+  transitionTimers.clear();
+}
+
 export function transitionCardContent(contentArea, fragment) {
   if (!contentArea) return;
+  let swapped = false;
   contentArea.classList.add("cos-onboarding-content-exit");
   const swap = () => {
+    if (swapped) return;
+    swapped = true;
     contentArea.innerHTML = "";
     contentArea.appendChild(fragment);
     contentArea.classList.remove("cos-onboarding-content-exit");
@@ -134,6 +146,12 @@ export function transitionCardContent(contentArea, fragment) {
       contentArea.removeEventListener("animationend", cleanup);
     };
     contentArea.addEventListener("animationend", cleanup);
+    // Safety fallback for enter cleanup
+    const enterId = setTimeout(() => {
+      transitionTimers.delete(enterId);
+      contentArea.classList.remove("cos-onboarding-content-enter");
+    }, 300);
+    transitionTimers.add(enterId);
   };
   // Wait for exit animation, or swap immediately if no animation support
   if (contentArea.children.length === 0) {
@@ -145,9 +163,11 @@ export function transitionCardContent(contentArea, fragment) {
     };
     contentArea.addEventListener("animationend", afterExit);
     // Safety fallback if animationend never fires
-    setTimeout(() => {
-      if (contentArea.classList.contains("cos-onboarding-content-exit")) swap();
-    }, 350);
+    const exitId = setTimeout(() => {
+      transitionTimers.delete(exitId);
+      swap();
+    }, 250);
+    transitionTimers.add(exitId);
   }
 }
 

@@ -12,6 +12,7 @@ import {
   createOnboardingCard,
   transitionCardContent,
   updateStepIndicator,
+  clearTransitionTimers,
 } from "./onboarding-ui.js";
 import { ONBOARDING_STEPS } from "./onboarding-steps.js";
 
@@ -35,6 +36,8 @@ function loadOnboardingState(extensionAPI, deps) {
   const hasKey = !!(
     deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.anthropicApiKey, "") ||
     deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.openaiApiKey, "") ||
+    deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.geminiApiKey, "") ||
+    deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.mistralApiKey, "") ||
     deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.llmApiKey, "")
   );
   if (!hasName && !hasKey) return { currentStep: 0 };
@@ -96,6 +99,26 @@ function renderStep(stepIndex) {
 
   transitionCardContent(activeContentArea, fragment);
   updateStepIndicator(activeStepIndicator, visiblePosition, visibleTotal);
+
+  // After content swap: auto-focus first input and wire Enter key to primary button
+  setTimeout(() => {
+    if (!activeContentArea) return;
+    const firstInput = activeContentArea.querySelector(".cos-onboarding-input");
+    if (firstInput) firstInput.focus();
+
+    // Remove any previous Enter handler, then attach a fresh one
+    if (activeContentArea._onboardingKeyHandler) {
+      activeContentArea.removeEventListener("keydown", activeContentArea._onboardingKeyHandler);
+    }
+    const handler = (e) => {
+      if (e.key === "Enter") {
+        const primaryBtn = activeContentArea.querySelector(".cos-onboarding-btn--primary");
+        if (primaryBtn) { e.preventDefault(); primaryBtn.click(); }
+      }
+    };
+    activeContentArea._onboardingKeyHandler = handler;
+    activeContentArea.addEventListener("keydown", handler);
+  }, 380);
 }
 
 // ---------------------------------------------------------------------------
@@ -133,6 +156,8 @@ export function launchOnboarding(extensionAPI, deps) {
       const hasKey = !!(
         deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.anthropicApiKey, "") ||
         deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.openaiApiKey, "") ||
+        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.geminiApiKey, "") ||
+        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.mistralApiKey, "") ||
         deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.llmApiKey, "")
       );
       if (hasKey) {
@@ -169,6 +194,14 @@ export function launchOnboarding(extensionAPI, deps) {
  * Remove the onboarding card from the DOM with exit animation.
  */
 export function teardownOnboarding() {
+  // Clear any pending step timers (e.g. hotkey auto-advance)
+  if (sessionState._hotkeyTimerId) {
+    clearTimeout(sessionState._hotkeyTimerId);
+    delete sessionState._hotkeyTimerId;
+  }
+
+  clearTransitionTimers();
+
   if (onboardingDestroyFn) {
     onboardingDestroyFn();
     onboardingDestroyFn = null;

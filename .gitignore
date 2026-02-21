@@ -20,3 +20,6 @@ pnpm-debug.log*
 .env.*
 extension.js
 /docs
+CLAUDE.md
+com.mark.supergateway.scholar.plist
+com.mark.supergateway.zotero.plist

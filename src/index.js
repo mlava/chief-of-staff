@@ -15,6 +15,8 @@ const SETTINGS_KEYS = {
   llmApiKey: "llm-api-key",
   openaiApiKey: "openai-api-key",
   anthropicApiKey: "anthropic-api-key",
+  geminiApiKey: "gemini-api-key",
+  mistralApiKey: "mistral-api-key",
   llmModel: "llm-model",
   debugLogging: "debug-logging",
   dryRunMode: "dry-run-mode",
@@ -29,7 +31,9 @@ const SETTINGS_KEYS = {
   cronJobs: "cron-jobs",
   userName: "user-name",
   onboardingComplete: "onboarding-complete",
-  betterTasksEnabled: "better-tasks-enabled"
+  betterTasksEnabled: "better-tasks-enabled",
+  ludicrousModeEnabled: "ludicrous-mode-enabled",
+  localMcpPorts: "local-mcp-ports"
 };
 const TOOLS_SCHEMA_VERSION = 3;
 const AUTH_POLL_INTERVAL_MS = 9000;
@@ -41,31 +45,82 @@ const MAX_CONTEXT_MESSAGE_CHARS = 500;
 const MAX_CHAT_PANEL_MESSAGES = 80;
 const MAX_AGENT_MESSAGES_CHAR_BUDGET = 50000; // Conservative budget (20% safety margin for token estimation)
 const MIN_AGENT_MESSAGES_TO_KEEP = 6;
-const ANTHROPIC_MAX_OUTPUT_TOKENS = 1200;
-const OPENAI_MAX_OUTPUT_TOKENS = 1200;
-const POWER_MAX_OUTPUT_TOKENS = 4096;
+const STANDARD_MAX_OUTPUT_TOKENS = 1200;   // Regular chat
+const SKILL_MAX_OUTPUT_TOKENS = 4096;      // Skills, power mode, failover
+const LUDICROUS_MAX_OUTPUT_TOKENS = 8192;  // Ludicrous tier
 const LLM_MAX_RETRIES = 3;
 const LLM_RETRY_BASE_DELAY_MS = 700;
 const LLM_STREAM_CHUNK_TIMEOUT_MS = 60_000; // 60s per-chunk timeout for streaming reads
+const LLM_RESPONSE_TIMEOUT_MS = 90_000; // 90s per-request timeout for non-streaming calls
 const DEFAULT_LLM_PROVIDER = "anthropic";
+const FAILOVER_CHAINS = {
+  mini: ["anthropic", "mistral", "openai", "gemini"],
+  power: ["anthropic", "mistral", "openai", "gemini"],
+  ludicrous: ["mistral", "openai", "anthropic"]
+};
+const PROVIDER_COOLDOWN_MS = 60_000;
+const FAILOVER_CONTINUATION_MESSAGE = "Note: You are continuing a task started by another AI model which hit a temporary error. The conversation above contains all data gathered so far. Please complete the task using this context.";
 const DEFAULT_LLM_MODELS = {
   anthropic: "claude-haiku-4-5-20251001",
-  openai: "gpt-4o-mini"
+  openai: "gpt-5-mini",
+  gemini: "gemini-2.5-flash-lite",
+  mistral: "mistral-small-latest"
 };
 const POWER_LLM_MODELS = {
-  anthropic: "claude-sonnet-4-5-20250929",
-  openai: "gpt-4o"
+  anthropic: "claude-sonnet-4-6-20250514",
+  openai: "gpt-4.1",
+  gemini: "gemini-2.5-flash",
+  mistral: "mistral-medium-latest"
 };
+const LUDICROUS_LLM_MODELS = {
+  anthropic: "claude-opus-4-6",
+  openai: "gpt-5.2",
+  mistral: "mistral-large-2512"
+};
+
 const LLM_MODEL_COSTS = {
   // [inputPerM, outputPerM]
-  "claude-haiku-4-5-20251001": [0.80, 4.0],
+  "claude-haiku-4-5-20251001": [1.00, 5.0],
   "claude-sonnet-4-5-20250929": [3.0, 15.0],
-  "gpt-4o-mini": [0.15, 0.60],
-  "gpt-4o": [2.5, 10.0]
+  "gpt-5-mini": [0.25, 2.00],
+  "gpt-4.1": [2.00, 8.00],
+  "gemini-2.5-flash-lite": [0.10, 0.40],
+  "gemini-2.5-flash": [0.30, 2.50],
+  "mistral-small-latest": [0.10, 0.30],
+  "mistral-medium-latest": [0.40, 2.00],
+  "mistral-large-2512": [0.50, 1.50],
+  "claude-opus-4-6": [15.00, 75.00],
+  "gpt-5.2": [1.75, 14.00]
 };
+// Map skill shorthand source names → actual LLM tool names
+const SOURCE_TOOL_NAME_MAP = {
+  "bt_search": "roam_bt_search_tasks",
+  "bt_get_projects": "roam_bt_get_projects",
+  "bt_get_attributes": "roam_bt_get_attributes",
+  "bt_get_waiting_for": "roam_bt_get_waiting_for",
+  "bt_get_context": "roam_bt_get_context",
+  "bt_get_analytics": "bt_get_analytics",
+  "bt_get_task_by_uid": "bt_get_task_by_uid",
+  "cos_calendar_read": "cos_calendar_fetch",
+  "cos_calendar_fetch": "cos_calendar_fetch",
+  "cos_email_fetch": "cos_email_fetch",
+  "roam_get_block_children": "roam_get_block_children",
+  "roam_get_page": "roam_get_page",
+  "roam_search": "roam_search",
+  "roam_search_text": "roam_search"
+};
+// Write tools that trigger the gathering completeness guard
+const WRITE_TOOL_NAMES = new Set([
+  "roam_batch_write",
+  "roam_create_block",
+  "roam_create_blocks",
+  "roam_update_block"
+]);
 const LLM_API_ENDPOINTS = {
   anthropic: "https://api.anthropic.com/v1/messages",
-  openai: "https://api.openai.com/v1/chat/completions"
+  openai: "https://api.openai.com/v1/chat/completions",
+  gemini: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+  mistral: "https://api.mistral.ai/v1/chat/completions"
 };
 
 /**
@@ -120,18 +175,28 @@ const COMPOSIO_AUTO_CONNECT_DELAY_MS = 1200;
 const COMPOSIO_AUTH_POLL_REMOTE_CACHE_TTL_MS = 10000;
 const COMPOSIO_MCP_CONNECT_TIMEOUT_MS = 30000; // 30 seconds
 const COMPOSIO_CONNECT_BACKOFF_MS = 30000; // 30s cooldown after a failed connection
+const LOCAL_MCP_CONNECT_TIMEOUT_MS = 10_000;  // 10s — local servers should be fast
+const LOCAL_MCP_INITIAL_BACKOFF_MS = 2_000;   // 2s initial backoff after first failure
+const LOCAL_MCP_MAX_BACKOFF_MS = 60_000;      // 60s cap on exponential backoff
+const LOCAL_MCP_AUTO_CONNECT_MAX_RETRIES = 5; // max startup retries per port (covers ~62s)
+const LOCAL_MCP_LIST_TOOLS_TIMEOUT_MS = 5_000; // 5s timeout for listTools call
 const EMAIL_ACTION_CACHE_TTL_MS = 10 * 60 * 1000;
 const MAX_EMAIL_CACHE_MESSAGES = 200; // Limit email cache to prevent unbounded growth
 const TOOLKIT_SCHEMA_REGISTRY_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const TOOLKIT_SCHEMA_MAX_TOOLKITS = 30;
 const TOOLKIT_SCHEMA_MAX_PROMPT_CHARS = 8000;
-const MAX_ROAM_BLOCK_CHARS = 100000; // Conservative limit for Roam block size
+const MAX_ROAM_BLOCK_CHARS = 20000; // Practical limit — avoids Roam UI rendering slowdowns
 const MAX_CREATE_BLOCKS_TOTAL = 50; // Hard cap on total blocks created in one roam_create_blocks call
 const CRON_TICK_INTERVAL_MS = 60_000; // Check due jobs every 60 seconds
 const CRON_LEADER_KEY = "chief-of-staff-cron-leader";
 const CRON_LEADER_HEARTBEAT_MS = 30_000; // 30s heartbeat for multi-tab leader lock
 const CRON_LEADER_STALE_MS = 90_000; // 90s without heartbeat = stale, claim leadership
 const CRON_MAX_JOBS = 20; // Soft cap on total scheduled jobs
+const TOOL_APPROVAL_TTL_MS = 15 * 60 * 1000; // 15 minutes
+const INBOX_MAX_ITEMS_PER_SCAN = 8; // Prevent large inbox bursts from flooding the queue
+const INBOX_MAX_PENDING_ITEMS = 40; // Hard cap on queued+in-flight inbox items
+const INBOX_FULL_SCAN_COOLDOWN_MS = 60_000; // Avoid repeated idle full scans
+const CHIEF_PANEL_CLEANUP_REGISTRY_KEY = "__chiefOfStaffPanelCleanupRegistry";
 
 let mcpClient = null;
 let commandPaletteRegistered = false;
@@ -143,6 +208,7 @@ let composioTransportAbortController = null; // AbortController for in-flight MC
 const authPollStateBySlug = new Map();
 let extensionAPIRef = null;
 let lastAgentRunTrace = null;
+const providerCooldowns = {}; // { provider: expiryTimestampMs }
 let conversationTurns = [];
 let lastPromptSections = null; // Track sections from previous query for follow-ups
 let chatPanelContainer = null;
@@ -162,6 +228,9 @@ const activeToastKeyboards = new Set();
 let reconcileInFlightPromise = null;
 let composioAutoConnectTimeoutId = null;
 let chatPanelPersistTimeoutId = null;
+let chatThinkingTimerId = null;
+let chatWorkingTimerId = null;
+let conversationPersistTimeoutId = null;
 let extensionBroadcastCleanups = [];
 let lastKnownPageContext = null; // { uid, title } — for detecting page navigation between turns
 let cronTickIntervalId = null;
@@ -171,10 +240,54 @@ let cronStorageHandler = null; // "storage" event listener for cross-tab leader 
 let cronInitialTickTimeoutId = null; // initial 5s tick after scheduler start
 let cronSchedulerRunning = false;
 const cronRunningJobs = new Set(); // job IDs currently executing (prevent overlap)
-const approvedToolsThisSession = new Set(); // tools approved once skip future prompts
+const approvedToolsThisSession = new Map(); // approvalKey -> approvedAt timestamp
 let roamNativeToolsCache = null;
+let externalExtensionToolsCache = null; // populated per agent loop run, cleared in finally
 const activePullWatches = []; // { name, cleanup } for onunload
 let pullWatchDebounceTimers = {}; // keyed by cache type
+const inboxProcessingSet = new Set(); // block UIDs currently being processed by inbox watcher
+let inboxProcessingQueue = Promise.resolve(); // sequential processing chain
+const inboxQueuedSet = new Set(); // block UIDs already queued to prevent duplicate queue growth
+let inboxPendingQueueCount = 0; // queued + in-flight inbox items
+let inboxCatchupScanTimeoutId = null; // deferred full scan once queue drains
+let inboxLastFullScanAt = 0; // timestamp of last full q-based inbox scan
+let inboxLastFullScanUidSignature = ""; // signature of top-level inbox UIDs at last full scan
+let inboxStaticUIDs = null; // lazily populated — instruction block UIDs to skip
+// --- Local MCP server state ---
+const localMcpClients = new Map(); // port → { client, transport, lastFailureAt, connectPromise }
+let localMcpToolsCache = null; // populated per agent loop run, cleared in finally (like externalExtensionToolsCache)
+// Explicit allowlist of tools permitted in inbox read-only mode.
+// Safer than a blocklist — any new tool is blocked by default until explicitly allowlisted.
+const INBOX_READ_ONLY_TOOL_ALLOWLIST = new Set([
+  // Roam read tools
+  "roam_search",
+  "roam_get_page",
+  "roam_get_daily_page",
+  "roam_get_block_children",
+  "roam_get_block_context",
+  "roam_get_page_metadata",
+  "roam_get_recent_changes",
+  "roam_link_suggestions",
+  // roam_open_page intentionally excluded — it navigates the user's main window,
+  // which is disruptive during background inbox processing.
+  // Better Tasks read tools
+  "roam_bt_search_tasks",
+  "roam_bt_get_projects",
+  "roam_bt_get_waiting_for",
+  "roam_bt_get_context",
+  "roam_bt_get_analytics",
+  "roam_bt_get_task_by_uid",
+  "roam_bt_get_attributes",
+  // COS integration read tools
+  "cos_email_fetch",
+  "cos_email_unread_count",
+  "cos_calendar_fetch",
+  "cos_get_skill",
+  "cos_cron_list",
+  // Composio meta tools (read-only)
+  "COMPOSIO_SEARCH_TOOLS",
+  "COMPOSIO_GET_CONNECTED_ACCOUNTS"
+]);
 // Note: totalCostUsd accumulates via floating-point addition, so after many API calls
 // it may drift by fractions of a cent. This is acceptable for a session-scoped UI indicator
 // that displays at most 2 decimal places and resets on reload.
@@ -238,11 +351,14 @@ const runBetterTasksTool = async (toolName, args = {}) => {
 const hasBetterTasksAPI = () => Boolean(getBetterTasksExtension());
 
 // --- Generic external extension tool discovery ---
+// Result is cached per agent loop run (set/cleared in runAgentLoop) to avoid
+// repeated registry iteration and closure allocation during tool execution.
 function getExternalExtensionTools() {
+  if (externalExtensionToolsCache) return externalExtensionToolsCache;
   const registry = getExtensionToolsRegistry();
   const tools = [];
   for (const [extKey, ext] of Object.entries(registry)) {
-    if (extKey === "better-tasks") continue; // already handled with name mapping
+    // if (extKey === "better-tasks") continue; // already handled with name mapping
     if (!ext || !Array.isArray(ext.tools)) continue;
     const extLabel = String(ext.name || extKey || "").trim();
     for (const t of ext.tools) {
@@ -268,7 +384,91 @@ function getExternalExtensionTools() {
       });
     }
   }
+  externalExtensionToolsCache = tools;
   return tools;
+}
+
+// --- Local MCP tool discovery (per agent loop) ---
+async function getLocalMcpTools() {
+  if (localMcpToolsCache) return localMcpToolsCache;
+
+  const ports = getLocalMcpPorts();
+  if (!ports.length) {
+    localMcpToolsCache = [];
+    return localMcpToolsCache;
+  }
+
+  const tools = [];
+  const seenNames = new Set();
+
+  for (const port of ports) {
+    let client;
+    try {
+      client = await connectLocalMcp(port);
+    } catch (e) {
+      debugLog(`[Local MCP] Connect failed for port ${port}:`, e?.message);
+      continue;
+    }
+    if (!client) continue;
+
+    let serverTools;
+    try {
+      const listPromise = client.listTools();
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`listTools timeout on port ${port}`)), LOCAL_MCP_LIST_TOOLS_TIMEOUT_MS)
+      );
+      const result = await Promise.race([listPromise, timeoutPromise]);
+      serverTools = result?.tools || [];
+    } catch (e) {
+      console.warn(`[Local MCP] listTools failed for port ${port}:`, e?.message);
+      // Connection may be dead — tear down so next loop retries
+      disconnectLocalMcp(port).catch(() => {});
+      continue;
+    }
+
+    // Get server metadata for system prompt grouping
+    const entry = localMcpClients.get(port);
+    const serverName = entry?.serverName || `mcp-${port}`;
+    const serverDescription = entry?.serverDescription || "";
+
+    for (const t of serverTools) {
+      if (!t?.name) continue;
+      if (seenNames.has(t.name)) {
+        console.warn(`[Local MCP] Duplicate tool name "${t.name}" on port ${port} — skipping`);
+        continue;
+      }
+      seenNames.add(t.name);
+
+      // Capture client and tool name in closure for execution
+      const boundClient = client;
+      const toolName = t.name;
+      tools.push({
+        name: toolName,
+        description: t.description || "",
+        input_schema: t.inputSchema || { type: "object", properties: {} },
+        _serverName: serverName,
+        _serverDescription: serverDescription,
+        _port: port,
+        execute: async (args = {}) => {
+          try {
+            const result = await boundClient.callTool({ name: toolName, arguments: args });
+            const text = result?.content?.[0]?.text;
+            if (typeof text === "string") {
+              try { return JSON.parse(text); } catch { return { text }; }
+            }
+            return result;
+          } catch (e) {
+            return { error: e?.message || `Failed: ${toolName}` };
+          }
+        }
+      });
+    }
+
+    debugLog(`[Local MCP] Discovered ${serverTools.length} tools from port ${port} (server: ${serverName})`);
+  }
+
+  localMcpToolsCache = tools;
+  return localMcpToolsCache;
 }
 
 // --- Generic extension broadcast event bridge ---
@@ -304,6 +504,7 @@ function teardownExtensionBroadcastListeners() {
 
 const COMPOSIO_SAFE_MULTI_EXECUTE_SLUG_ALLOWLIST = new Set([
   "GOOGLECALENDAR_EVENTS_LIST",
+  "GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS",
   "GOOGLECALENDAR_CALENDARS_LIST",
   "GMAIL_FETCH_EMAILS",
   "GMAIL_DELETE_MESSAGE",
@@ -321,7 +522,7 @@ const COMPOSIO_MULTI_EXECUTE_SLUG_ALIAS_BY_TOKEN = {
 
 function showConnectedToast() {
   if (!iziToast?.success) return;
-  const assistantName = getAssistantDisplayName();
+  const assistantName = escapeHtml(getAssistantDisplayName());
   iziToast.success({
     title: "Connected",
     message: `${assistantName} connected to Composio.`,
@@ -332,7 +533,7 @@ function showConnectedToast() {
 
 function showDisconnectedToast() {
   if (!iziToast?.success) return;
-  const assistantName = getAssistantDisplayName();
+  const assistantName = escapeHtml(getAssistantDisplayName());
   iziToast.success({
     title: "Disconnected",
     message: `${assistantName} disconnected from Composio.`,
@@ -343,7 +544,7 @@ function showDisconnectedToast() {
 
 function showReconnectedToast() {
   if (!iziToast?.success) return;
-  const assistantName = getAssistantDisplayName();
+  const assistantName = escapeHtml(getAssistantDisplayName());
   iziToast.success({
     title: "Reconnected",
     message: `${assistantName} reconnected to Composio.`,
@@ -355,8 +556,8 @@ function showReconnectedToast() {
 function showInfoToast(title, message) {
   if (!iziToast?.info) return;
   iziToast.info({
-    title,
-    message,
+    title: escapeHtml(title),
+    message: escapeHtml(message),
     position: "topRight",
     timeout: 4500
   });
@@ -365,11 +566,51 @@ function showInfoToast(title, message) {
 function showErrorToast(title, message) {
   if (!iziToast?.error) return;
   iziToast.error({
-    title,
-    message,
+    title: escapeHtml(title),
+    message: escapeHtml(message),
     position: "topRight",
     timeout: 3500
   });
+}
+
+// Note: orphan panels from prior hot-reloads may still have window-level
+// drag/resize listeners attached. Keep a window-level cleanup registry so new
+// loads can tear those listeners down before removing orphaned DOM nodes.
+function getChiefPanelCleanupRegistry() {
+  if (typeof window === "undefined") return {};
+  const existing = window[CHIEF_PANEL_CLEANUP_REGISTRY_KEY];
+  if (existing && typeof existing === "object") return existing;
+  const created = {};
+  window[CHIEF_PANEL_CLEANUP_REGISTRY_KEY] = created;
+  return created;
+}
+
+function registerChiefPanelCleanup(panelEl, cleanupFn) {
+  if (!panelEl || typeof cleanupFn !== "function") return;
+  const panelId = String(panelEl.getAttribute("data-chief-panel-id") || "").trim();
+  if (!panelId) return;
+  const registry = getChiefPanelCleanupRegistry();
+  registry[panelId] = cleanupFn;
+}
+
+function unregisterChiefPanelCleanup(panelEl) {
+  if (!panelEl) return;
+  const panelId = String(panelEl.getAttribute("data-chief-panel-id") || "").trim();
+  if (!panelId) return;
+  const registry = getChiefPanelCleanupRegistry();
+  delete registry[panelId];
+}
+
+function invokeAndUnregisterChiefPanelCleanup(panelEl) {
+  if (!panelEl) return;
+  const panelId = String(panelEl.getAttribute("data-chief-panel-id") || "").trim();
+  if (!panelId) return;
+  const registry = getChiefPanelCleanupRegistry();
+  const cleanupFn = registry[panelId];
+  if (typeof cleanupFn === "function") {
+    try { cleanupFn(); } catch { /* ignore */ }
+  }
+  delete registry[panelId];
 }
 
 function removeOrphanChiefPanels() {
@@ -377,6 +618,7 @@ function removeOrphanChiefPanels() {
   const panels = Array.from(document.querySelectorAll("[data-chief-chat-panel='true']"));
   panels.forEach((panel) => {
     if (panel === chatPanelContainer) return;
+    invokeAndUnregisterChiefPanelCleanup(panel);
     panel.remove();
   });
 }
@@ -403,7 +645,11 @@ function escapeHtml(text) {
 function sanitiseMarkdownHref(href) {
   const value = String(href || "").trim();
   if (!value) return "#";
-  const lower = value.toLowerCase();
+  // Decode first to catch encoded bypass attempts (e.g. java%73cript:)
+  let decoded;
+  try { decoded = decodeURIComponent(value); } catch { decoded = value; }
+  const lower = decoded.toLowerCase().trim();
+  if (lower.startsWith("javascript:") || lower.startsWith("data:") || lower.startsWith("vbscript:")) return "#";
   if (lower.startsWith("http://") || lower.startsWith("https://") || lower.startsWith("mailto:")) {
     return escapeHtml(value);
   }
@@ -455,8 +701,8 @@ function renderInlineMarkdown(text) {
   });
 
   let output = escapeHtml(raw)
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/\*([^*]+)\*/g, "<em>$1</em>");
+    .replace(/\*\*([^*]+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/(?<!\*)\*([^*]+?)\*(?!\*)/g, "<em>$1</em>");
 
   codeChunks.forEach((chunk, index) => {
     output = output.replace(`__CODE_${nonce}_${index}__`, chunk);
@@ -544,10 +790,18 @@ function renderMarkdownToSafeHtml(markdownText) {
       return;
     }
 
-    const headingMatch = line.match(/^\s*(#{1,3})\s+(.+)$/);
+    // Horizontal rule: --- or *** or ___ (3+ chars, optionally spaced)
+    if (/^\s*([-*_])\s*\1\s*\1[\s\1]*$/.test(line)) {
+      closeLists();
+      closeBlockquote();
+      html.push('<hr class="chief-hr"/>');
+      return;
+    }
+
+    const headingMatch = line.match(/^\s*(#{1,6})\s+(.+)$/);
     if (headingMatch) {
       closeLists();
-      const level = Math.min(headingMatch[1].length, 3);
+      const level = Math.min(headingMatch[1].length, 6);
       html.push(`<h${level} class="chief-heading">${renderInlineMarkdown(headingMatch[2])}</h${level}>`);
       return;
     }
@@ -825,14 +1079,37 @@ async function handleChatPanelSend() {
   function flushStreamRender() {
     streamRenderPending = false;
     if (!streamingEl || !document.body.contains(streamingEl)) return;
-    streamingEl.innerHTML = renderMarkdownToSafeHtml(streamChunks.join(""));
+    const joined = streamChunks.join("");
+    const capped = joined.length > 60000 ? joined.slice(joined.length - 60000) : joined;
+    streamingEl.innerHTML = renderMarkdownToSafeHtml(capped);
     if (chatPanelMessages) chatPanelMessages.scrollTop = chatPanelMessages.scrollHeight;
   }
+
+  // Show thinking indicator immediately
+  ensureStreamingEl();
+  if (streamingEl) {
+    streamingEl.innerHTML = `<span class="chief-msg-thinking">Thinking</span>`;
+    if (chatPanelMessages) chatPanelMessages.scrollTop = chatPanelMessages.scrollHeight;
+  }
+
+  // Escalate message if response is taking a while
+  chatThinkingTimerId = setTimeout(() => {
+    if (streamingEl && streamChunks.length === 0 && document.body.contains(streamingEl)) {
+      streamingEl.innerHTML = `<span class="chief-msg-thinking">Still thinking</span>`;
+    }
+  }, 5000);
+  chatWorkingTimerId = setTimeout(() => {
+    if (streamingEl && streamChunks.length === 0 && document.body.contains(streamingEl)) {
+      streamingEl.innerHTML = `<span class="chief-msg-thinking">Still working</span>`;
+    }
+  }, 15000);
 
   try {
     const result = await askChiefOfStaff(message, {
       suppressToasts: true,
       onTextChunk: (chunk) => {
+        clearTimeout(chatThinkingTimerId);
+        clearTimeout(chatWorkingTimerId);
         ensureStreamingEl();
         streamChunks.push(chunk);
         // Debounce renders via rAF so rapid chunks don't cause redundant DOM writes
@@ -848,10 +1125,6 @@ async function handleChatPanelSend() {
       // Final render with complete text (in case of minor differences)
       streamingEl.innerHTML = renderMarkdownToSafeHtml(responseText);
       addSaveToDailyPageButton(streamingEl, message, responseText);
-    } else if (!streamingEl) {
-      // Non-streaming fallback (Anthropic or deterministic route)
-      const el = appendChatPanelMessage("assistant", responseText);
-      if (el) addSaveToDailyPageButton(el, message, responseText);
     }
     appendChatPanelHistory("assistant", responseText);
     updateChatPanelCostIndicator();
@@ -859,12 +1132,12 @@ async function handleChatPanelSend() {
     const errorText = getUserFacingLlmErrorMessage(error, "Chat");
     if (streamingEl && document.body.contains(streamingEl)) {
       streamingEl.innerHTML = renderMarkdownToSafeHtml(`Error: ${errorText}`);
-    } else if (!streamingEl) {
-      appendChatPanelMessage("assistant", `Error: ${errorText}`);
     }
     appendChatPanelHistory("assistant", `Error: ${errorText}`);
     showErrorToastIfAllowed("Chat failed", errorText, true);
   } finally {
+    clearTimeout(chatThinkingTimerId);
+    clearTimeout(chatWorkingTimerId);
     setChatPanelSendingState(false);
     if (chatPanelInput) chatPanelInput.focus();
   }
@@ -908,14 +1181,45 @@ function applyChatPanelGeometry(panelEl) {
   panelEl.style.bottom = "auto";
 }
 
+// Clamp the panel's current position to the visible viewport.
+// Catches panels stranded off-screen (e.g. after a monitor is disconnected).
+function clampChatPanelToViewport(panelEl) {
+  if (!panelEl) return;
+  const rect = panelEl.getBoundingClientRect();
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const w = rect.width || 360;
+  const h = rect.height || 520;
+  let changed = false;
+  if (rect.left < 0 || rect.left > vw - Math.min(w, 40)) {
+    panelEl.style.left = `${Math.max(0, Math.min(vw - w, vw - 40))}px`;
+    panelEl.style.right = "auto";
+    changed = true;
+  }
+  if (rect.top < 0 || rect.top > vh - Math.min(h, 40)) {
+    panelEl.style.top = `${Math.max(0, Math.min(vh - h, vh - 40))}px`;
+    panelEl.style.bottom = "auto";
+    changed = true;
+  }
+  if (changed) saveChatPanelGeometry(panelEl);
+}
+
 function installChatPanelDragBehavior(handleEl, panelEl) {
   // --- Drag (via header) ---
+  let dragRafId = null;
   const onDragMove = (event) => {
     if (!chatPanelDragState || !document.body.contains(panelEl)) return;
-    panelEl.style.left = `${Math.max(0, event.clientX - chatPanelDragState.offsetX)}px`;
-    panelEl.style.top = `${Math.max(0, event.clientY - chatPanelDragState.offsetY)}px`;
-    panelEl.style.right = "auto";
-    panelEl.style.bottom = "auto";
+    if (dragRafId) return; // rAF already pending — skip until next frame
+    const cx = event.clientX;
+    const cy = event.clientY;
+    dragRafId = requestAnimationFrame(() => {
+      dragRafId = null;
+      if (!chatPanelDragState) return;
+      panelEl.style.left = `${Math.max(0, cx - chatPanelDragState.offsetX)}px`;
+      panelEl.style.top = `${Math.max(0, cy - chatPanelDragState.offsetY)}px`;
+      panelEl.style.right = "auto";
+      panelEl.style.bottom = "auto";
+    });
   };
   const onDragUp = () => {
     if (chatPanelDragState) {
@@ -991,32 +1295,40 @@ function installChatPanelDragBehavior(handleEl, panelEl) {
     document.body.style.userSelect = "none";
   };
 
+  let resizeRafId = null;
   const onResizeMove = (event) => {
     if (!resizeState || !document.body.contains(panelEl)) return;
-    const { edge, startX, startY, startLeft, startTop, startWidth, startHeight } = resizeState;
-    const dx = event.clientX - startX;
-    const dy = event.clientY - startY;
-    let newLeft = startLeft;
-    let newTop = startTop;
-    let newWidth = startWidth;
-    let newHeight = startHeight;
+    if (resizeRafId) return; // rAF already pending — skip until next frame
+    const cx = event.clientX;
+    const cy = event.clientY;
+    resizeRafId = requestAnimationFrame(() => {
+      resizeRafId = null;
+      if (!resizeState) return;
+      const { edge, startX, startY, startLeft, startTop, startWidth, startHeight } = resizeState;
+      const dx = cx - startX;
+      const dy = cy - startY;
+      let newLeft = startLeft;
+      let newTop = startTop;
+      let newWidth = startWidth;
+      let newHeight = startHeight;
 
-    if (edge.right) newWidth = Math.max(280, startWidth + dx);
-    if (edge.bottom) newHeight = Math.max(200, startHeight + dy);
-    if (edge.left) {
-      newWidth = Math.max(280, startWidth - dx);
-      newLeft = startLeft + startWidth - newWidth;
-    }
-    if (edge.top) {
-      newHeight = Math.max(200, startHeight - dy);
-      newTop = startTop + startHeight - newHeight;
-    }
-    panelEl.style.left = `${Math.max(0, newLeft)}px`;
-    panelEl.style.top = `${Math.max(0, newTop)}px`;
-    panelEl.style.width = `${newWidth}px`;
-    panelEl.style.height = `${newHeight}px`;
-    panelEl.style.right = "auto";
-    panelEl.style.bottom = "auto";
+      if (edge.right) newWidth = Math.max(280, startWidth + dx);
+      if (edge.bottom) newHeight = Math.max(200, startHeight + dy);
+      if (edge.left) {
+        newWidth = Math.max(280, startWidth - dx);
+        newLeft = startLeft + startWidth - newWidth;
+      }
+      if (edge.top) {
+        newHeight = Math.max(200, startHeight - dy);
+        newTop = startTop + startHeight - newHeight;
+      }
+      panelEl.style.left = `${Math.max(0, newLeft)}px`;
+      panelEl.style.top = `${Math.max(0, newTop)}px`;
+      panelEl.style.width = `${newWidth}px`;
+      panelEl.style.height = `${newHeight}px`;
+      panelEl.style.right = "auto";
+      panelEl.style.bottom = "auto";
+    });
   };
 
   const onResizeUp = () => {
@@ -1034,6 +1346,8 @@ function installChatPanelDragBehavior(handleEl, panelEl) {
   window.addEventListener("mouseup", onResizeUp);
 
   return () => {
+    if (dragRafId) { cancelAnimationFrame(dragRafId); dragRafId = null; }
+    if (resizeRafId) { cancelAnimationFrame(resizeRafId); resizeRafId = null; }
     handleEl.removeEventListener("mousedown", onDragDown);
     panelEl.removeEventListener("mousemove", onPanelMouseMove);
     panelEl.removeEventListener("mousedown", onPanelMouseDown);
@@ -1088,6 +1402,7 @@ function ensureChatPanel() {
 
   const container = document.createElement("div");
   container.setAttribute("data-chief-chat-panel", "true");
+  container.setAttribute("data-chief-panel-id", `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`);
 
   // Apply saved position/size from localStorage
   applyChatPanelGeometry(container);
@@ -1244,9 +1559,17 @@ function ensureChatPanel() {
     input.removeEventListener("keydown", inputKeydownHandler);
     messages.removeEventListener("click", messagesClickHandler);
   };
+  registerChiefPanelCleanup(container, () => {
+    try { chatPanelCleanupDrag?.(); } catch { /* ignore */ }
+    try { chatPanelCleanupListeners?.(); } catch { /* ignore */ }
+  });
   if (chatPanelHistory.length) {
     const fragment = document.createDocumentFragment();
-    chatPanelHistory.forEach((entry) => {
+    const initialRenderCap = 30;
+    const renderSlice = chatPanelHistory.length > initialRenderCap
+      ? chatPanelHistory.slice(chatPanelHistory.length - initialRenderCap)
+      : chatPanelHistory;
+    renderSlice.forEach((entry) => {
       fragment.appendChild(createChatPanelMessageElement(entry.role, entry.text));
     });
     messages.appendChild(fragment);
@@ -1271,6 +1594,7 @@ function setChatPanelOpen(nextOpen) {
   if (!panel) return;
   refreshChatPanelElementRefs();
   panel.style.display = nextOpen ? "flex" : "none";
+  if (nextOpen) clampChatPanelToViewport(panel);
   chatPanelIsOpen = nextOpen;
   if (nextOpen && chatPanelInput) chatPanelInput.focus();
   try { localStorage.setItem("chief-of-staff-panel-open", nextOpen ? "1" : "0"); } catch { /* ignore */ }
@@ -1289,6 +1613,7 @@ function toggleChatPanel() {
 }
 
 function destroyChatPanel() {
+  unregisterChiefPanelCleanup(chatPanelContainer);
   if (chatPanelCleanupDrag) {
     chatPanelCleanupDrag();
     chatPanelCleanupDrag = null;
@@ -1307,6 +1632,10 @@ function destroyChatPanel() {
   chatPanelDragState = null;
   chatPanelIsSending = false;
   chatPanelIsOpen = false;
+  clearTimeout(chatThinkingTimerId);
+  clearTimeout(chatWorkingTimerId);
+  chatThinkingTimerId = null;
+  chatWorkingTimerId = null;
 }
 
 function createToastConfirmCancelKeyboardHandlers({ onConfirm, onCancel }) {
@@ -1521,7 +1850,7 @@ function promptTextWithToast({
     });
 
     iziToast.show({
-      title,
+      title: escapeHtml(title),
       message: `<input data-chief-input type="text" value="${escapedValue}" placeholder="${escapedPlaceholder}" />`,
       position: "center",
       timeout: false,
@@ -1609,7 +1938,7 @@ function promptInstalledToolSlugWithToast(
     });
 
     iziToast.show({
-      title,
+      title: escapeHtml(title),
       message: `<select data-chief-tool-select>${optionsHtml}</select>`,
       position: "center",
       timeout: false,
@@ -1813,6 +2142,15 @@ function getSettingBool(extensionAPI, key, fallbackValue = false) {
   return typeof value === "boolean" ? value : fallbackValue;
 }
 
+function getLocalMcpPorts(extensionAPI = extensionAPIRef) {
+  const raw = getSettingString(extensionAPI, SETTINGS_KEYS.localMcpPorts, "");
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map(s => parseInt(s.trim(), 10))
+    .filter(p => Number.isFinite(p) && p > 0 && p <= 65535);
+}
+
 function isDebugLoggingEnabled(extensionAPI = extensionAPIRef) {
   return getSettingBool(extensionAPI, SETTINGS_KEYS.debugLogging, false);
 }
@@ -2010,13 +2348,15 @@ function inferToolkitFromSlug(toolSlug) {
  */
 function populateSlugAllowlist(entry) {
   if (!entry?.tools) return;
+  const mutatingTokens = new Set(["DELETE", "REMOVE", "SEND", "CREATE", "UPDATE", "MODIFY", "WRITE", "POST", "TRASH", "MOVE", "EXECUTE"]);
   for (const slug of Object.keys(entry.tools)) {
     const upperSlug = slug.toUpperCase();
     const tokens = upperSlug.split("_");
-    const isReadOnly = tokens.some(t =>
+    const hasMutating = tokens.some(t => mutatingTokens.has(t));
+    const hasReadOnly = tokens.some(t =>
       ["GET", "LIST", "FETCH", "SEARCH", "FIND", "READ", "QUERY", "DETAILS", "ABOUT", "SUGGEST"].includes(t)
     );
-    if (isReadOnly && COMPOSIO_SAFE_MULTI_EXECUTE_SLUG_ALLOWLIST.size < 200) {
+    if (hasReadOnly && !hasMutating && COMPOSIO_SAFE_MULTI_EXECUTE_SLUG_ALLOWLIST.size < 200) {
       COMPOSIO_SAFE_MULTI_EXECUTE_SLUG_ALLOWLIST.add(upperSlug);
     }
   }
@@ -2534,7 +2874,9 @@ function extractAuthRedirectUrls(response) {
 
   const urls = new Set();
   const queue = [parsed];
-  while (queue.length) {
+  let visited = 0;
+  while (queue.length && visited < 400) {
+    visited += 1;
     const current = queue.shift();
     if (!current || typeof current !== "object") continue;
 
@@ -2615,9 +2957,15 @@ function ensureToolsConfigState(extensionAPI) {
   return initialState;
 }
 
+const VALID_LLM_PROVIDERS = ["anthropic", "openai", "gemini", "mistral"];
+
+function isOpenAICompatible(provider) {
+  return provider === "openai" || provider === "gemini" || provider === "mistral";
+}
+
 function getLlmProvider(extensionAPI) {
   const raw = getSettingString(extensionAPI, SETTINGS_KEYS.llmProvider, DEFAULT_LLM_PROVIDER).toLowerCase();
-  return raw === "openai" ? "openai" : "anthropic";
+  return VALID_LLM_PROVIDERS.includes(raw) ? raw : "anthropic";
 }
 
 /**
@@ -2625,10 +2973,17 @@ function getLlmProvider(extensionAPI) {
  * Falls back to the legacy llmApiKey field for backward compatibility.
  */
 function getApiKeyForProvider(extensionAPI, provider) {
-  const providerKey = provider === "openai"
-    ? getSettingString(extensionAPI, SETTINGS_KEYS.openaiApiKey, "")
-    : getSettingString(extensionAPI, SETTINGS_KEYS.anthropicApiKey, "");
-  if (providerKey) return providerKey;
+  const keyMap = {
+    openai: SETTINGS_KEYS.openaiApiKey,
+    anthropic: SETTINGS_KEYS.anthropicApiKey,
+    gemini: SETTINGS_KEYS.geminiApiKey,
+    mistral: SETTINGS_KEYS.mistralApiKey
+  };
+  const settingKey = keyMap[provider];
+  if (settingKey) {
+    const providerKey = getSettingString(extensionAPI, settingKey, "");
+    if (providerKey) return providerKey;
+  }
   // Fallback: legacy single-key field
   return getSettingString(extensionAPI, SETTINGS_KEYS.llmApiKey, "");
 }
@@ -2654,6 +3009,30 @@ function getLlmModel(extensionAPI, provider) {
 
 function getPowerModel(provider) {
   return POWER_LLM_MODELS[provider] || POWER_LLM_MODELS.anthropic;
+}
+
+function getLudicrousModel(provider) {
+  return LUDICROUS_LLM_MODELS[provider] || null;
+}
+
+function isProviderCoolingDown(provider) {
+  const expiry = providerCooldowns[provider];
+  if (!expiry) return false;
+  if (Date.now() >= expiry) { delete providerCooldowns[provider]; return false; }
+  return true;
+}
+
+function setProviderCooldown(provider) {
+  providerCooldowns[provider] = Date.now() + PROVIDER_COOLDOWN_MS;
+}
+
+function getFailoverProviders(primaryProvider, extensionAPI, tier = "mini") {
+  const chain = FAILOVER_CHAINS[tier] || FAILOVER_CHAINS.mini;
+  const startIdx = chain.indexOf(primaryProvider);
+  const rotated = startIdx >= 0
+    ? [...chain.slice(startIdx + 1), ...chain.slice(0, startIdx)]
+    : chain.filter(p => p !== primaryProvider);
+  return rotated.filter(p => !!getApiKeyForProvider(extensionAPI, p) && !isProviderCoolingDown(p));
 }
 
 function getModelCostRates(model) {
@@ -2849,6 +3228,20 @@ function normaliseConversationTurn(input) {
 }
 
 function persistConversationContext(extensionAPI = extensionAPIRef) {
+  if (conversationPersistTimeoutId) {
+    window.clearTimeout(conversationPersistTimeoutId);
+  }
+  conversationPersistTimeoutId = window.setTimeout(() => {
+    conversationPersistTimeoutId = null;
+    extensionAPI?.settings?.set?.(SETTINGS_KEYS.conversationContext, conversationTurns);
+  }, 5000); // 5s debounce to reduce IndexedDB writes
+}
+
+function flushPersistConversationContext(extensionAPI = extensionAPIRef) {
+  if (conversationPersistTimeoutId) {
+    window.clearTimeout(conversationPersistTimeoutId);
+    conversationPersistTimeoutId = null;
+  }
   extensionAPI?.settings?.set?.(SETTINGS_KEYS.conversationContext, conversationTurns);
 }
 
@@ -2887,7 +3280,7 @@ function clearConversationContext(options = {}) {
   conversationTurns = [];
   lastPromptSections = null;
   lastKnownPageContext = null;
-  if (persist) persistConversationContext(extensionAPI);
+  if (persist) flushPersistConversationContext(extensionAPI);
 }
 
 function getComposioMetaToolsFromMcpList(listResult) {
@@ -3030,7 +3423,8 @@ function escapeForDatalog(value) {
     .replace(/\\/g, "\\\\")
     .replace(/"/g, '\\"')
     .replace(/\n/g, "\\n")
-    .replace(/\r/g, "\\r");
+    .replace(/\r/g, "\\r")
+    .replace(/\]/g, "\\]");
 }
 
 // Extract block string from any Roam API key format (:block/string, block/string, or string)
@@ -3144,10 +3538,17 @@ async function getPageUidByTitleAsync(title) {
   return Array.isArray(result) && result[0] ? result[0][0] : null;
 }
 
+// Depth-limited pull pattern for page trees — 6 explicit levels, no unbounded
+// recursion. Prevents pathological query times on deeply nested pages while
+// covering the vast majority of real-world structures.
+const BLOCK_FIELDS = ":block/uid :block/string :block/order";
+const BLOCK_TREE_PULL_PATTERN = `[${BLOCK_FIELDS} {:block/children [${BLOCK_FIELDS} {:block/children [${BLOCK_FIELDS} {:block/children [${BLOCK_FIELDS} {:block/children [${BLOCK_FIELDS} {:block/children [${BLOCK_FIELDS}]}]}]}]}]}]`;
+const PAGE_TREE_PULL_PATTERN = `[:block/uid :node/title {:block/children [${BLOCK_FIELDS} {:block/children [${BLOCK_FIELDS} {:block/children [${BLOCK_FIELDS} {:block/children [${BLOCK_FIELDS} {:block/children [${BLOCK_FIELDS} {:block/children [${BLOCK_FIELDS}]}]}]}]}]}]}]`;
+
 function getPageTreeByTitle(title) {
   const api = requireRoamQueryApi(getRoamAlphaApi());
   const escapedTitle = escapeForDatalog(title);
-  const pageResult = api.q(`[:find (pull ?p [:block/uid :node/title {:block/children [:block/uid :block/string :block/order {:block/children [:block/uid :block/string :block/order {:block/children [:block/uid :block/string :block/order {:block/children ...}]}]}]}]) .
+  const pageResult = api.q(`[:find (pull ?p ${PAGE_TREE_PULL_PATTERN}) .
     :where
     [?p :node/title "${escapedTitle}"]]`);
   if (!pageResult) {
@@ -3172,7 +3573,7 @@ function getPageTreeByTitle(title) {
 
 async function getPageTreeByTitleAsync(title) {
   const escapedTitle = escapeForDatalog(title);
-  const pageResult = await queryRoamDatalog(`[:find (pull ?p [:block/uid :node/title {:block/children [:block/uid :block/string :block/order {:block/children [:block/uid :block/string :block/order {:block/children [:block/uid :block/string :block/order {:block/children ...}]}]}]}]) .
+  const pageResult = await queryRoamDatalog(`[:find (pull ?p ${PAGE_TREE_PULL_PATTERN}) .
     :where
     [?p :node/title "${escapedTitle}"]]`);
   if (!pageResult) {
@@ -3197,7 +3598,7 @@ async function getPageTreeByTitleAsync(title) {
 
 async function getPageTreeByUidAsync(uid) {
   const escapedUid = escapeForDatalog(uid);
-  const pageResult = await queryRoamDatalog(`[:find (pull ?p [:node/title :block/uid {:block/children [:block/uid :block/string :block/order {:block/children [:block/uid :block/string :block/order {:block/children [:block/uid :block/string :block/order {:block/children ...}]}]}]}]) .
+  const pageResult = await queryRoamDatalog(`[:find (pull ?p ${PAGE_TREE_PULL_PATTERN}) .
     :where
     [?p :block/uid "${escapedUid}"]
     [?p :node/title]]`);
@@ -3221,12 +3622,25 @@ function truncateRoamBlockText(text) {
   return safeText;
 }
 
+/**
+ * Verify a UID exists in the graph before writing under it.
+ * Guards against LLM-hallucinated UIDs placing content in the wrong location.
+ */
+function requireRoamUidExists(uid, label = "UID") {
+  const api = getRoamAlphaApi();
+  const data = api?.data?.pull?.("[:block/uid]", [":block/uid", uid]);
+  if (!data) throw new Error(`${label} "${uid}" not found in graph.`);
+}
+
 async function withRoamWriteRetry(fn, retries = 2) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       return await fn();
     } catch (error) {
-      if (attempt === retries) throw error;
+      // Don't retry validation / permanent errors — only transient (network, timeout, lock)
+      const msg = String(error?.message || "").toLowerCase();
+      const isPermanent = msg.includes("not found") || msg.includes("invalid") || msg.includes("permission");
+      if (isPermanent || attempt === retries) throw error;
       const delay = 300 * Math.pow(2, attempt); // 300ms, 600ms
       debugLog(`[Chief flow] Roam write failed (attempt ${attempt + 1}/${retries + 1}), retrying in ${delay}ms...`, error?.message);
       await new Promise(resolve => setTimeout(resolve, delay));
@@ -3848,8 +4262,8 @@ async function bootstrapMemoryPages() {
     {
       title: "Chief of Staff/Inbox",
       lines: [
-        "Quick captures from chat (notes, ideas, reminders).",
-        "Triage periodically into Projects, Decisions, or Better Tasks."
+        "Drop items here for Chief of Staff to process automatically.",
+        "Works with Make, MCP, manual entry, or any external service."
       ]
     },
     ...(!hasBetterTasksAPI() ? [{
@@ -3913,7 +4327,12 @@ function getBetterTasksTools() {
     "bt_get_projects": "roam_bt_get_projects",
     "bt_get_waiting_for": "roam_bt_get_waiting_for",
     "bt_get_context": "roam_bt_get_context",
-    "bt_get_attributes": "roam_bt_get_attributes"
+    "bt_get_attributes": "roam_bt_get_attributes",
+    "bt_get_analytics": "roam_bt_get_analytics",
+    "bt_get_task_by_uid": "roam_bt_get_task_by_uid",
+    "roam_bt_search": "roam_bt_search_tasks",
+    "roam_bt_create": "roam_bt_create_task",
+    "roam_bt_modify": "roam_bt_modify_task",
   };
 
   const mapped = ext.tools
@@ -4091,6 +4510,7 @@ function getRoamNativeTools() {
       execute: async ({ parent_uid, text, order = "last" } = {}) => {
         const parentUid = String(parent_uid || "").trim();
         if (!parentUid) throw new Error("parent_uid is required");
+        requireRoamUidExists(parentUid, "parent_uid");
         const uid = await createRoamBlock(parentUid, text, order);
         return {
           success: true,
@@ -4112,29 +4532,75 @@ function getRoamNativeTools() {
       execute: async ({ uid } = {}) => {
         const blockUid = String(uid || "").trim();
         if (!blockUid) throw new Error("uid is required");
+        requireRoamUidExists(blockUid, "uid");
         const api = getRoamAlphaApi();
         if (!api?.deleteBlock) throw new Error("Roam deleteBlock API unavailable");
+        // Guard: refuse to delete page-level entities or Chief of Staff system pages
+        const escapedUid = escapeForDatalog(blockUid);
+        const pageTitle = api.q?.(`[:find ?t . :where [?e :block/uid "${escapedUid}"] [?e :node/title ?t]]`);
+        if (pageTitle) {
+          const systemPages = [...getActiveMemoryPageTitles(), SKILLS_PAGE_TITLE];
+          if (systemPages.includes(pageTitle)) {
+            throw new Error(`Refusing to delete Chief of Staff system page: "${pageTitle}"`);
+          }
+          throw new Error(`UID "${blockUid}" is a page ("${pageTitle}"). Use Roam to delete pages directly.`);
+        }
         await withRoamWriteRetry(() => api.deleteBlock({ block: { uid: blockUid } }));
         return { success: true, deleted_uid: blockUid };
       }
     },
     {
       name: "roam_update_block",
-      description: "Update the text content of an existing block in Roam by UID.",
+      description: "Update an existing block in Roam by UID. Can change text, heading level, children view type, text alignment, open/collapsed state, and block props (key/value attributes like BT_attrDue, BT_attrProject, etc.).",
       input_schema: {
         type: "object",
         properties: {
           uid: { type: "string", description: "Block UID to update." },
-          text: { type: "string", description: "New text content for the block." }
+          text: { type: "string", description: "New text content for the block. Omit to leave text unchanged." },
+          heading: { type: "integer", enum: [0, 1, 2, 3], description: "Heading level: 0 = normal text, 1 = H1, 2 = H2, 3 = H3. Omit to leave unchanged." },
+          "children-view-type": { type: "string", enum: ["bullet", "numbered", "document"], description: "How child blocks render: bullet (default), numbered, or document. Omit to leave unchanged." },
+          "text-align": { type: "string", enum: ["left", "center", "right", "justify"], description: "Text alignment. Omit to leave unchanged." },
+          open: { type: "boolean", description: "true = expanded, false = collapsed. Omit to leave unchanged." },
+          props: {
+            type: "object",
+            description: "Block props to set or remove (merged with existing props). Each key is a prop name (e.g. BT_attrDue, BT_attrProject). Set a value to null to delete that prop.",
+            additionalProperties: true
+          }
         },
-        required: ["uid", "text"]
+        required: ["uid"]
       },
-      execute: async ({ uid, text } = {}) => {
+      execute: async ({ uid, text, heading, "children-view-type": childrenViewType, "text-align": textAlign, open, props } = {}) => {
         const blockUid = String(uid || "").trim();
         if (!blockUid) throw new Error("uid is required");
-        const newText = String(text ?? "");
+        requireRoamUidExists(blockUid, "uid");
         const api = requireRoamUpdateBlockApi(getRoamAlphaApi());
-        await withRoamWriteRetry(() => api.updateBlock({ block: { uid: blockUid, string: truncateRoamBlockText(newText) } }));
+        const blockPayload = { uid: blockUid };
+        if (text !== undefined) blockPayload.string = truncateRoamBlockText(String(text ?? ""));
+        if (heading !== undefined) {
+          const h = Number(heading);
+          if (![0, 1, 2, 3].includes(h)) throw new Error("heading must be 0, 1, 2, or 3");
+          blockPayload.heading = h;
+        }
+        if (childrenViewType !== undefined) {
+          if (!["bullet", "numbered", "document"].includes(childrenViewType)) throw new Error("children-view-type must be bullet, numbered, or document");
+          blockPayload["children-view-type"] = childrenViewType;
+        }
+        if (textAlign !== undefined) {
+          if (!["left", "center", "right", "justify"].includes(textAlign)) throw new Error("text-align must be left, center, right, or justify");
+          blockPayload["text-align"] = textAlign;
+        }
+        if (open !== undefined) blockPayload.open = !!open;
+        if (props !== undefined) {
+          if (typeof props !== "object" || props === null || Array.isArray(props)) throw new Error("props must be a plain object");
+          // Read-merge-write: read current props, merge patch, write back.
+          // This avoids clobbering unrelated props on the block.
+          const pullData = api.pull?.("[:block/props]", [":block/uid", blockUid])
+            ?? api.data?.pull?.("[:block/props]", [":block/uid", blockUid]);
+          const currentProps = pullData?.[":block/props"] || {};
+          blockPayload.props = { ...currentProps, ...props };
+        }
+        if (Object.keys(blockPayload).length <= 1) throw new Error("At least one property to update must be provided (text, heading, children-view-type, text-align, open, or props)");
+        await withRoamWriteRetry(() => api.updateBlock({ block: blockPayload }));
         return { success: true, updated_uid: blockUid };
       }
     },
@@ -4155,6 +4621,8 @@ function getRoamNativeTools() {
         const parentUid = String(parent_uid || "").trim();
         if (!blockUid) throw new Error("uid is required");
         if (!parentUid) throw new Error("parent_uid is required");
+        requireRoamUidExists(blockUid, "uid");
+        requireRoamUidExists(parentUid, "parent_uid");
         const api = getRoamAlphaApi();
         if (!api?.moveBlock) throw new Error("Roam moveBlock API unavailable");
         await withRoamWriteRetry(() => api.moveBlock({
@@ -4178,7 +4646,7 @@ function getRoamNativeTools() {
         const blockUid = String(uid || "").trim();
         if (!blockUid) throw new Error("uid is required");
         const escapedUid = escapeForDatalog(blockUid);
-        const result = await queryRoamDatalog(`[:find (pull ?b [:block/uid :block/string :block/order {:block/children [:block/uid :block/string :block/order {:block/children [:block/uid :block/string :block/order {:block/children ...}]}]}]) .
+        const result = await queryRoamDatalog(`[:find (pull ?b ${BLOCK_TREE_PULL_PATTERN}) .
           :where [?b :block/uid "${escapedUid}"]]`);
         if (!result) return { uid: blockUid, text: null, children: [] };
         return flattenBlockTree(result);
@@ -4347,17 +4815,22 @@ function getRoamNativeTools() {
     },
     {
       name: "roam_get_recent_changes",
-      description: "Get pages modified within a time window, sorted by most recent first.",
+      description: "Get pages and optionally blocks modified within a time window, sorted by most recent first.",
       input_schema: {
         type: "object",
         properties: {
           hours: { type: "number", description: "Look-back window in hours. Default 24." },
           exclude_daily_notes: { type: "boolean", description: "Exclude daily note pages (e.g. 'February 15th, 2026'). Default false." },
-          limit: { type: "number", description: "Max results to return. Default 20." }
+          include_blocks: { type: "boolean", description: "Include recently edited blocks per page. Default false." },
+          max_blocks_per_page: { type: "number", description: "Max blocks per page when include_blocks is true. Default 5." },
+          limit: { type: "number", description: "Max pages to return. Default 20." }
         }
       },
-      execute: async ({ hours = 24, exclude_daily_notes = false, limit = 20 } = {}) => {
-        const floor = Date.now() - (hours * 60 * 60 * 1000);
+      execute: async ({ hours = 24, exclude_daily_notes = false, include_blocks = false, max_blocks_per_page = 5, limit = 20 } = {}) => {
+        const validHours = Number.isFinite(hours) ? Math.max(0.01, Math.min(8760, hours)) : 24;
+        const validLimit = Number.isFinite(limit) ? Math.max(1, Math.min(500, limit)) : 20;
+        const validBlockCap = Number.isFinite(max_blocks_per_page) ? Math.max(1, Math.min(20, max_blocks_per_page)) : 5;
+        const floor = Date.now() - (validHours * 60 * 60 * 1000);
         const results = await queryRoamDatalog(
           `[:find ?title ?uid ?time
             :where
@@ -4366,7 +4839,7 @@ function getRoamNativeTools() {
             [?p :edit/time ?time]
             [(> ?time ${floor})]]`
         );
-        if (!results?.length) return { pages: [], count: 0 };
+        if (!results?.length) return { pages: [], count: 0, total: 0 };
 
         let pages = results
           .map(([title, uid, time]) => ({ title, uid, edited: new Date(time).toISOString() }))
@@ -4379,8 +4852,35 @@ function getRoamNativeTools() {
           }
         }
 
-        const trimmed = pages.slice(0, limit);
-        return { pages: trimmed, count: trimmed.length, total: pages.length };
+        const total = pages.length;
+        const trimmed = pages.slice(0, validLimit);
+
+        if (include_blocks) {
+          const cap = validBlockCap;
+          for (const page of trimmed) {
+            try {
+              const blocks = await queryRoamDatalog(
+                `[:find ?string ?uid ?time
+                  :where
+                  [?p :block/uid "${page.uid}"]
+                  [?b :block/page ?p]
+                  [?b :block/string ?string]
+                  [?b :block/uid ?uid]
+                  [?b :edit/time ?time]
+                  [(> ?time ${floor})]]`
+              );
+              page.blocks = (blocks || [])
+                .map(([string, uid, time]) => ({ text: string, uid, edited: new Date(time).toISOString() }))
+                .sort((a, b) => new Date(b.edited) - new Date(a.edited))
+                .slice(0, cap);
+            } catch (err) {
+              page.blocks = [];
+              page.blockError = err?.message || "Failed to fetch blocks";
+            }
+          }
+        }
+
+        return { pages: trimmed, count: trimmed.length, total };
       }
     },
     {
@@ -4617,6 +5117,11 @@ function getRoamNativeTools() {
           workItems.push({ parentUid, blocks });
         }
 
+        // Validate all target UIDs exist before any writes
+        for (const { parentUid } of workItems) {
+          requireRoamUidExists(parentUid, "parent_uid");
+        }
+
         const allBlocks = workItems.flatMap(w => w.blocks);
         const totalNodes = countBlockTreeNodes(allBlocks);
         if (totalNodes > MAX_CREATE_BLOCKS_TOTAL) {
@@ -4637,6 +5142,37 @@ function getRoamNativeTools() {
           total_created: results.reduce((sum, r) => sum + r.created_count, 0),
           results
         };
+      }
+    },
+    {
+      name: "roam_batch_write",
+      description: "Write structured content as nested blocks under a parent. Accepts markdown — headings become parent blocks, list items become children. Handles nesting and chunking automatically. Use this instead of multiple roam_create_block/roam_create_blocks calls when writing structured content like reviews, briefings, or outlines.",
+      input_schema: {
+        type: "object",
+        properties: {
+          parent_uid: { type: "string", description: "UID of the page or block to write under." },
+          markdown: { type: "string", description: "Markdown content. Use ## headings for sections, - lists for items, **bold** for emphasis. Headings create parent blocks; list items nest as children." },
+          order: { type: "string", description: "Where to insert: 'first' or 'last'. Default 'last'." }
+        },
+        required: ["parent_uid", "markdown"]
+      },
+      execute: async ({ parent_uid, markdown, order = "last" } = {}) => {
+        const parentUid = String(parent_uid || "").trim();
+        if (!parentUid) throw new Error("parent_uid is required");
+        requireRoamUidExists(parentUid, "parent_uid");
+        const md = String(markdown || "").trim();
+        if (!md) throw new Error("markdown content is required");
+        return withRoamWriteRetry(async () => {
+          const api = getRoamAlphaApi();
+          if (!api?.data?.block?.fromMarkdown) {
+            throw new Error("Roam fromMarkdown API unavailable.");
+          }
+          const result = await api.data.block.fromMarkdown({
+            location: { "parent-uid": parentUid, order: order === "first" ? 0 : "last" },
+            "markdown-string": md
+          });
+          return { success: true, parent_uid: parentUid, uids: result };
+        });
       }
     },
     {
@@ -4938,7 +5474,10 @@ function getRoamNativeTools() {
 
         let targetUid = String(parent_uid || "").trim();
         if (!targetUid) {
-          targetUid = await ensureDailyPageUid();
+          const { pageUid } = await ensureDailyPageUid();
+          targetUid = pageUid;
+        } else {
+          requireRoamUidExists(targetUid, "parent_uid");
         }
 
         const blockText = `{{[[TODO]]}} ${todoText}`;
@@ -5061,11 +5600,19 @@ function getCosIntegrationTools() {
             type: "number",
             description: "Days from today. 0 = today, 1 = tomorrow, -1 = yesterday. Default 0."
           },
+          day_offset_start: {
+            type: "number",
+            description: "Start of date range as offset from today. Use with day_offset_end for multi-day range."
+          },
+          day_offset_end: {
+            type: "number",
+            description: "End of date range as offset from today. Use with day_offset_start for multi-day range."
+          },
           max_results: { type: "number", description: "Max events to return. Default 10." }
         }
       },
-      execute: async ({ day_offset, max_results } = {}) =>
-        runDeterministicCalendarRead({ dayOffset: day_offset, maxResults: max_results })
+      execute: async ({ day_offset, day_offset_start, day_offset_end, max_results } = {}) =>
+        runDeterministicCalendarRead({ dayOffset: day_offset, dayOffsetStart: day_offset_start, dayOffsetEnd: day_offset_end, maxResults: max_results })
     }
   ];
 }
@@ -5272,7 +5819,9 @@ async function fireCronJob(job) {
   function flushCronStreamRender() {
     streamRenderPending = false;
     if (!streamingEl || !document.body.contains(streamingEl)) return;
-    streamingEl.innerHTML = renderMarkdownToSafeHtml(streamChunks.join(""));
+    const joined = streamChunks.join("");
+    const capped = joined.length > 60000 ? joined.slice(joined.length - 60000) : joined;
+    streamingEl.innerHTML = renderMarkdownToSafeHtml(capped);
     refreshChatPanelElementRefs();
     if (chatPanelMessages) chatPanelMessages.scrollTop = chatPanelMessages.scrollHeight;
   }
@@ -5329,7 +5878,15 @@ async function cronTick() {
 
   if (!dueJobs.length) return;
 
-  // Re-verify leadership right before executing (belt-and-suspenders for TOCTOU)
+  // Re-verify leadership right before executing (belt-and-suspenders for TOCTOU).
+  // Read-only check first — avoids a write that could itself race with another tab.
+  try {
+    const leaderRaw = localStorage.getItem(CRON_LEADER_KEY);
+    if (leaderRaw) {
+      const leaderData = JSON.parse(leaderRaw);
+      if (leaderData.tabId !== cronLeaderTabId) { cronLeaderTabId = null; return; }
+    }
+  } catch { /* ignore — fall through to heartbeat */ }
   cronHeartbeat();
   if (!cronIsLeader()) return;
 
@@ -5394,11 +5951,14 @@ function startCronScheduler() {
   // Tick loop: check due jobs every 60 seconds
   cronTickIntervalId = window.setInterval(() => cronTick(), CRON_TICK_INTERVAL_MS);
 
-  // Initial tick after a short delay (let extension finish loading, catch missed jobs)
+  // Initial tick after a short delay (let extension finish loading, catch missed jobs).
+  // Random jitter (0–5s) reduces the chance of two tabs racing to claim leadership
+  // and both executing the same cron jobs during the overlap window.
+  const cronInitialJitterMs = Math.floor(Math.random() * 5000);
   cronInitialTickTimeoutId = window.setTimeout(() => {
     cronInitialTickTimeoutId = null;
     if (cronSchedulerRunning && !unloadInProgress) cronTick();
-  }, 5000);
+  }, 5000 + cronInitialJitterMs);
 
   debugLog("[Chief cron] Scheduler started, leader:", cronIsLeader());
 }
@@ -5676,7 +6236,8 @@ async function getAvailableToolSchemas() {
     }
   }
 
-  const tools = [...adjustedMetaTools, ...getRoamNativeTools(), ...getBetterTasksTools(), ...getCosIntegrationTools(), ...getCronTools(), ...getExternalExtensionTools()];
+  const localMcpTools = await getLocalMcpTools();
+  const tools = [...adjustedMetaTools, ...getRoamNativeTools(), ...getBetterTasksTools(), ...getCosIntegrationTools(), ...getCronTools(), ...getExternalExtensionTools(), ...localMcpTools];
   return tools;
 }
 
@@ -5885,8 +6446,9 @@ For Roam:
 - Use roam_get_page or roam_get_daily_page to locate context before writing
 - Use roam_open_page to navigate the user to a page in Roam's main window
 - When referencing Roam pages in your response, use [[Page Title]] syntax — these become clickable links in the chat panel
-- Use roam_create_block only when the user asks to save/write into Roam
+- Use roam_create_block only for single blocks when the user asks to save/write into Roam
 - Use roam_create_blocks with batches param to write to multiple locations in one call
+- For structured multi-section output (reviews, briefings, outlines), prefer roam_batch_write with markdown over multiple roam_create_block/roam_create_blocks calls — it handles heading hierarchy, nested lists, and formatting natively
 - Use roam_update_block to edit existing block text by UID
 - Use roam_link_mention to atomically wrap an unlinked page mention in [[...]] within a block — use the block uid and title from roam_link_suggestions results. NEVER use roam_update_block for linking; always use roam_link_mention instead
 - Use roam_move_block to move a block under a new parent by UID
@@ -5956,7 +6518,33 @@ Always use British English spelling and conventions (e.g. organise, prioritise, 
     debugLog("[Chief flow] Extension tools summary failed:", e?.message);
   }
 
-  const parts = [coreInstructions, memorySection, projectContext, extToolsSummary, skillsSection, cronSection, schemaSection, btSchema].filter(Boolean);
+  // Build a summary of local MCP server tools so the LLM knows they exist, grouped by server
+  let localMcpToolsSummary = "";
+  try {
+    const localTools = localMcpToolsCache || [];
+    if (localTools.length > 0) {
+      // Group tools by server name
+      const serverGroups = new Map();
+      for (const t of localTools) {
+        const key = t._serverName || "Unknown Server";
+        if (!serverGroups.has(key)) {
+          serverGroups.set(key, { description: t._serverDescription || "", tools: [] });
+        }
+        const desc = t.description ? ` — ${t.description}` : "";
+        serverGroups.get(key).tools.push(`- **${t.name}**${desc}`);
+      }
+      const sections = [];
+      for (const [name, group] of serverGroups) {
+        const header = group.description ? `### ${name}\n${group.description}` : `### ${name}`;
+        sections.push(`${header}\n${group.tools.join("\n")}`);
+      }
+      localMcpToolsSummary = `## Local MCP Server Tools\nThe following tools are provided by local MCP servers running on your machine. Call them DIRECTLY by tool name. Do NOT route these through COMPOSIO_MULTI_EXECUTE_TOOL — they are local tools, not Composio actions.\n\n${sections.join("\n\n")}`;
+    }
+  } catch (e) {
+    debugLog("[Chief flow] Local MCP tools summary failed:", e?.message);
+  }
+
+  const parts = [coreInstructions, memorySection, projectContext, extToolsSummary, localMcpToolsSummary, skillsSection, cronSection, schemaSection, btSchema].filter(Boolean);
   const fullPrompt = parts.join("\n\n");
 
   debugLog("[Chief flow] System prompt breakdown:", {
@@ -5964,6 +6552,7 @@ Always use British English spelling and conventions (e.g. organise, prioritise, 
     memory: memorySection.length,
     projectContext: projectContext.length,
     extToolsSummary: extToolsSummary.length,
+    localMcpToolsSummary: localMcpToolsSummary.length,
     skills: skillsSection.length,
     toolkitSchemas: schemaSection.length,
     btSchema: btSchema.length,
@@ -6200,8 +6789,9 @@ function normaliseEmailTimestamp(value) {
   if (typeof value !== "string") return "";
   const trimmed = value.trim();
   if (!trimmed) return "";
-  if (/^\d{12,16}$/.test(trimmed)) {
-    const millis = Number.parseInt(trimmed, 10);
+  if (/^\d{10,16}$/.test(trimmed)) {
+    const n = Number.parseInt(trimmed, 10);
+    const millis = trimmed.length <= 11 ? n * 1000 : n; // 10-11 digits = seconds, 12+ = millis
     if (Number.isFinite(millis)) {
       const asDate = new Date(millis);
       if (!Number.isNaN(asDate.getTime())) return asDate.toISOString();
@@ -6485,19 +7075,31 @@ async function runDeterministicCalendarRead(intent) {
     return "Composio is not connected. Please reconnect Composio and try again.";
   }
 
+  const useRange = Number.isFinite(intent?.dayOffsetStart) && Number.isFinite(intent?.dayOffsetEnd);
+
+  if (useRange) {
+    // Range mode: fetch across all calendars in one call
+    const startDay = addLocalDays(getStartOfLocalDay(new Date()), intent.dayOffsetStart);
+    const endDay = addLocalDays(getStartOfLocalDay(new Date()), intent.dayOffsetEnd);
+    const tzSuffix = buildLocalTzSuffix(startDay);
+    const time_min = `${formatDatePart(startDay)}T00:00:00${tzSuffix}`;
+    const time_max = `${formatDatePart(endDay)}T23:59:59${tzSuffix}`;
+    debugLog("[Chief flow] Calendar range read:", { time_min, time_max, dayOffsetStart: intent.dayOffsetStart, dayOffsetEnd: intent.dayOffsetEnd });
+
+    // GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS uses snake_case params.
+    const args = { time_min, time_max, single_events: true };
+    const attempt = await runComposioMultiExecuteReadWithFallback("GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS", [args]);
+    if (!attempt.ok) {
+      return "I couldn't fetch calendar events from Composio right now. Please confirm the Google Calendar connection is active and try again.";
+    }
+    return summariseCalendarRecords(attempt.result);
+  }
+
+  // Single-day mode (existing behaviour)
   const baseDay = addLocalDays(getStartOfLocalDay(new Date()), Number.isFinite(intent?.dayOffset) ? intent.dayOffset : 0);
-  // Build RFC3339 timestamps with local timezone offset (not UTC "Z")
-  // so Google Calendar interprets the window in the user's local timezone.
-  const tzOffset = -baseDay.getTimezoneOffset();
-  const tzSign = tzOffset >= 0 ? "+" : "-";
-  const tzHH = String(Math.floor(Math.abs(tzOffset) / 60)).padStart(2, "0");
-  const tzMM = String(Math.abs(tzOffset) % 60).padStart(2, "0");
-  const tzSuffix = `${tzSign}${tzHH}:${tzMM}`;
-  const yyyy = baseDay.getFullYear();
-  const mm = String(baseDay.getMonth() + 1).padStart(2, "0");
-  const dd = String(baseDay.getDate()).padStart(2, "0");
-  const timeMin = `${yyyy}-${mm}-${dd}T00:00:00${tzSuffix}`;
-  const timeMax = `${yyyy}-${mm}-${dd}T23:59:59${tzSuffix}`;
+  const tzSuffix = buildLocalTzSuffix(baseDay);
+  const timeMin = `${formatDatePart(baseDay)}T00:00:00${tzSuffix}`;
+  const timeMax = `${formatDatePart(baseDay)}T23:59:59${tzSuffix}`;
   debugLog("[Chief flow] Calendar read:", { timeMin, timeMax, dayOffset: intent?.dayOffset ?? 0 });
 
   // GOOGLECALENDAR_EVENTS_LIST uses camelCase params.
@@ -6514,6 +7116,21 @@ async function runDeterministicCalendarRead(intent) {
     return "I couldn't fetch calendar events from Composio right now. Please confirm the Google Calendar connection is active and try again.";
   }
   return summariseCalendarRecords(attempt.result);
+}
+
+function buildLocalTzSuffix(date) {
+  const tzOffset = -date.getTimezoneOffset();
+  const tzSign = tzOffset >= 0 ? "+" : "-";
+  const tzHH = String(Math.floor(Math.abs(tzOffset) / 60)).padStart(2, "0");
+  const tzMM = String(Math.abs(tzOffset) % 60).padStart(2, "0");
+  return `${tzSign}${tzHH}:${tzMM}`;
+}
+
+function formatDatePart(date) {
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
 }
 
 async function runDeterministicEmailRead(intent) {
@@ -6854,6 +7471,129 @@ async function runDeterministicMemorySave(intent) {
   return `Saved to [[${label}]]${result?.uid ? ` (uid: ${result.uid})` : ""}.`;
 }
 
+// ─── Gathering Completeness Guard ──────────────────────────────────────────────
+
+function parseSkillSources(skillContent, knownToolNames = null) {
+  const lines = String(skillContent || "").split("\n");
+
+  // Phase 1: find the "Sources" header and collect its child lines
+  let inSources = false;
+  let sourceIndent = -1;
+  const sourceLines = [];
+
+  for (const line of lines) {
+    if (!inSources) {
+      if (/^\s*-?\s*Sources\s*(?:—|:)/i.test(line)) {
+        inSources = true;
+        sourceIndent = (line.match(/^(\s*)/)?.[1] || "").length;
+      }
+      continue;
+    }
+    const indent = (line.match(/^(\s*)/)?.[1] || "").length;
+    if (indent > sourceIndent && line.trim()) {
+      sourceLines.push(line.trim().replace(/^-\s*/, ""));
+    } else if (line.trim()) {
+      break; // back to same or lower indent = end of sources
+    }
+  }
+
+  if (!sourceLines.length) return [];
+
+  // COS memory pages already loaded in system prompt — skip these
+  const preloadedPages = new Set([
+    ...MEMORY_PAGE_TITLES_BASE,
+    "Chief of Staff/Skills",
+    "Chief of Staff/Projects"
+  ]);
+
+  // Phase 2: parse each child line into a source entry
+  const sources = [];
+  for (const seg of sourceLines) {
+    const pageRefs = [...seg.matchAll(/\[\[([^\]]+)\]\]/g)].map(m => m[1]);
+
+    // Check for known tool name prefix (try longest match first)
+    const toolThreeWord = seg.match(/^(\w+_\w+_\w+)/)?.[1] || "";
+    const toolTwoWord = seg.match(/^(\w+_\w+)/)?.[1] || "";
+    const toolOneWord = seg.match(/^(\w+)/)?.[1] || "";
+    const resolvedTool = SOURCE_TOOL_NAME_MAP[toolThreeWord]
+      || SOURCE_TOOL_NAME_MAP[toolTwoWord]
+      || SOURCE_TOOL_NAME_MAP[toolOneWord];
+
+    if (resolvedTool) {
+      sources.push({ tool: resolvedTool, description: seg });
+      continue;
+    }
+
+    // Fallback: check live tool registry for extension tools not in the static map
+    if (knownToolNames) {
+      const directMatch = knownToolNames.has(toolThreeWord) ? toolThreeWord
+        : knownToolNames.has(toolTwoWord) ? toolTwoWord
+          : knownToolNames.has(toolOneWord) ? toolOneWord
+            : null;
+      if (directMatch) {
+        sources.push({ tool: directMatch, description: seg });
+        continue;
+      }
+    }
+
+    // Pure page references (no tool prefix)
+    if (pageRefs.length > 0) {
+      for (const title of pageRefs) {
+        if (preloadedPages.has(title)) continue;
+        sources.push({ tool: "roam_get_page", description: `[[${title}]]` });
+      }
+      continue;
+    }
+    // Skip unrecognised sources — not enforced
+  }
+  return sources;
+}
+
+function checkGatheringCompleteness(expectedSources, actualCallNames) {
+  if (!expectedSources.length) return [];
+
+  const expectedByTool = {};
+  for (const source of expectedSources) {
+    if (!expectedByTool[source.tool]) expectedByTool[source.tool] = [];
+    expectedByTool[source.tool].push(source);
+  }
+
+  console.info(`[Chief flow] Gathering guard sources: ${JSON.stringify(expectedByTool)}`);
+
+  const actualCounts = {};
+  for (const name of actualCallNames) {
+    actualCounts[name] = (actualCounts[name] || 0) + 1;
+  }
+
+  const missed = [];
+  for (const [tool, sources] of Object.entries(expectedByTool)) {
+    const actual = actualCounts[tool] || 0;
+
+    if (tool === "roam_bt_search_tasks") {
+      // Count-based: expect ≥N calls
+      if (actual < sources.length) {
+        missed.push(...sources.slice(actual).map(s => s.description));
+      }
+    } else if (tool === "cos_calendar_fetch") {
+      // Boolean: just check called at all (LLM decides range strategy)
+      if (actual === 0) {
+        missed.push(sources[0].description);
+      }
+    } else if (tool === "roam_get_page") {
+      // Count-based: each page reference is distinct
+      if (actual < sources.length) {
+        missed.push(...sources.slice(actual).map(s => s.description));
+      }
+    } else {
+      // Default: boolean — called at all
+      if (actual === 0) {
+        missed.push(sources[0].description);
+      }
+    }
+  }
+  return missed;
+}
+
 async function runDeterministicSkillInvocation(intent, options = {}) {
   const { suppressToasts = false } = options;
   const skillName = String(intent?.skillName || "").trim();
@@ -6881,7 +7621,7 @@ async function runDeterministicSkillInvocation(intent, options = {}) {
 
   let systemPromptSuffix = `\n\nYou must prioritize this skill for this turn.`;
   if (isDailyPageWriteSkill) {
-    systemPromptSuffix += `\n\nIMPORTANT: Do NOT call roam_create_blocks or roam_get_daily_page. The system will write your output to the daily page automatically. Just produce the briefing content as structured markdown with headings (#### for sections) and numbered/bulleted lists. Do NOT include any preamble, confirmation, or conversational text — output ONLY the structured briefing content.`;
+    systemPromptSuffix += `\n\nIMPORTANT: Do NOT call roam_create_blocks, roam_batch_write, or roam_get_daily_page. The system will write your output to the daily page automatically. Just produce the briefing content as structured markdown with headings (#### for sections) and FLAT bulleted lists (no indentation — every list item must start at column 0 with "- "). Indentation in your output maps directly to Roam block nesting, so indented items become children rather than siblings. Do NOT include any preamble, confirmation, or conversational text — output ONLY the structured briefing content.`;
   }
 
   const systemPrompt = `${await buildDefaultSystemPrompt(skillPrompt)}
@@ -6890,9 +7630,20 @@ async function runDeterministicSkillInvocation(intent, options = {}) {
 ${skill.content}
 ${systemPromptSuffix}`;
 
-  const result = await runAgentLoop(skillPrompt, {
+  // Parse expected sources for gathering completeness guard
+  const toolSchemas = await getAvailableToolSchemas();
+  const knownToolNames = new Set(toolSchemas.map(t => t.name));
+  const expectedSources = parseSkillSources(skill.content, knownToolNames);
+
+  const gatheringGuard = expectedSources.length > 0 ? { expectedSources } : null;
+  if (gatheringGuard) {
+    debugLog(`[Chief flow] Gathering guard active: ${expectedSources.length} expected sources for "${skill.title}"`);
+  }
+
+  const result = await runAgentLoopWithFailover(skillPrompt, {
     systemPrompt,
     powerMode: true,
+    gatheringGuard,
     onToolCall: (name) => {
       showInfoToastIfAllowed("Using tool", name, suppressToasts);
     }
@@ -6910,9 +7661,18 @@ ${systemPromptSuffix}`;
       }
       return -1;
     })();
-    const cleanedText = firstStructuredLine >= 0 && lastStructuredLine >= firstStructuredLine
+    let cleanedText = firstStructuredLine >= 0 && lastStructuredLine >= firstStructuredLine
       ? contentLines.slice(firstStructuredLine, lastStructuredLine + 1).join("\n").trim()
       : responseText;
+
+    // Flatten accidental LLM indentation on list items so they become siblings
+    // under their heading rather than progressively nested children.
+    // Headings and non-list lines are preserved as-is.
+    cleanedText = cleanedText.split("\n").map(line => {
+      // If the line is an indented list item, strip leading whitespace
+      if (/^\s+([-*]|\d+[.)]) /.test(line)) return line.trimStart();
+      return line;
+    }).join("\n");
 
     if (cleanedText.length > 40) {
       try {
@@ -6959,6 +7719,8 @@ async function getDeterministicConnectionSummary(extensionAPI) {
 function isLikelyReadOnlyToolSlug(toolSlug) {
   const slug = String(toolSlug || "").toUpperCase();
   if (!slug) return false;
+  const mutatingTokens = ["DELETE", "REMOVE", "SEND", "CREATE", "UPDATE", "MODIFY", "WRITE", "POST", "TRASH", "MOVE", "EXECUTE"];
+  if (mutatingTokens.some((token) => slug.includes(token))) return false;
   const readTokens = [
     "GET",
     "LIST",
@@ -7015,10 +7777,10 @@ function isPotentiallyMutatingTool(toolName, args) {
   const roamLowRiskCreationTools = new Set([
     "ROAM_CREATE_BLOCK",
     "ROAM_CREATE_BLOCKS",
+    "ROAM_BATCH_WRITE",
     "ROAM_BT_CREATE_TASK",
     "ROAM_BT_CREATE_TASK_FROM_BLOCK",
-    "ROAM_CREATE_TODO",
-    "ROAM_MODIFY_TODO"
+    "ROAM_CREATE_TODO"
   ]);
   if (roamLowRiskCreationTools.has(name)) {
     return false;
@@ -7040,6 +7802,12 @@ function isPotentiallyMutatingTool(toolName, args) {
   const externalTools = getExternalExtensionTools();
   if (externalTools.some(t => t.name.toUpperCase() === name)) {
     return !/\b(GET|LIST|SEARCH|FETCH|STATUS|CHECK)\b/i.test(name);
+  }
+
+  // Local MCP tools — same read-only-name heuristic
+  const localTools = localMcpToolsCache || [];
+  if (localTools.some(t => t.name.toUpperCase() === name)) {
+    return !/\b(GET|LIST|SEARCH|FETCH|STATUS|CHECK|READ|QUERY|FIND|DESCRIBE)\b/i.test(name);
   }
 
   if (name === "COMPOSIO_MULTI_EXECUTE_TOOL") {
@@ -7066,7 +7834,27 @@ function isPotentiallyMutatingTool(toolName, args) {
   return sensitiveTokens.some((token) => name.includes(token));
 }
 
-async function executeToolCall(toolName, args) {
+function pruneExpiredToolApprovals(now = Date.now()) {
+  for (const [approvalKey, approvedAt] of approvedToolsThisSession.entries()) {
+    if (!Number.isFinite(approvedAt) || (now - approvedAt) >= TOOL_APPROVAL_TTL_MS) {
+      approvedToolsThisSession.delete(approvalKey);
+    }
+  }
+}
+
+function hasValidToolApproval(approvalKey, now = Date.now()) {
+  pruneExpiredToolApprovals(now);
+  const approvedAt = approvedToolsThisSession.get(approvalKey);
+  if (!Number.isFinite(approvedAt)) return false;
+  return (now - approvedAt) < TOOL_APPROVAL_TTL_MS;
+}
+
+function rememberToolApproval(approvalKey, now = Date.now()) {
+  pruneExpiredToolApprovals(now);
+  approvedToolsThisSession.set(approvalKey, now);
+}
+
+async function executeToolCall(toolName, args, { readOnly = false } = {}) {
   const upperToolName = String(toolName || "").toUpperCase();
   let effectiveArgs = args || {};
   if (upperToolName === "COMPOSIO_MULTI_EXECUTE_TOOL") {
@@ -7138,6 +7926,14 @@ async function executeToolCall(toolName, args) {
   }
 
   const isMutating = isPotentiallyMutatingTool(toolName, effectiveArgs);
+
+  // Defence-in-depth: block tools not on the read-only allowlist when the agent loop
+  // is in read-only mode (inbox-triggered). Primary enforcement is tool filtering in
+  // runAgentLoop; this catches edge cases like hallucinated tool names.
+  if (readOnly && !INBOX_READ_ONLY_TOOL_ALLOWLIST.has(toolName)) {
+    return { error: "Read-only mode: this tool is blocked for inbox-triggered requests. Summarise your findings for the human to act on." };
+  }
+
   const extensionAPI = extensionAPIRef;
   if (isMutating && extensionAPI && isDryRunEnabled(extensionAPI)) {
     consumeDryRunMode(extensionAPI);
@@ -7150,13 +7946,19 @@ async function executeToolCall(toolName, args) {
     };
   }
 
-  if (isMutating && !approvedToolsThisSession.has(toolName)) {
+  // For COMPOSIO_MULTI_EXECUTE_TOOL, key approval on the specific slug set
+  // so approving e.g. GMAIL_SEND doesn't silently approve GOOGLECALENDAR_DELETE.
+  const approvalKey = toolName === "COMPOSIO_MULTI_EXECUTE_TOOL"
+    ? `${toolName}::${(Array.isArray(effectiveArgs?.tools) ? effectiveArgs.tools : []).map(t => t?.tool_slug || "").filter(Boolean).sort().join(",")}`
+    : toolName;
+  const now = Date.now();
+  if (isMutating && !hasValidToolApproval(approvalKey, now)) {
     const approved = await promptToolExecutionApproval(toolName, effectiveArgs);
     if (!approved) {
       throw new Error(`User denied execution for ${toolName}`);
     }
-    approvedToolsThisSession.add(toolName);
-    debugLog("[Chief flow] Tool approved and whitelisted for session:", toolName);
+    rememberToolApproval(approvalKey, Date.now());
+    debugLog("[Chief flow] Tool approved and whitelisted for session (15m TTL):", approvalKey);
   }
 
   const roamTool = getRoamNativeTools().find((tool) => tool.name === toolName)
@@ -7164,6 +7966,7 @@ async function executeToolCall(toolName, args) {
     || getCosIntegrationTools().find((tool) => tool.name === toolName)
     || getCronTools().find((tool) => tool.name === toolName)
     || getExternalExtensionTools().find((tool) => tool.name === toolName)
+    || (localMcpToolsCache || []).find((tool) => tool.name === toolName)
     || getComposioMetaToolsForLlm().find((tool) => tool.name === toolName);
   if (roamTool?.execute) {
     return roamTool.execute(args || {});
@@ -7205,7 +8008,7 @@ function extractToolCalls(provider, response) {
         arguments: block.input || {}
       }));
   }
-  if (provider === "openai") {
+  if (isOpenAICompatible(provider)) {
     const message = response?.choices?.[0]?.message;
     return (message?.tool_calls || []).map((toolCall) => {
       let parsedArgs = {};
@@ -7232,7 +8035,7 @@ function extractTextResponse(provider, response) {
       .join("\n")
       .trim();
   }
-  if (provider === "openai") {
+  if (isOpenAICompatible(provider)) {
     return String(response?.choices?.[0]?.message?.content || "").trim();
   }
   return "";
@@ -7340,12 +8143,14 @@ function formatAssistantMessage(provider, response) {
   if (provider === "anthropic") {
     return { role: "assistant", content: response?.content || [] };
   }
-  if (provider === "openai") {
-    return {
-      role: "assistant",
-      content: response?.choices?.[0]?.message?.content || "",
-      tool_calls: response?.choices?.[0]?.message?.tool_calls || []
-    };
+  if (isOpenAICompatible(provider)) {
+    const msg = response?.choices?.[0]?.message;
+    const result = { role: "assistant", content: msg?.content ?? "" };
+    // Only include tool_calls when present and non-empty — OpenAI rejects tool_calls: []
+    if (Array.isArray(msg?.tool_calls) && msg.tool_calls.length > 0) {
+      result.tool_calls = msg.tool_calls;
+    }
+    return result;
   }
   return { role: "assistant", content: "" };
 }
@@ -7363,7 +8168,7 @@ function formatToolResults(provider, toolResults) {
       }
     ];
   }
-  if (provider === "openai") {
+  if (isOpenAICompatible(provider)) {
     return toolResults.map(({ toolCall, result }) => ({
       role: "tool",
       tool_call_id: toolCall.id,
@@ -7371,6 +8176,183 @@ function formatToolResults(provider, toolResults) {
     }));
   }
   return [];
+}
+
+/**
+ * Convert accumulated messages from Anthropic content-block format to OpenAI format.
+ * Used during failover context carryover when switching from Anthropic to an OpenAI-compatible provider.
+ */
+function convertAnthropicToOpenAI(messages) {
+  const result = [];
+  // Anthropic tool IDs (toolu_XXX) can contain underscores and be too long for some providers.
+  // Remap to short alphanumeric IDs and update both tool_calls and tool_results consistently.
+  const idMap = {}; // { anthropicId: newShortId }
+  let idCounter = 0;
+  function remapId(anthropicId) {
+    if (!idMap[anthropicId]) {
+      const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+      let id = "c";
+      let n = idCounter++;
+      while (id.length < 9) { id += chars[n % chars.length]; n = Math.floor(n / chars.length) + id.length; }
+      idMap[anthropicId] = id;
+    }
+    return idMap[anthropicId];
+  }
+
+  for (const msg of messages) {
+    if (msg.role === "assistant" && Array.isArray(msg.content)) {
+      const textParts = msg.content.filter(b => b.type === "text").map(b => b.text || "");
+      const toolUseBlocks = msg.content.filter(b => b.type === "tool_use");
+      const converted = {
+        role: "assistant",
+        content: textParts.join("\n") || null
+      };
+      if (toolUseBlocks.length) {
+        converted.tool_calls = toolUseBlocks.map(b => ({
+          id: remapId(b.id),
+          type: "function",
+          function: { name: b.name, arguments: JSON.stringify(b.input || {}) }
+        }));
+      }
+      result.push(converted);
+    } else if (msg.role === "user" && Array.isArray(msg.content) && msg.content.some(b => b.type === "tool_result")) {
+      // Anthropic tool results: single user message with tool_result blocks → multiple tool messages
+      for (const block of msg.content) {
+        if (block.type === "tool_result") {
+          result.push({ role: "tool", tool_call_id: remapId(block.tool_use_id), content: typeof block.content === "string" ? block.content : JSON.stringify(block.content) });
+        }
+      }
+    } else {
+      // Regular user/system message — ensure content is a string
+      result.push({ ...msg, content: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content) });
+    }
+  }
+  return result;
+}
+
+/**
+ * Convert accumulated messages from OpenAI format to Anthropic content-block format.
+ * Used during failover context carryover when switching from an OpenAI-compatible provider to Anthropic.
+ */
+function convertOpenAIToAnthropic(messages) {
+  const result = [];
+  let pendingToolResults = [];
+
+  function flushToolResults() {
+    if (pendingToolResults.length > 0) {
+      result.push({ role: "user", content: pendingToolResults });
+      pendingToolResults = [];
+    }
+  }
+
+  for (const msg of messages) {
+    if (msg.role === "tool") {
+      pendingToolResults.push({
+        type: "tool_result",
+        tool_use_id: msg.tool_call_id,
+        content: msg.content || ""
+      });
+      continue;
+    }
+    flushToolResults();
+
+    if (msg.role === "assistant") {
+      const content = [];
+      if (msg.content) content.push({ type: "text", text: msg.content });
+      if (Array.isArray(msg.tool_calls)) {
+        for (const tc of msg.tool_calls) {
+          let input = {};
+          try {
+            input = typeof tc.function?.arguments === "string"
+              ? JSON.parse(tc.function.arguments)
+              : (tc.function?.arguments || {});
+          } catch { /* use empty object */ }
+          content.push({ type: "tool_use", id: tc.id, name: tc.function?.name || tc.name, input });
+        }
+      }
+      result.push({ role: "assistant", content });
+    } else {
+      // User or system message
+      result.push({ ...msg, content: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content) });
+    }
+  }
+  flushToolResults();
+  return result;
+}
+
+/**
+ * Convert messages between provider formats for failover context carryover.
+ * Returns a new array — does not mutate the input.
+ */
+function convertMessagesForProvider(messages, sourceProvider, targetProvider) {
+  const sourceIsAnthropic = sourceProvider === "anthropic";
+  const targetIsAnthropic = targetProvider === "anthropic";
+  if (sourceIsAnthropic && !targetIsAnthropic) return convertAnthropicToOpenAI(messages);
+  if (!sourceIsAnthropic && targetIsAnthropic) return convertOpenAIToAnthropic(messages);
+  if (!sourceIsAnthropic && !targetIsAnthropic && sourceProvider !== targetProvider) {
+    // Same format family but different providers (e.g. Mistral → OpenAI).
+    // Normalise tool call IDs to call_N format and strip empty tool_calls arrays,
+    // since providers may use incompatible ID formats.
+    const idMap = {};
+    let idCounter = 0;
+    function remapId(origId) {
+      if (!origId) return `call_${idCounter++}`;
+      if (!idMap[origId]) idMap[origId] = `call_${idCounter++}`;
+      return idMap[origId];
+    }
+    return messages.map(m => {
+      const out = { ...m };
+      if (out.role === "assistant") {
+        if (Array.isArray(out.tool_calls) && out.tool_calls.length > 0) {
+          out.tool_calls = out.tool_calls.map(tc => ({
+            ...tc,
+            id: remapId(tc.id)
+          }));
+        } else {
+          delete out.tool_calls;
+        }
+      }
+      if (out.role === "tool" && out.tool_call_id) {
+        out.tool_call_id = remapId(out.tool_call_id);
+      }
+      return out;
+    });
+  }
+  return messages.map(m => ({ ...m })); // same provider — shallow copy
+}
+
+/**
+ * Scan accumulated messages for successful Roam write tool results.
+ * Used during failover to warn the next provider not to duplicate writes.
+ */
+function detectWrittenBlocksInMessages(messages) {
+  const found = [];
+  for (const msg of messages) {
+    // OpenAI format: role === "tool"
+    if (msg.role === "tool" && msg.content) {
+      try {
+        const parsed = typeof msg.content === "string" ? JSON.parse(msg.content) : msg.content;
+        // roam_create_blocks returns created_uids; roam_batch_write returns uids
+        if (parsed?.success === true && (parsed?.created_uids || parsed?.uids)) {
+          found.push({ uids: parsed.created_uids || parsed.uids, parent: parsed.parent_uid || parsed.results?.[0]?.parent_uid });
+        }
+      } catch { /* ignore parse failures */ }
+    }
+    // Anthropic format: role === "user" with tool_result blocks
+    if (msg.role === "user" && Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block.type === "tool_result" && block.content) {
+          try {
+            const parsed = typeof block.content === "string" ? JSON.parse(block.content) : block.content;
+            if (parsed?.success === true && (parsed?.created_uids || parsed?.uids)) {
+              found.push({ uids: parsed.created_uids || parsed.uids, parent: parsed.parent_uid || parsed.results?.[0]?.parent_uid });
+            }
+          } catch { /* ignore parse failures */ }
+        }
+      }
+    }
+  }
+  return found;
 }
 
 function extractComposioSessionIdFromToolResult(result) {
@@ -7501,12 +8483,28 @@ function shouldRetryLlmStatus(status) {
   return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
 }
 
+function isFailoverEligibleError(error) {
+  if (error?.name === "AbortError") return false;
+  const msg = String(error?.message || "").toLowerCase();
+  return msg.includes("rate limit")
+    || msg.includes("429")
+    || msg.includes("error 500")
+    || msg.includes("error 502")
+    || msg.includes("error 503")
+    || msg.includes("error 504")
+    || msg.includes("timeout")
+    || msg.includes("service_tier_capacity_exceeded")
+    || msg.includes("overloaded");
+}
+
 async function fetchLlmJsonWithRetry(url, init, providerLabel, options = {}) {
-  const { signal } = options;
+  const { signal, timeout = LLM_RESPONSE_TIMEOUT_MS } = options;
   let lastError = null;
   for (let attempt = 1; attempt <= LLM_MAX_RETRIES; attempt += 1) {
     try {
-      const response = await fetch(url, { ...init, ...(signal ? { signal } : {}) });
+      const timeoutSignal = AbortSignal.timeout(timeout);
+      const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+      const response = await fetch(url, { ...init, signal: combinedSignal });
       if (!response.ok) {
         const errorText = (await response.text()).slice(0, 500);
         if (shouldRetryLlmStatus(response.status) && attempt < LLM_MAX_RETRIES) {
@@ -7524,7 +8522,15 @@ async function fetchLlmJsonWithRetry(url, init, providerLabel, options = {}) {
       }
       return response.json();
     } catch (error) {
-      if (error?.name === "AbortError") throw error; // don't retry aborted requests
+      if (signal?.aborted) throw error; // user-initiated abort — don't retry
+      if (error?.name === "AbortError") throw error;
+      if (error?.name === "TimeoutError") {
+        lastError = new Error(`${providerLabel} API request timed out after ${timeout / 1000}s`);
+        if (attempt >= LLM_MAX_RETRIES) break;
+        const delay = LLM_RETRY_BASE_DELAY_MS * (2 ** (attempt - 1)) + Math.floor(Math.random() * 250);
+        await sleep(delay, signal);
+        continue;
+      }
       lastError = error;
       if (attempt >= LLM_MAX_RETRIES) break;
       const delay = LLM_RETRY_BASE_DELAY_MS * (2 ** (attempt - 1)) + Math.floor(Math.random() * 250);
@@ -7547,7 +8553,7 @@ async function callAnthropic(apiKey, model, system, messages, tools, options = {
       },
       body: JSON.stringify({
         model,
-        max_tokens: options.maxOutputTokens || ANTHROPIC_MAX_OUTPUT_TOKENS,
+        max_tokens: options.maxOutputTokens || STANDARD_MAX_OUTPUT_TOKENS,
         system,
         messages,
         tools: tools.map((tool) => ({
@@ -7562,9 +8568,14 @@ async function callAnthropic(apiKey, model, system, messages, tools, options = {
   );
 }
 
-async function callOpenAI(apiKey, model, system, messages, tools, options = {}) {
+async function callOpenAI(apiKey, model, system, messages, tools, options = {}, provider = "openai") {
+  const maxTokens = options.maxOutputTokens || STANDARD_MAX_OUTPUT_TOKENS;
+  // OpenAI newer models (GPT-4.1, GPT-5) require max_completion_tokens; Gemini/Mistral use max_tokens
+  const tokenParam = provider === "openai"
+    ? { max_completion_tokens: maxTokens }
+    : { max_tokens: maxTokens };
   return fetchLlmJsonWithRetry(
-    getProxiedLlmUrl(LLM_API_ENDPOINTS.openai),
+    getProxiedLlmUrl(LLM_API_ENDPOINTS[provider] || LLM_API_ENDPOINTS.openai),
     {
       method: "POST",
       headers: {
@@ -7582,7 +8593,7 @@ async function callOpenAI(apiKey, model, system, messages, tools, options = {}) 
             parameters: tool.input_schema
           }
         })),
-        max_tokens: options.maxOutputTokens || OPENAI_MAX_OUTPUT_TOKENS
+        ...tokenParam
       })
     },
     "OpenAI",
@@ -7595,30 +8606,51 @@ async function callOpenAI(apiKey, model, system, messages, tools, options = {}) 
  * piping text chunks to onTextChunk(delta). Tool calls are collected and
  * returned at the end. Falls back to non-streaming on error.
  */
-async function callOpenAIStreaming(apiKey, model, system, messages, tools, onTextChunk, options = {}) {
-  const response = await fetch(getProxiedLlmUrl(LLM_API_ENDPOINTS.openai), {
-    ...(options.signal ? { signal: options.signal } : {}),
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: "system", content: system }, ...messages],
-      tools: tools.map((tool) => ({
-        type: "function",
-        function: {
-          name: tool.name,
-          description: tool.description,
-          parameters: tool.input_schema
-        }
-      })),
-      max_tokens: options.maxOutputTokens || OPENAI_MAX_OUTPUT_TOKENS,
-      stream: true,
-      stream_options: { include_usage: true }
-    })
-  });
+async function callOpenAIStreaming(apiKey, model, system, messages, tools, onTextChunk, options = {}, provider = "openai") {
+  const maxTokens = options.maxOutputTokens || STANDARD_MAX_OUTPUT_TOKENS;
+  // OpenAI newer models (GPT-4.1, GPT-5) require max_completion_tokens; Gemini/Mistral use max_tokens
+  const tokenParam = provider === "openai"
+    ? { max_completion_tokens: maxTokens }
+    : { max_tokens: maxTokens };
+  // Clearable connect timeout: abort if the initial HTTP response doesn't arrive
+  // within LLM_RESPONSE_TIMEOUT_MS. Unlike AbortSignal.timeout(), this is disarmed
+  // once the response headers arrive, so it won't cap the streaming body read.
+  const connectAbort = new AbortController();
+  const connectTimeoutId = setTimeout(
+    () => connectAbort.abort(new Error("Streaming connect timeout")),
+    LLM_RESPONSE_TIMEOUT_MS
+  );
+  const streamFetchSignal = options.signal
+    ? AbortSignal.any([options.signal, connectAbort.signal])
+    : connectAbort.signal;
+  let response;
+  try {
+    response = await fetch(getProxiedLlmUrl(LLM_API_ENDPOINTS[provider] || LLM_API_ENDPOINTS.openai), {
+      signal: streamFetchSignal,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "system", content: system }, ...messages],
+        tools: tools.map((tool) => ({
+          type: "function",
+          function: {
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.input_schema
+          }
+        })),
+        ...tokenParam,
+        stream: true,
+        stream_options: { include_usage: true }
+      })
+    });
+  } finally {
+    clearTimeout(connectTimeoutId); // Connection established (or failed) — disarm connect timeout
+  }
 
   if (!response.ok) {
     const errorText = (await response.text()).slice(0, 300);
@@ -7632,8 +8664,13 @@ async function callOpenAIStreaming(apiKey, model, system, messages, tools, onTex
   const toolCallDeltas = {}; // index -> { id, name, arguments }
   let usage = null;
 
+  const streamStartMs = Date.now();
+  const STREAM_TOTAL_TIMEOUT_MS = 5 * 60 * 1000; // 5 min hard cap on total stream duration
   try {
     while (true) {
+      if (Date.now() - streamStartMs > STREAM_TOTAL_TIMEOUT_MS) {
+        throw new Error("OpenAI streaming total timeout (5 min)");
+      }
       let chunkTimeoutId;
       const chunkTimeout = new Promise((_, reject) => {
         chunkTimeoutId = setTimeout(() => reject(new Error("OpenAI streaming chunk timeout")), LLM_STREAM_CHUNK_TIMEOUT_MS);
@@ -7666,22 +8703,25 @@ async function callOpenAIStreaming(apiKey, model, system, messages, tools, onTex
         const delta = parsed.choices?.[0]?.delta;
         if (!delta) continue;
 
-        // Text content
+        // Text content — soft cap to prevent runaway accumulation
         if (delta.content) {
-          textContent += delta.content;
+          if (textContent.length < 120000) textContent += delta.content;
           if (onTextChunk) onTextChunk(delta.content);
         }
 
-        // Tool call deltas — accumulate arguments
+        // Tool call deltas — accumulate arguments with bounds
         if (Array.isArray(delta.tool_calls)) {
           for (const tc of delta.tool_calls) {
             const idx = tc.index ?? 0;
+            if (idx < 0 || idx > 64) continue;
             if (!toolCallDeltas[idx]) {
               toolCallDeltas[idx] = { id: tc.id || "", name: tc.function?.name || "", arguments: "" };
             }
             if (tc.id) toolCallDeltas[idx].id = tc.id;
             if (tc.function?.name) toolCallDeltas[idx].name = tc.function.name;
-            if (tc.function?.arguments) toolCallDeltas[idx].arguments += tc.function.arguments;
+            if (tc.function?.arguments && toolCallDeltas[idx].arguments.length < 32768) {
+              toolCallDeltas[idx].arguments += tc.function.arguments;
+            }
           }
         }
       }
@@ -7702,7 +8742,7 @@ async function callOpenAIStreaming(apiKey, model, system, messages, tools, onTex
 }
 
 async function callLlm(provider, apiKey, model, system, messages, tools, options = {}) {
-  if (provider === "openai") return callOpenAI(apiKey, model, system, messages, tools, options);
+  if (isOpenAICompatible(provider)) return callOpenAI(apiKey, model, system, messages, tools, options, provider);
   return callAnthropic(apiKey, model, system, messages, tools, options);
 }
 
@@ -7713,44 +8753,70 @@ async function runAgentLoop(userMessage, options = {}) {
     onToolCall = null,
     onToolResult = null,
     onTextChunk = null,
-    powerMode = false
+    powerMode = false,
+    providerOverride = null,
+    initialMessages = null,
+    tier = null,
+    gatheringGuard: initialGatheringGuard = null,
+    readOnlyTools = false
   } = options;
+  let gatheringGuard = initialGatheringGuard;
 
   const extensionAPI = extensionAPIRef;
   if (!extensionAPI) throw new Error("Extension API not ready");
 
-  const provider = getLlmProvider(extensionAPI);
+  const provider = providerOverride || getLlmProvider(extensionAPI);
   const apiKey = getApiKeyForProvider(extensionAPI, provider);
   const baseModel = getLlmModel(extensionAPI, provider);
-  const model = powerMode ? getPowerModel(provider) : baseModel;
-  const maxOutputTokens = powerMode ? POWER_MAX_OUTPUT_TOKENS : undefined;
+  const effectiveTier = tier || (powerMode ? "power" : "mini");
+  const model = effectiveTier === "ludicrous" ? (getLudicrousModel(provider) || getPowerModel(provider))
+    : effectiveTier === "power" ? getPowerModel(provider)
+      : baseModel;
+  const maxOutputTokens = effectiveTier === "ludicrous" ? LUDICROUS_MAX_OUTPUT_TOKENS
+    : effectiveTier === "power" ? SKILL_MAX_OUTPUT_TOKENS
+      : undefined;
   if (!apiKey) {
     throw new Error("No LLM API key configured. Set it in Chief of Staff settings.");
   }
 
-  setupExtensionBroadcastListeners();
-  const tools = await getAvailableToolSchemas();
-  const system = systemPrompt || await buildDefaultSystemPrompt(userMessage);
-  const priorMessages = getConversationMessages();
+  const allTools = await getAvailableToolSchemas();
+  const tools = readOnlyTools
+    ? allTools.filter(t => INBOX_READ_ONLY_TOOL_ALLOWLIST.has(t.name))
+    : allTools;
 
-  // Page-change detection: if the user navigated since the last turn, inject a notice
-  // so the LLM knows previous page-specific results (reading time, word count, etc.) are stale.
-  const currentPageCtx = await getCurrentPageContext();
-  let pageChangeNotice = "";
-  if (priorMessages.length > 0 && lastKnownPageContext && currentPageCtx) {
-    if (currentPageCtx.uid !== lastKnownPageContext.uid) {
-      pageChangeNotice = `[Note: The user has navigated to a different page since the last message. Previous page: "${lastKnownPageContext.title}" (${lastKnownPageContext.uid}). Current page: "${currentPageCtx.title}" (${currentPageCtx.uid}). Any previous tool results about page content are now stale — call tools again for the current page.]`;
-      debugLog("[Chief flow] Page change detected:", lastKnownPageContext.uid, "→", currentPageCtx.uid);
+  const readOnlyAddendum = readOnlyTools
+    ? `\n\nIMPORTANT: You are running in read-only mode (triggered by an inbox item). You can search, read, and gather information, but you CANNOT create, update, move, or delete any blocks, send emails, or perform any mutating actions. Summarise your findings clearly. The human will review and act on your summary.`
+    : "";
+  const system = (systemPrompt || await buildDefaultSystemPrompt(userMessage)) + readOnlyAddendum;
+
+  // Build messages array: use carried-over messages (failover) or build fresh
+  let messages;
+  let prunablePrefixCount = 0;
+  if (initialMessages) {
+    messages = [...initialMessages];
+    // For carried-over context, nothing is prunable — it's all essential
+  } else {
+    const priorMessages = getConversationMessages();
+
+    // Page-change detection: if the user navigated since the last turn, inject a notice
+    // so the LLM knows previous page-specific results (reading time, word count, etc.) are stale.
+    const currentPageCtx = await getCurrentPageContext();
+    let pageChangeNotice = "";
+    if (priorMessages.length > 0 && lastKnownPageContext && currentPageCtx) {
+      if (currentPageCtx.uid !== lastKnownPageContext.uid) {
+        pageChangeNotice = `[Note: The user has navigated to a different page since the last message. Previous page: "${lastKnownPageContext.title}" (${lastKnownPageContext.uid}). Current page: "${currentPageCtx.title}" (${currentPageCtx.uid}). Any previous tool results about page content are now stale — call tools again for the current page.]`;
+        debugLog("[Chief flow] Page change detected:", lastKnownPageContext.uid, "→", currentPageCtx.uid);
+      }
     }
-  }
-  if (currentPageCtx) lastKnownPageContext = { uid: currentPageCtx.uid, title: currentPageCtx.title };
+    if (currentPageCtx) lastKnownPageContext = { uid: currentPageCtx.uid, title: currentPageCtx.title };
 
-  const effectiveUserMessage = pageChangeNotice ? `${pageChangeNotice}\n\n${userMessage}` : userMessage;
-  const messages = [...priorMessages, { role: "user", content: effectiveUserMessage }];
+    const effectiveUserMessage = pageChangeNotice ? `${pageChangeNotice}\n\n${userMessage}` : userMessage;
+    messages = [...priorMessages, { role: "user", content: effectiveUserMessage }];
+    prunablePrefixCount = priorMessages.length;
+  }
   const requiresLiveDataTool = isLikelyLiveDataReadIntent(userMessage);
   let sawSuccessfulExternalDataToolResult = false;
   let composioSessionId = "";
-  let prunablePrefixCount = priorMessages.length;
   prunablePrefixCount = enforceAgentMessageBudgetInPlace(messages, { prunablePrefixCount });
   debugLog("[Chief flow] runAgentLoop start:", {
     provider,
@@ -7785,6 +8851,8 @@ async function runAgentLoop(userMessage, options = {}) {
     error: null
   };
   lastAgentRunTrace = trace;
+  let gatheringGuardFired = false;
+  const gatheringCallNames = [];
   if (approximateMessageChars(messages) > MAX_AGENT_MESSAGES_CHAR_BUDGET) {
     const finalText = getAgentOverBudgetMessage();
     debugLog("[Chief flow] runAgentLoop early exit: over budget before first call.");
@@ -7799,6 +8867,15 @@ async function runAgentLoop(userMessage, options = {}) {
   // Create an AbortController so in-flight LLM fetches can be cancelled on unload
   activeAgentAbortController = new AbortController();
 
+  // Cache external extension tools for the duration of this agent loop run
+  // to avoid repeated registry iteration and closure allocation per tool call.
+  externalExtensionToolsCache = null; // force fresh snapshot
+  getExternalExtensionTools(); // populates cache
+
+  // Cache local MCP tools — connects to configured servers and lists tools.
+  localMcpToolsCache = null; // force fresh snapshot
+  await getLocalMcpTools(); // populates cache (async — connects & lists)
+
   try {
     for (let index = 0; index < maxIterations; index += 1) {
       trace.iterations = index + 1;
@@ -7812,11 +8889,11 @@ async function runAgentLoop(userMessage, options = {}) {
           messages
         };
       }
-      const useStreaming = onTextChunk && provider === "openai";
+      const useStreaming = onTextChunk && isOpenAICompatible(provider);
       let response, toolCalls, streamedText;
 
       if (useStreaming) {
-        const streamResult = await callOpenAIStreaming(apiKey, model, system, messages, tools, onTextChunk, { signal: activeAgentAbortController?.signal, maxOutputTokens });
+        const streamResult = await callOpenAIStreaming(apiKey, model, system, messages, tools, onTextChunk, { signal: activeAgentAbortController?.signal, maxOutputTokens }, provider);
         streamedText = streamResult.textContent || "";
         toolCalls = streamResult.toolCalls || [];
         const usage = streamResult.usage;
@@ -7893,16 +8970,34 @@ async function runAgentLoop(userMessage, options = {}) {
       });
 
       if (!toolCalls.length) {
+        // Gathering completeness guard — check before allowing final response
+        if (gatheringGuard && !gatheringGuardFired) {
+          const missed = checkGatheringCompleteness(gatheringGuard.expectedSources, gatheringCallNames);
+          if (missed.length > 0) {
+            gatheringGuardFired = true;
+            debugLog("[Chief flow] Gathering guard fired (no-tool exit):", missed);
+            messages.push(formatAssistantMessage(provider, response));
+            messages.push({
+              role: "user",
+              content: `Gathering incomplete. You still need to call these sources before synthesising:\n${missed.map(d => `- ${d}`).join("\n")}\n\nPlease call the missing tools now, then proceed with synthesis and writing.`
+            });
+            continue;
+          }
+        }
+
         let finalText = useStreaming ? streamedText : extractTextResponse(provider, response);
 
         // Hallucination guard: if the model claims to have performed an action but made
-        // zero tool calls in the entire loop, inject a correction and retry once.
-        if (trace.toolCalls.length === 0 && index === 0) {
-          const actionClaimPattern = /\b(Done[!.]|I've\s+(added|removed|changed|created|updated|deleted|set|applied|configured|enabled|disabled|turned|executed|moved|copied|sent|posted|modified|installed|fixed)|has been\s+(added|removed|changed|created|updated|deleted|applied|configured|enabled|disabled))/i;
+        // zero *successful* tool calls in the entire loop, inject a correction and retry once.
+        // Covers: first-iteration hallucinations AND post-failure hallucinations (e.g. denied
+        // tool call in iteration 2, then LLM claims it wrote something).
+        const successfulToolCalls = trace.toolCalls.filter(tc => !tc.error);
+        if (successfulToolCalls.length === 0 && !gatheringGuardFired) {
+          const actionClaimPattern = /\b(Done[!.]|I've\s+(added|removed|changed|created|updated|deleted|set|applied|configured|enabled|disabled|turned|executed|moved|copied|sent|posted|modified|installed|fixed|written)|has been\s+(added|removed|changed|created|updated|deleted|applied|configured|enabled|disabled|written))/i;
           if (actionClaimPattern.test(finalText)) {
-            debugLog("[Chief flow] runAgentLoop hallucination guard triggered — model claimed action with 0 tool calls, retrying.");
+            debugLog("[Chief flow] runAgentLoop hallucination guard triggered — model claimed action with 0 successful tool calls (iteration " + (index + 1) + "), retrying.");
             messages.push(formatAssistantMessage(provider, response));
-            messages.push({ role: "user", content: "You claimed to perform an action but did not make any tool call. That response was not shown to the user. Please actually call the appropriate tool to complete the request." });
+            messages.push({ role: "user", content: "You claimed to perform an action but no tool call succeeded. That response was not shown to the user. Please actually call the appropriate tool to complete the request." });
             continue;
           }
         }
@@ -7920,10 +9015,33 @@ async function runAgentLoop(userMessage, options = {}) {
         };
       }
 
-
       messages.push(formatAssistantMessage(provider, response));
       const toolResults = [];
       for (const toolCall of toolCalls) {
+        // Gathering completeness guard — intercept first write tool
+        if (gatheringGuard && !gatheringGuardFired && WRITE_TOOL_NAMES.has(toolCall.name)) {
+          const missed = checkGatheringCompleteness(gatheringGuard.expectedSources, gatheringCallNames);
+          if (missed.length > 0) {
+            gatheringGuardFired = true;
+            debugLog("[Chief flow] Gathering guard fired (write intercepted):", toolCall.name, missed);
+            toolResults.push({
+              toolCall,
+              result: {
+                error: `Gathering incomplete. Before writing, please call these missing sources:\n${missed.map(d => `- ${d}`).join("\n")}\n\nThen proceed with synthesis and writing.`
+              }
+            });
+            trace.toolCalls.push({
+              name: toolCall.name,
+              argumentsPreview: "(blocked by gathering guard)",
+              startedAt: Date.now(),
+              durationMs: 0,
+              error: "Gathering incomplete"
+            });
+            continue;
+          }
+        }
+        gatheringCallNames.push(toolCall.name);
+
         const isExternalToolCall = isExternalDataToolCall(toolCall.name);
         if (onToolCall) onToolCall(toolCall.name, toolCall.arguments);
         const startedAt = Date.now();
@@ -7931,7 +9049,7 @@ async function runAgentLoop(userMessage, options = {}) {
         let errorMessage = "";
         const toolArgs = withComposioSessionArgs(toolCall.name, toolCall.arguments, composioSessionId);
         try {
-          result = await executeToolCall(toolCall.name, toolArgs);
+          result = await executeToolCall(toolCall.name, toolArgs, { readOnly: readOnlyTools });
           const discoveredSessionId = extractComposioSessionIdFromToolResult(result);
           if (discoveredSessionId) composioSessionId = discoveredSessionId;
         } catch (error) {
@@ -7941,7 +9059,7 @@ async function runAgentLoop(userMessage, options = {}) {
           if (isComposioTool && isValidationError && composioSessionId) {
             try {
               const retryArgs = withComposioSessionArgs(toolCall.name, toolArgs, composioSessionId);
-              result = await executeToolCall(toolCall.name, retryArgs);
+              result = await executeToolCall(toolCall.name, retryArgs, { readOnly: readOnlyTools });
               errorMessage = "";
               const discoveredSessionId = extractComposioSessionIdFromToolResult(result);
               if (discoveredSessionId) composioSessionId = discoveredSessionId;
@@ -7960,6 +9078,22 @@ async function runAgentLoop(userMessage, options = {}) {
           error: errorMessage || null,
           result: errorMessage ? null : safeJsonStringify(result, 400)
         });
+        // Dynamic gathering guard activation when LLM fetches a skill
+        if (toolCall.name === "cos_get_skill" && result && !result.error && !gatheringGuard) {
+          const skillText = typeof result === "string" ? result : safeJsonStringify(result, 10000);
+          let skillContent = skillText;
+          try {
+            const parsed = JSON.parse(skillText);
+            if (parsed?.content) skillContent = parsed.content;
+          } catch (_) { /* use raw text */ }
+          debugLog("[Chief flow] Gathering guard skillText preview:", String(skillContent).slice(0, 500));
+          const knownToolNames = new Set(tools.map(t => t.name));
+          const expectedSources = parseSkillSources(skillContent, knownToolNames);
+          debugLog("[Chief flow] Gathering guard parsed sources:", expectedSources.length, expectedSources);
+          if (expectedSources.length > 0) {
+            gatheringGuard = { expectedSources };
+          }
+        }
         trace.toolCalls.push({
           name: toolCall.name,
           argumentsPreview: safeJsonStringify(toolArgs, 350),
@@ -7985,6 +9119,19 @@ async function runAgentLoop(userMessage, options = {}) {
           messages
         };
       }
+      const lastToolResult = toolResults[toolResults.length - 1];
+      if (toolResults.length === 1 && WRITE_TOOL_NAMES.has(lastToolResult?.toolCall?.name) && !lastToolResult?.result?.error) {
+        const finalText = `Written to daily page successfully.`;
+        debugLog("[Chief flow] runAgentLoop short-circuit: write tool succeeded, skipping final LLM call.");
+        trace.finishedAt = Date.now();
+        trace.resultTextPreview = finalText;
+        updateChatPanelCostIndicator();
+        return { text: finalText, messages };
+      }
+      if (toolCalls.length > 0 && index < maxIterations - 1) {
+        debugLog("[Chief flow] runAgentLoop pausing before continuing to next iteration after tool calls.");
+        await new Promise(r => setTimeout(r, 500));
+      }
     }
 
     trace.finishedAt = Date.now();
@@ -7993,10 +9140,131 @@ async function runAgentLoop(userMessage, options = {}) {
   } catch (error) {
     trace.finishedAt = Date.now();
     trace.error = error?.message || "Agent loop failed";
+    // Attach accumulated context for failover carryover
+    error.agentContext = {
+      accumulatedMessages: messages,
+      iteration: trace.iterations,
+      provider,
+      canCarryOver: trace.iterations > 1,
+      tier: effectiveTier
+    };
     throw error;
   } finally {
     activeAgentAbortController = null;
+    externalExtensionToolsCache = null; // release per-loop cache
+    localMcpToolsCache = null; // release per-loop cache
   }
+}
+
+async function runAgentLoopWithFailover(userMessage, options = {}) {
+  const extensionAPI = extensionAPIRef;
+  const baseTier = options.tier || (options.powerMode ? "power" : "mini");
+
+  // For ludicrous tier (direct invocation), use chain order instead of user's default provider.
+  // The chain is ordered cheapest-first (e.g. Mistral Large → GPT-5.2 → Opus).
+  let primaryProvider;
+  if (baseTier === "ludicrous" && !options.providerOverride) {
+    const chain = FAILOVER_CHAINS.ludicrous || [];
+    primaryProvider = chain.find(p => extensionAPI && !!getApiKeyForProvider(extensionAPI, p) && !isProviderCoolingDown(p))
+      || (extensionAPI ? getLlmProvider(extensionAPI) : DEFAULT_LLM_PROVIDER);
+  } else {
+    primaryProvider = options.providerOverride
+      || (extensionAPI ? getLlmProvider(extensionAPI) : DEFAULT_LLM_PROVIDER);
+  }
+  const fallbacks = extensionAPI
+    ? getFailoverProviders(primaryProvider, extensionAPI, baseTier) : [];
+
+  // First attempt: primary provider
+  let lastError;
+  try {
+    return await runAgentLoop(userMessage, { ...options, providerOverride: primaryProvider, tier: baseTier });
+  } catch (error) {
+    lastError = error;
+    if (!isFailoverEligibleError(error)) throw error;
+    setProviderCooldown(primaryProvider);
+  }
+
+  // Failover through same-tier chain — Mode A (context carryover) or Mode B (fresh restart)
+  const ctx = lastError.agentContext;
+  for (let i = 0; i < fallbacks.length; i += 1) {
+    const nextProvider = fallbacks[i];
+    const failedProvider = i === 0 ? primaryProvider : fallbacks[i - 1];
+
+    debugLog(`[Chief flow] Provider failover: ${failedProvider} \u2192 ${nextProvider} (${baseTier})`, lastError?.message);
+    showInfoToast("Switching provider", `${failedProvider} unavailable, trying ${nextProvider}\u2026`);
+
+    try {
+      if (ctx?.canCarryOver && ctx.accumulatedMessages?.length > 0) {
+        // Mode A: carry accumulated context forward to the next provider
+        const converted = convertMessagesForProvider(ctx.accumulatedMessages, ctx.provider, nextProvider);
+        const writtenBlocks = detectWrittenBlocksInMessages(ctx.accumulatedMessages);
+        let continuationMsg = FAILOVER_CONTINUATION_MESSAGE;
+        if (writtenBlocks.length > 0) {
+          continuationMsg += "\n\nWARNING: The previous model already wrote blocks to Roam (roam_create_blocks succeeded). Do NOT call roam_create_blocks or roam_update_block again \u2014 the data has already been saved. Focus on producing a text summary of what was accomplished.";
+        }
+        converted.push({ role: "user", content: continuationMsg });
+        debugLog(`[Chief flow] Mode A carryover: ${ctx.accumulatedMessages.length} msgs, iter ${ctx.iteration}, tier ${baseTier}${writtenBlocks.length ? ", double-write guard active" : ""}`);
+        return await runAgentLoop(userMessage, {
+          ...options,
+          providerOverride: nextProvider,
+          initialMessages: converted,
+          maxIterations: MAX_AGENT_ITERATIONS,
+          powerMode: true,
+          tier: baseTier
+        });
+      } else {
+        // Mode B: fresh restart — no useful context to carry
+        debugLog("[Chief flow] Mode B fresh restart");
+        return await runAgentLoop(userMessage, { ...options, providerOverride: nextProvider, tier: baseTier });
+      }
+    } catch (error) {
+      lastError = error;
+      // Keep the original ctx — intermediate providers may have added broken tool call
+      // attempts (JSON parse errors, etc.) that pollute the message history with noise.
+      // Always carry over the clean context from the first provider that gathered real data.
+      if (!isFailoverEligibleError(error)) throw error;
+      setProviderCooldown(nextProvider);
+    }
+  }
+
+  // Ludicrous escalation: only from power tier, only with carryover, only if setting enabled
+  if (baseTier === "power" && ctx?.canCarryOver && ctx.accumulatedMessages?.length > 0) {
+    const ludicrousEnabled = extensionAPI
+      && getSettingBool(extensionAPI, SETTINGS_KEYS.ludicrousModeEnabled, false);
+    if (ludicrousEnabled) {
+      const ludicrousFallbacks = getFailoverProviders(primaryProvider, extensionAPI, "ludicrous");
+      if (ludicrousFallbacks.length > 0) {
+        debugLog("[Chief flow] Escalating to ludicrous mode \u2014 all power providers exhausted");
+        showInfoToast("Ludicrous mode", "All power providers exhausted, escalating\u2026");
+
+        for (const nextProvider of ludicrousFallbacks) {
+          try {
+            const converted = convertMessagesForProvider(ctx.accumulatedMessages, ctx.provider, nextProvider);
+            const writtenBlocks = detectWrittenBlocksInMessages(ctx.accumulatedMessages);
+            let continuationMsg = FAILOVER_CONTINUATION_MESSAGE;
+            if (writtenBlocks.length > 0) {
+              continuationMsg += "\n\nWARNING: The previous model already wrote blocks to Roam (roam_create_blocks succeeded). Do NOT call roam_create_blocks or roam_update_block again \u2014 the data has already been saved. Focus on producing a text summary of what was accomplished.";
+            }
+            converted.push({ role: "user", content: continuationMsg });
+            debugLog(`[Chief flow] Ludicrous carryover: ${ctx.accumulatedMessages.length} msgs \u2192 ${nextProvider}${writtenBlocks.length ? ", double-write guard active" : ""}`);
+            return await runAgentLoop(userMessage, {
+              ...options,
+              providerOverride: nextProvider,
+              initialMessages: converted,
+              maxIterations: MAX_AGENT_ITERATIONS,
+              tier: "ludicrous"
+            });
+          } catch (error) {
+            lastError = error;
+            if (!isFailoverEligibleError(error)) throw error;
+            setProviderCooldown(nextProvider);
+          }
+        }
+      }
+    }
+  }
+
+  throw lastError;
 }
 
 function extractInstalledToolRecordsFromResponse(response) {
@@ -8242,6 +9510,16 @@ function buildSettingsConfig(extensionAPI) {
         }
       },
       {
+        id: SETTINGS_KEYS.localMcpPorts,
+        name: "Local MCP Server Ports",
+        description: "Comma-separated ports for local MCP servers (supergateway SSE). Example: 8003,8004,8005",
+        action: {
+          type: "input",
+          value: getSettingString(extensionAPI, SETTINGS_KEYS.localMcpPorts, ""),
+          placeholder: "8003,8004"
+        }
+      },
+      {
         id: SETTINGS_KEYS.userName,
         name: "Your Name",
         description: "How Chief of Staff addresses you.",
@@ -8267,7 +9545,7 @@ function buildSettingsConfig(extensionAPI) {
         description: "AI provider for Chief of Staff reasoning.",
         action: {
           type: "select",
-          items: ["anthropic", "openai"],
+          items: ["anthropic", "openai", "gemini", "mistral"],
           value: getLlmProvider(extensionAPI)
         }
       },
@@ -8289,6 +9567,26 @@ function buildSettingsConfig(extensionAPI) {
           type: "input",
           value: getSettingString(extensionAPI, SETTINGS_KEYS.anthropicApiKey, ""),
           placeholder: "sk-ant-..."
+        }
+      },
+      {
+        id: SETTINGS_KEYS.geminiApiKey,
+        name: "Google Gemini API Key",
+        description: "Your Gemini API key from AI Studio. Required when LLM Provider is set to Gemini.",
+        action: {
+          type: "input",
+          value: getSettingString(extensionAPI, SETTINGS_KEYS.geminiApiKey, ""),
+          placeholder: "AIza..."
+        }
+      },
+      {
+        id: SETTINGS_KEYS.mistralApiKey,
+        name: "Mistral API Key",
+        description: "Your Mistral API key. Required when LLM Provider is set to Mistral.",
+        action: {
+          type: "input",
+          value: getSettingString(extensionAPI, SETTINGS_KEYS.mistralApiKey, ""),
+          placeholder: "your-mistral-key"
         }
       },
       {
@@ -8317,6 +9615,15 @@ function buildSettingsConfig(extensionAPI) {
         action: {
           type: "switch",
           value: isDryRunEnabled(extensionAPI)
+        }
+      },
+      {
+        id: SETTINGS_KEYS.ludicrousModeEnabled,
+        name: "Ludicrous mode failover",
+        description: "Allow escalation to Opus / GPT-5.2 when all power-tier providers fail. These models are significantly more expensive.",
+        action: {
+          type: "switch",
+          value: getSettingBool(extensionAPI, SETTINGS_KEYS.ludicrousModeEnabled, false)
         }
       }
     ]
@@ -8485,6 +9792,7 @@ async function disconnectComposio(options = {}) {
       composioTransportAbortController = null;
     }
     invalidateInstalledToolsFetchCache();
+    latestEmailActionCache = { updatedAt: 0, messages: [], unreadEstimate: null, requestedCount: 0, returnedCount: 0, query: "" };
   }
 }
 
@@ -8497,6 +9805,219 @@ async function reconnectComposio(extensionAPI) {
   await disconnectComposio({ suppressDisconnectedToast: true });
   const client = await connectComposio(extensionAPI, { suppressConnectedToast: true });
   if (client) showReconnectedToast();
+}
+
+// --- Local MCP server connection management ---
+
+/**
+ * Lightweight MCP SSE transport using the browser's native EventSource API.
+ * Replaces the SDK's SSEClientTransport (which uses the fetch-based eventsource
+ * v3 package and fails with supergateway's local SSE endpoints).
+ */
+class NativeSSETransport {
+  constructor(url) {
+    this._url = url;
+    this._eventSource = null;
+    this._endpoint = null;
+    this._protocolVersion = null;
+    this.onclose = null;
+    this.onerror = null;
+    this.onmessage = null;
+  }
+
+  setProtocolVersion(version) {
+    this._protocolVersion = version;
+  }
+
+  start() {
+    return new Promise((resolve, reject) => {
+      let resolved = false;
+      const es = new EventSource(this._url.toString());
+      this._eventSource = es;
+
+      es.addEventListener("endpoint", (e) => {
+        try {
+          this._endpoint = new URL(e.data, this._url);
+        } catch {
+          this._endpoint = new URL(e.data);
+        }
+        if (!resolved) {
+          resolved = true;
+          resolve();
+        }
+      });
+
+      es.addEventListener("message", (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          this.onmessage?.(msg);
+        } catch (err) {
+          this.onerror?.(new Error(`Failed to parse SSE message: ${err.message}`));
+        }
+      });
+
+      es.onerror = () => {
+        if (!resolved) {
+          resolved = true;
+          es.close();
+          this._eventSource = null;
+          reject(new Error("SSE connection failed to " + this._url));
+        }
+        // After connection, EventSource handles reconnection natively.
+        // Dead connections surface as send() / listTools() failures,
+        // which our caller already handles via teardown + backoff.
+      };
+    });
+  }
+
+  async close() {
+    if (this._eventSource) {
+      this._eventSource.close();
+      this._eventSource = null;
+    }
+    this._endpoint = null;
+    this.onclose?.();
+  }
+
+  async send(message) {
+    if (!this._endpoint) throw new Error("Not connected");
+    const headers = { "Content-Type": "application/json" };
+    if (this._protocolVersion) {
+      headers["mcp-protocol-version"] = this._protocolVersion;
+    }
+    const resp = await fetch(this._endpoint.toString(), {
+      method: "POST",
+      headers,
+      body: JSON.stringify(message),
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      throw new Error(`POST ${resp.status}: ${text}`);
+    }
+  }
+}
+
+async function connectLocalMcp(port) {
+  const existing = localMcpClients.get(port);
+
+  // Already connected — return cached client
+  if (existing?.client) return existing.client;
+
+  // Exponential backoff after recent failure: 2s, 4s, 8s, 16s, 32s, 60s (capped)
+  if (existing?.lastFailureAt && existing.failureCount > 0) {
+    const backoffMs = Math.min(LOCAL_MCP_INITIAL_BACKOFF_MS * Math.pow(2, existing.failureCount - 1), LOCAL_MCP_MAX_BACKOFF_MS);
+    if ((Date.now() - existing.lastFailureAt) < backoffMs) {
+      debugLog(`[Local MCP] Port ${port} skipped (backoff ${Math.round(backoffMs / 1000)}s after ${existing.failureCount} failure(s))`);
+      return null;
+    }
+  }
+
+  // Dedup in-flight connect
+  if (existing?.connectPromise) {
+    debugLog(`[Local MCP] Port ${port} connection already in progress`);
+    return existing.connectPromise;
+  }
+
+  const promise = (async () => {
+    try {
+      const url = new URL(`http://localhost:${port}/sse`);
+      const transport = new NativeSSETransport(url);
+      const client = new Client({ name: `roam-local-mcp-${port}`, version: "0.1.0" });
+
+      let timeoutId = null;
+      const connectPromise = client.connect(transport);
+      const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          timeoutId = null;
+          reject(new Error(`Local MCP connection timeout on port ${port}`));
+        }, LOCAL_MCP_CONNECT_TIMEOUT_MS);
+      });
+
+      try {
+        await Promise.race([connectPromise, timeoutPromise]);
+      } finally {
+        if (timeoutId) { clearTimeout(timeoutId); timeoutId = null; }
+      }
+
+      // Capture server metadata from MCP handshake
+      const serverVersion = client.getServerVersion?.() || {};
+      const serverName = serverVersion.name || `mcp-${port}`;
+      const serverDescription = serverVersion.description || client.getInstructions?.() || "";
+
+      localMcpClients.set(port, { client, transport, lastFailureAt: 0, failureCount: 0, connectPromise: null, serverName, serverDescription });
+      debugLog(`[Local MCP] Connected to port ${port} — server: ${serverName}`);
+      return client;
+    } catch (error) {
+      const prevCount = localMcpClients.get(port)?.failureCount || 0;
+      console.warn(`[Local MCP] Failed to connect to port ${port} (attempt ${prevCount + 1}):`, error?.message);
+      localMcpClients.set(port, { client: null, transport: null, lastFailureAt: Date.now(), failureCount: prevCount + 1, connectPromise: null, serverName: null, serverDescription: "" });
+      return null;
+    } finally {
+      const entry = localMcpClients.get(port);
+      if (entry) entry.connectPromise = null;
+    }
+  })();
+
+  // Store in-flight promise immediately for deduplication
+  const entry = localMcpClients.get(port) || { client: null, transport: null, lastFailureAt: 0, failureCount: 0, connectPromise: null };
+  entry.connectPromise = promise;
+  localMcpClients.set(port, entry);
+
+  return promise;
+}
+
+async function disconnectLocalMcp(port) {
+  const entry = localMcpClients.get(port);
+  if (!entry) { localMcpClients.delete(port); return; }
+  try {
+    if (entry.client) await entry.client.close();
+    // Safety net: close transport directly in case client.close() didn't
+    if (entry.transport) await entry.transport.close().catch(() => {});
+    debugLog(`[Local MCP] Disconnected from port ${port}`);
+  } catch (error) {
+    console.warn(`[Local MCP] Error disconnecting port ${port}:`, error?.message);
+  } finally {
+    localMcpClients.delete(port);
+  }
+}
+
+async function disconnectAllLocalMcp() {
+  const ports = [...localMcpClients.keys()];
+  await Promise.allSettled(ports.map(port => disconnectLocalMcp(port)));
+}
+
+function scheduleLocalMcpAutoConnect() {
+  const ports = getLocalMcpPorts();
+  if (!ports.length) return;
+
+  const connectWithRetry = (port, attempt) => {
+    if (unloadInProgress || extensionAPIRef === null) return;
+    if (attempt > LOCAL_MCP_AUTO_CONNECT_MAX_RETRIES) {
+      debugLog(`[Local MCP] Auto-connect gave up on port ${port} after ${LOCAL_MCP_AUTO_CONNECT_MAX_RETRIES} retries`);
+      return;
+    }
+
+    // Clear stale failure state so connectLocalMcp doesn't skip via backoff
+    const stale = localMcpClients.get(port);
+    if (stale && !stale.client) localMcpClients.delete(port);
+
+    connectLocalMcp(port).then(client => {
+      if (client) return; // success
+      const delay = Math.min(LOCAL_MCP_INITIAL_BACKOFF_MS * Math.pow(2, attempt - 1), LOCAL_MCP_MAX_BACKOFF_MS);
+      debugLog(`[Local MCP] Auto-connect retry for port ${port} in ${Math.round(delay / 1000)}s (attempt ${attempt + 1}/${LOCAL_MCP_AUTO_CONNECT_MAX_RETRIES})`);
+      window.setTimeout(() => connectWithRetry(port, attempt + 1), delay);
+    }).catch(e => {
+      debugLog(`[Local MCP] Auto-connect failed for port ${port}:`, e?.message);
+      const delay = Math.min(LOCAL_MCP_INITIAL_BACKOFF_MS * Math.pow(2, attempt - 1), LOCAL_MCP_MAX_BACKOFF_MS);
+      debugLog(`[Local MCP] Auto-connect retry for port ${port} in ${Math.round(delay / 1000)}s (attempt ${attempt + 1}/${LOCAL_MCP_AUTO_CONNECT_MAX_RETRIES})`);
+      window.setTimeout(() => connectWithRetry(port, attempt + 1), delay);
+    });
+  };
+
+  window.setTimeout(() => {
+    if (unloadInProgress || extensionAPIRef === null) return;
+    ports.forEach(port => connectWithRetry(port, 1));
+  }, COMPOSIO_AUTO_CONNECT_DELAY_MS + 500);
 }
 
 function upsertInstalledTool(extensionAPI, toolRecord) {
@@ -8944,11 +10465,11 @@ async function refreshSkillsFromGraph() {
   );
 }
 
-async function bootstrapSkillsPage() {
+async function bootstrapSkillsPage({ silent = false } = {}) {
   const title = SKILLS_PAGE_TITLE;
   const existingUid = getPageUidByTitle(title);
   if (existingUid) {
-    showInfoToast("Skills exist", "Skills page already exists.");
+    if (!silent) showInfoToast("Skills exist", "Skills page already exists.");
     return;
   }
   const pageUid = await ensurePageUidByTitle(title);
@@ -9031,7 +10552,7 @@ async function bootstrapSkillsPage() {
         "If you don't have enough information, ask questions until you do.",
         "Fallback: if any tool call fails, include section header with '⚠️ Could not retrieve [source]' rather than skipping.",
         "Ask the user: What did you actually work on today? Anything captured in notes/inbox that needs processing? Any open loops bothering you?",
-        "Output — write to today's daily page under 'End-of-Day Reconciliation' heading: What Got Done Today (update BT tasks to DONE via bt_modify where confirmed). What Didn't Get Done (and why — ran out of time / blocked / deprioritised / avoided). Updates Made (projects, waiting-for, decisions, inbox items processed). Open Loops Closed + Open Loops Remaining. Tomorrow Setup: top 3 priorities, first task tomorrow morning, commitments/meetings tomorrow (via cos_calendar_read), anything to prep tonight.",
+        "Output — write to today's daily page using roam_batch_write with markdown under an 'End-of-Day Reconciliation' heading. Use ## for section headers, - for list items. Sections: What Got Done Today (update BT tasks to DONE via bt_modify where confirmed). What Didn't Get Done (and why — ran out of time / blocked / deprioritised / avoided). Updates Made (projects, waiting-for, decisions, inbox items processed). Open Loops Closed + Open Loops Remaining. Tomorrow Setup: top 3 priorities, first task tomorrow morning, commitments/meetings tomorrow (via cos_calendar_read), anything to prep tonight.",
         "Tool availability: works best with Better Tasks + Google Calendar. If BT unavailable, use roam_search_todos to review tasks and roam_modify_todo to mark complete. If calendar unavailable, skip that section. Never fabricate data from unavailable tools.",
         "End with: 'Tomorrow is set up. Anything else on your mind, capture it now or let it go until morning.'"
       ]
@@ -9078,7 +10599,7 @@ async function bootstrapSkillsPage() {
         "Trigger: user asks for a project status update. If a project is named, report on that one. If none specified, report on all active projects.",
         "Sources: bt_get_projects (status: active, include_tasks: true). bt_search by project for open tasks, completed tasks, overdue items, delegated items. [[Chief of Staff/Decisions]] for project-related decisions. cos_calendar_read for upcoming project meetings.",
         "Fallback: if any tool call fails, include section header with '⚠️ Could not retrieve [source]' rather than skipping.",
-        "Write to today's daily page under 'Project Status — [NAME]' heading.",
+        "Write output to today's daily page using roam_batch_write with markdown under a 'Project Status — [NAME]' heading. Use ## for section headers, ### for subsections, - for list items.",
         "Output sections: Status at a Glance (ON TRACK / AT RISK / BLOCKED / COMPLETED + confidence level). Recent Progress (past 7 days — completions, decisions, plan changes). Current Focus (active work, next steps, target dates). Blockers and Risks (active blockers, risks, dependencies — what would resolve each). Resource Status (capacity, budget if documented). Upcoming Milestones (next 3–5 with dates). Decisions Needed. Attention Required (specific actions for reader).",
         "Tool availability: works best with Better Tasks (project tracking, task counts) + Google Calendar. If BT unavailable, use roam_search_todos and roam_search_text for project-related blocks. Never fabricate data from unavailable tools.",
         "Rules: base assessment on documented evidence only. Flag outdated (30+ day) sources with [STALE]. Distinguish documented facts from inferences. Don't minimise risks. Include 'Last updated' dates for sources."
@@ -9102,7 +10623,7 @@ async function bootstrapSkillsPage() {
         "This is event-triggered and deeper than Weekly Review. Looks at a specific project/event holistically.",
         "If user doesn't specify what to retrospect on, ask.",
         "Sources: bt_search by project for completed/open/cancelled tasks. bt_get_projects for metadata. [[Chief of Staff/Decisions]] for project decisions. roam_search for project references. cos_calendar_read for timeline reconstruction.",
-        "Write to today's daily page under 'Retrospective — [PROJECT/EVENT]' heading.",
+        "Write output to today's daily page using roam_batch_write with markdown under a 'Retrospective — [PROJECT/EVENT]' heading. Use ## for section headers, - for list items.",
         "Output: Timeline (key milestones and dates). What Went Well (specific, not vague). What Didn't Go Well (same specificity). Key Decisions Reviewed (which held up? which would you change?). What Was Dropped (cancelled items — right call?). Lessons to Carry Forward (3–5 concrete, actionable — not platitudes). Unfinished Business (open tasks, loose ends — continue, delegate, or drop?).",
         "Routing: lessons → [[Chief of Staff/Memory]]. Unfinished items to continue → bt_create / bt_modify (or roam_create_todo). Items to delegate → run Delegation skill. Decision revisions → [[Chief of Staff/Decisions]]. Complete project → suggest updating status via bt_modify.",
         "Tool availability: works best with Better Tasks (project history, task status tracking) + Google Calendar. If BT unavailable, use roam_search_todos and roam_search_text for project-related blocks. Never fabricate data from unavailable tools.",
@@ -9124,7 +10645,7 @@ async function bootstrapSkillsPage() {
       steps: [
         "Trigger: user asks for planning or prioritisation for the week.",
         "Approach: gather upcoming tasks via bt_search (due: this-week and upcoming), overdue tasks via bt_search (due: overdue), active projects via bt_get_projects (status: active, include_tasks: true), and calendar commitments via cos_calendar_read for next 7 days. Check for stale delegations. 'Blockers' means: overdue tasks, waiting-for with no response, unresolved decisions, external dependencies.",
-        "Write to today's daily page under 'Weekly Plan' heading.",
+        "Write output to today's daily page using roam_batch_write with markdown under a 'Weekly Plan' heading. Use ## for section headers, - for list items.",
         "Output sections: This Week's Outcomes (3–5 concrete, tied to projects). Priority Actions (sequenced with due dates, urgency then importance). Blockers & Waiting-For (who owns them, suggested nudge/escalation). Calendar Load (meeting hours, flag days >4 hours as capacity-constrained). Not This Week (explicit deprioritisations with rationale). Monday First Action (single task to start with).",
         "Tool availability: works best with Better Tasks + Google Calendar. If BT unavailable, use roam_search_todos for open tasks and skip project/delegation analysis. If calendar unavailable, skip Calendar Load section. Never fabricate data from unavailable tools.",
         "Keep each section concise. Prefer tool calls over guessing."
@@ -9135,10 +10656,10 @@ async function bootstrapSkillsPage() {
       steps: [
         "Trigger: user asks for a weekly review or retrospective on the past week.",
         "Context: read [[Chief of Staff/Memory]] first for personal context and strategic direction.",
-        "Sources: bt_get_projects (active, include_tasks: true). bt_search for completed tasks, overdue items, waiting-for items, upcoming deadlines. cos_calendar_read for this week + next week. [[Chief of Staff/Decisions]], [[Chief of Staff/Inbox]], [[Chief of Staff/Memory]].",
+        "Sources: bt_get_projects (active, include_tasks: true). bt_search for completed tasks, overdue items, waiting-for items, upcoming deadlines. cos_calendar_fetch (day_offset_start: -7, day_offset_end: 0) for meetings past 7 days. cos_calendar_fetch (day_offset_start: 0, day_offset_end: 7) for meetings next 7 days. [[Chief of Staff/Decisions]], [[Chief of Staff/Inbox]], [[Chief of Staff/Memory]].",
         "Execution: this is a long skill. Phase 1: make all tool calls and gather raw data. Phase 2: synthesise into output. Don't start writing until all data is gathered.",
         "Fallback: if any tool fails, include header with '⚠️ Could not retrieve [source]' — never skip silently.",
-        "Write to today's daily page under 'Weekly Review — [Date Range]' heading.",
+        "Write output to today's daily page using roam_batch_write with markdown under a 'Weekly Review — [Date Range]' heading. Use ## for section headers, ### for subsections, - for list items.",
         "Output sections: Week in Review (what got done, what didn't, pattern recognition — energy, avoidance, interruption patterns). Current State Audit (project health check, stale delegations, inbox backlog, decisions needing review). Tasks Completed (grouped by project). What's Still Open (with overdue flags). Upcoming Deadlines (next 14 days). Meetings This Week (outcomes, open items). Commitments Made. Open Questions. Coming Week (non-negotiables by day, top 3 priorities with 'why now', explicit NOT doing list, time blocks to protect). Strategic Questions (right things? avoiding? highest leverage?). Week Setup Complete (Monday first three actions, single most important outcome).",
         "Memory updates: propose updates for Memory, Decisions, Lessons Learned pages. Update project statuses via bt_modify. Create BT tasks for new follow-ups.",
         "Tool availability: works best with Better Tasks + Google Calendar + Gmail. If BT unavailable, use roam_search_todos for task review and roam_search_text for project context. If calendar/email unavailable, skip those sections. Never fabricate data from unavailable tools.",
@@ -9157,18 +10678,19 @@ async function bootstrapSkillsPage() {
   showInfoToast("Skills initialised", "Created Chief of Staff/Skills using name + child blocks format.");
 }
 
-async function runBootstrapMemoryPages() {
+async function runBootstrapMemoryPages({ silent = false } = {}) {
   try {
     const result = await bootstrapMemoryPages();
     if (result.createdCount > 0) {
-      showInfoToast("Memory initialised", `Created ${result.createdCount} memory page(s).`);
-      // Register pull watches for newly created pages
-      registerMemoryPullWatches();
+      if (!silent) showInfoToast("Memory initialised", `Created ${result.createdCount} memory page(s).`);
+      // Re-register pull watches — force=true so pages that were watched before
+      // they existed get fresh watches now that they've been created.
+      registerMemoryPullWatches({ force: true });
     } else {
-      showInfoToast("Memory exists", "All memory pages already exist.");
+      if (!silent) showInfoToast("Memory exists", "All memory pages already exist.");
     }
   } catch (error) {
-    showErrorToast("Bootstrap failed", error?.message || "Unknown error");
+    if (!silent) showErrorToast("Bootstrap failed", error?.message || "Unknown error");
   }
 }
 
@@ -9362,18 +10884,25 @@ async function tryRunDeterministicAskIntent(prompt, context = {}) {
 }
 
 async function askChiefOfStaff(userMessage, options = {}) {
-  const { offerWriteToDailyPage = false, suppressToasts = false, onTextChunk = null } = options;
+  const { offerWriteToDailyPage = false, suppressToasts = false, onTextChunk = null, readOnlyTools = false } = options;
   const rawPrompt = String(userMessage || "").trim();
   if (!rawPrompt) return;
 
-  // Detect /power flag — can appear at start or end of message
+  // Detect /power and /ludicrous flags — can appear at start or end of message
+  const ludicrousFlag = /(?:^|\s)\/ludicrous(?:\s|$)/i.test(rawPrompt);
   const powerFlag = /(?:^|\s)\/power(?:\s|$)/i.test(rawPrompt);
-  const prompt = powerFlag ? rawPrompt.replace(/(?:^|\s)\/power(?:\s|$)/i, " ").trim() : rawPrompt;
+  const prompt = rawPrompt
+    .replace(/(?:^|\s)\/ludicrous(?:\s|$)/i, " ")
+    .replace(/(?:^|\s)\/power(?:\s|$)/i, " ")
+    .trim();
   if (!prompt) return;
+
+  // /ludicrous implies power mode; determine effective tier
+  const effectiveTier = ludicrousFlag ? "ludicrous" : powerFlag ? "power" : "mini";
 
   debugLog("[Chief flow] askChiefOfStaff start:", {
     promptPreview: prompt.slice(0, 160),
-    powerMode: powerFlag,
+    tier: effectiveTier,
     offerWriteToDailyPage,
     suppressToasts
   });
@@ -9395,15 +10924,41 @@ async function askChiefOfStaff(userMessage, options = {}) {
   }
   debugLog("[Chief flow] Falling back to runAgentLoop.");
 
+  // Auto-escalate to power tier for multi-source skills that mini can't handle reliably
+  const POWER_ESCALATION_PATTERNS = [
+    /\b(catch\s*me\s*up|what\s*(changed|did\s*i\s*miss)|what'?s\s*been\s*happening)\b/i,
+    /\b(weekly\s*(review|planning))\b/i,
+    /\b(end[- ]of[- ]day|reconcil)/i,
+    /\b(project\s*status)\b/i,
+    /\b(retrospective)\b/i,
+    /\b(context\s*prep)\b/i,
+    /\b(resume\s*context|where\s*did\s*i\s*leave\s*off)\b/i,
+    /\b(triage|clean\s*up\s*today'?s?\s*page|process\s*today'?s?\s*blocks)\b/i,
+  ];
+
+  const needsPowerEscalation = effectiveTier === "mini" &&
+    POWER_ESCALATION_PATTERNS.some(re => re.test(prompt));
+
+  const finalTier = needsPowerEscalation ? "power" : effectiveTier;
+  const finalPowerMode = needsPowerEscalation || powerFlag || ludicrousFlag;
+
+  if (needsPowerEscalation) {
+    debugLog("[Chief flow] Auto-escalating to power tier for skill-heavy prompt.");
+    showInfoToastIfAllowed("Power Mode", "Auto-escalating for this skill.", suppressToasts);
+  }
+
   showInfoToastIfAllowed(
     "Context",
     hasContext ? "Using recent conversation context." : "Starting fresh context.",
     suppressToasts
   );
-  if (powerFlag) showInfoToastIfAllowed("Power Mode", "Using power model for this request.", suppressToasts);
+  if (ludicrousFlag) showInfoToastIfAllowed("Ludicrous Mode", "Using ludicrous model for this request.", suppressToasts);
+  else if (powerFlag) showInfoToastIfAllowed("Power Mode", "Using power model for this request.", suppressToasts);
   showInfoToastIfAllowed("Thinking...", prompt.slice(0, 72), suppressToasts);
-  const result = await runAgentLoop(prompt, {
-    powerMode: powerFlag,
+  const result = await runAgentLoopWithFailover(prompt, {
+    powerMode: finalPowerMode,
+    tier: finalTier,
+    readOnlyTools,
     onToolCall: (name) => {
       showInfoToastIfAllowed("Using tool", name, suppressToasts);
     },
@@ -9459,6 +11014,7 @@ function buildOnboardingDeps(extensionAPI) {
     hasBetterTasksAPI,
     getAssistantDisplayName,
     getSettingString,
+    escapeHtml,
     registerMemoryPullWatches,
     iziToast,
     SETTINGS_KEYS,
@@ -9492,8 +11048,9 @@ function registerCommandPaletteCommands(extensionAPI) {
     callback: async () => {
       try {
         await bootstrapSkillsPage();
-        // Register pull watch for newly created skills page
-        registerMemoryPullWatches();
+        // Re-register pull watches — force=true so the skills page gets
+        // a fresh watch now that it exists in the graph.
+        registerMemoryPullWatches({ force: true });
       } catch (error) {
         showErrorToast("Skills bootstrap failed", error?.message || "Unknown error");
       }
@@ -9534,6 +11091,33 @@ function registerCommandPaletteCommands(extensionAPI) {
   extensionAPI.ui.commandPalette.addCommand({
     label: "Chief of Staff: Test Composio Tool Connection",
     callback: () => promptTestComposioTool(extensionAPI)
+  });
+  extensionAPI.ui.commandPalette.addCommand({
+    label: "Chief of Staff: Refresh Local MCP Servers",
+    callback: async () => {
+      const ports = getLocalMcpPorts();
+      if (!ports.length) {
+        showInfoToast("No ports configured", "Set Local MCP Server Ports in Settings first.");
+        return;
+      }
+      showInfoToast("Refreshing…", `Reconnecting to ${ports.length} local MCP server(s).`);
+      await disconnectAllLocalMcp();
+      localMcpToolsCache = null;
+      let connected = 0;
+      for (const port of ports) {
+        try {
+          const client = await connectLocalMcp(port);
+          if (client) connected++;
+        } catch (e) {
+          console.warn(`[Local MCP] Refresh failed for port ${port}:`, e?.message);
+        }
+      }
+      if (connected === ports.length) {
+        showInfoToast("Local MCP refreshed", `Connected to ${connected} server(s).`);
+      } else {
+        showInfoToast("Local MCP refreshed", `Connected to ${connected}/${ports.length} server(s). Check console for errors.`);
+      }
+    }
   });
   extensionAPI.ui.commandPalette.addCommand({
     label: "Chief of Staff: Refresh Tool Auth Status",
@@ -9627,7 +11211,315 @@ function registerCommandPaletteCommands(extensionAPI) {
   commandPaletteRegistered = true;
 }
 
-function registerMemoryPullWatches() {
+// ── Inbox-as-input-channel ──────────────────────────────────────────
+
+function collectInboxBlockMap(node) {
+  // Walk top-level children of a pullWatch tree → Map<uid, string>
+  const map = new Map();
+  if (!node) return map;
+  const children = node[":block/children"] || [];
+  for (const child of children) {
+    const uid = child[":block/uid"];
+    const str = child[":block/string"] ?? "";
+    if (uid) map.set(uid, str);
+  }
+  return map;
+}
+
+function getInboxStaticUIDs() {
+  if (inboxStaticUIDs) return inboxStaticUIDs;
+  // Snapshot current Inbox children as "static" instruction blocks to skip
+  const api = getRoamAlphaApi();
+  const rows = api?.data?.q?.(
+    '[:find ?uid :where [?p :node/title "Chief of Staff/Inbox"] [?p :block/children ?b] [?b :block/uid ?uid]]'
+  ) || [];
+  inboxStaticUIDs = new Set(rows.map(r => r[0]).filter(Boolean));
+
+  debugLog("[Chief flow] Inbox static UIDs:", inboxStaticUIDs.size);
+  return inboxStaticUIDs;
+}
+
+function resetInboxStaticUIDs() {
+  inboxStaticUIDs = null;
+}
+
+function primeInboxStaticUIDs() {
+  // Initialise static UID snapshot as early as possible on load, so user-added
+  // items right after reload are not accidentally captured as static.
+  try {
+    if (inboxStaticUIDs) return;
+    getInboxStaticUIDs();
+  } catch (e) {
+    console.warn("[Chief of Staff] Failed to prime inbox static UIDs:", e?.message || e);
+  }
+}
+
+function getInboxBlockStringIfExists(uid) {
+  const safeUid = String(uid || "").trim();
+  if (!safeUid) return null;
+  const api = window.roamAlphaAPI;
+  const data = api?.data?.pull?.("[:block/string :node/title]", [":block/uid", safeUid]);
+  if (!data || data[":node/title"]) return null;
+  if (typeof data[":block/string"] !== "string") return null;
+  return data[":block/string"];
+}
+
+function clearInboxCatchupScanTimer() {
+  if (!inboxCatchupScanTimeoutId) return;
+  clearTimeout(inboxCatchupScanTimeoutId);
+  inboxCatchupScanTimeoutId = null;
+}
+
+function getInboxProxySignature(childCount) {
+  const queuedSig = [...inboxQueuedSet].sort().join("|");
+  const processingSig = [...inboxProcessingSet].sort().join("|");
+  return `${childCount}::${queuedSig}::${processingSig}`;
+}
+
+function shouldRunInboxFullScanFallback(afterMapSize) {
+  const now = Date.now();
+  if ((now - inboxLastFullScanAt) < INBOX_FULL_SCAN_COOLDOWN_MS) return false;
+  if (!Number.isFinite(afterMapSize) || afterMapSize < 0) return true;
+
+  // Fast signature proxy: top-level UID count + known queued/in-flight UIDs.
+  // If this hasn't changed, a full scan is unlikely to find new candidates.
+  return getInboxProxySignature(afterMapSize) !== inboxLastFullScanUidSignature;
+}
+
+function getInboxCandidateBlocksFromChildrenRows(inboxChildren) {
+  const staticUIDs = getInboxStaticUIDs();
+  const newBlocks = [];
+  for (const child of inboxChildren) {
+    const uid = child[":block/uid"];
+    const str = (child[":block/string"] || "").trim();
+    if (!uid || !str) continue; // skip empty / cursor blocks
+    if (staticUIDs.has(uid)) continue; // skip instruction blocks
+    if (inboxProcessingSet.has(uid)) continue; // already in flight
+    if (inboxQueuedSet.has(uid)) continue; // already queued
+    newBlocks.push({ uid, string: str });
+  }
+  return newBlocks;
+}
+
+function enqueueInboxCandidates(blocks) {
+  if (!Array.isArray(blocks) || blocks.length === 0) return 0;
+  invalidateMemoryPromptCache();
+  const before = inboxPendingQueueCount;
+  enqueueInboxItems(blocks);
+  return Math.max(0, inboxPendingQueueCount - before);
+}
+
+function runFullInboxScan(reason = "watch") {
+  const inboxApi = getRoamAlphaApi();
+  const inboxChildren = (inboxApi?.data?.q?.(
+    '[:find ?uid ?str :where [?p :node/title "Chief of Staff/Inbox"] [?p :block/children ?b] [?b :block/uid ?uid] [?b :block/string ?str]]'
+  ) || []).map(([uid, str]) => ({ ":block/uid": uid, ":block/string": str }));
+  inboxLastFullScanAt = Date.now();
+  const staticUIDs = getInboxStaticUIDs();
+  debugLog("[Chief flow] Inbox pull result:", inboxChildren.length, "children, static:", staticUIDs.size, "processing:", inboxProcessingSet.size, "reason:", reason);
+  debugLog("[Chief flow] Inbox children detail:", inboxChildren.map(c => ({ uid: c[":block/uid"], str: c[":block/string"] })));
+
+  const newBlocks = getInboxCandidateBlocksFromChildrenRows(inboxChildren);
+  if (newBlocks.length > 0) {
+    const bounded = newBlocks.slice(0, INBOX_MAX_ITEMS_PER_SCAN);
+    debugLog("[Chief flow] Inbox: detected", newBlocks.length, "new block(s), enqueueing", bounded.length, ":", bounded.map(b => b.string.slice(0, 60)), "reason:", reason);
+    enqueueInboxCandidates(bounded);
+  }
+  // Store signature AFTER enqueuing so it reflects the post-enqueue state of
+  // inboxQueuedSet/inboxProcessingSet. Otherwise the next shouldRunInboxFullScanFallback
+  // check would see a different signature and allow a redundant scan.
+  inboxLastFullScanUidSignature = getInboxProxySignature(inboxChildren.length);
+  return newBlocks.length;
+}
+
+function scheduleInboxCatchupScan(delayMs = 1200) {
+  if (unloadInProgress || inboxCatchupScanTimeoutId) return;
+  inboxCatchupScanTimeoutId = setTimeout(() => {
+    inboxCatchupScanTimeoutId = null;
+    if (unloadInProgress) return;
+    if (inboxPendingQueueCount > 0) return;
+    try {
+      runFullInboxScan("catchup");
+    } catch (e) {
+      console.warn("[Chief of Staff] Inbox catchup scan failed:", e?.message || e);
+    }
+  }, delayMs);
+}
+
+function getInboxProcessingTierSuffix(promptText) {
+  const text = String(promptText || "");
+  const lower = text.toLowerCase();
+  const lines = text.split(/\n/).length;
+
+  // Escalate to ludicrous for complex, synthesis-heavy requests.
+  // Keep default at /power to reduce cost/latency for simple inbox captures.
+  const complexitySignals = [
+    /\bweekly review\b/,
+    /\bweekly planning\b/,
+    /\bend[- ]of[- ]day\b/,
+    /\bretrospective\b/,
+    /\bdaily briefing\b/,
+    /\bcatch me up\b/,
+    /\bresume context\b/,
+    /\bdeep research\b/,
+    /\bmulti[- ]step\b/,
+    /\btriage\b/
+  ];
+  const looksComplex =
+    text.length > 700 ||
+    lines > 10 ||
+    complexitySignals.some((re) => re.test(lower));
+
+  return looksComplex ? "/ludicrous" : "/power";
+}
+
+async function processInboxItem(block) {
+  if (unloadInProgress) return;
+  if (!block?.uid || !block?.string?.trim()) return;
+  if (inboxProcessingSet.has(block.uid)) return;
+
+  inboxProcessingSet.add(block.uid);
+  try {
+    const liveString = getInboxBlockStringIfExists(block.uid);
+    if (liveString === null) {
+      debugLog("[Chief flow] Inbox skip — block no longer exists:", block.uid);
+      return;
+    }
+    const promptText = String(liveString || "").trim();
+    if (!promptText) {
+      debugLog("[Chief flow] Inbox skip — block empty at processing time:", block.uid);
+      return;
+    }
+
+    debugLog("[Chief flow] Inbox processing:", block.uid, JSON.stringify(promptText.slice(0, 120)));
+    showInfoToast("Inbox", `Processing: ${promptText.slice(0, 80)}`);
+
+    // Run the agent loop with the block text as the prompt
+    const tierSuffix = getInboxProcessingTierSuffix(promptText);
+    debugLog("[Chief flow] Inbox tier selected:", tierSuffix, "for", block.uid);
+    const result = await askChiefOfStaff(`${promptText} ${tierSuffix}`, {
+      offerWriteToDailyPage: false,
+      suppressToasts: true,
+      readOnlyTools: true
+    });
+    const responseText = String(result?.text || result || "").trim() || "Processed (no text response).";
+
+    // Block may have been deleted while the model was running; skip move quietly.
+    if (getInboxBlockStringIfExists(block.uid) === null) {
+      debugLog("[Chief flow] Inbox skip move — block deleted during processing:", block.uid);
+      return;
+    }
+
+    // Move block to today's DNP under "Processed Chief of Staff items"
+    await moveInboxBlockToDNP(block.uid, responseText);
+    debugLog("[Chief flow] Inbox processed and moved:", block.uid);
+    showInfoToast("Inbox", `Done: ${promptText.slice(0, 60)}`);
+  } catch (e) {
+    console.warn("[Chief of Staff] Inbox processing failed for", block.uid, e?.message || e);
+    const msg = String(e?.message || "").toLowerCase();
+    const likelyMissing = msg.includes("not found") || msg.includes("cannot move") || msg.includes("missing");
+    if (!likelyMissing) {
+      showInfoToast("Inbox error", `Failed to process: ${String(block.string || "").slice(0, 60)}`);
+    } else {
+      debugLog("[Chief flow] Inbox skip toast — likely deleted block:", block.uid, e?.message || e);
+    }
+  } finally {
+    inboxProcessingSet.delete(block.uid);
+  }
+}
+
+async function moveInboxBlockToDNP(blockUid, responseText) {
+  const api = getRoamAlphaApi();
+  if (!api) return;
+
+  const today = new Date();
+  const dnpUid = api.util?.dateToPageUid?.(today);
+  if (!dnpUid) return;
+
+  // Ensure DNP exists
+  const dnpTitle = api.util?.dateToPageTitle?.(today);
+  if (dnpTitle && api?.data?.pull && api?.data?.page?.create) {
+    const dnpExists = api.data.pull("[:node/title]", [":block/uid", dnpUid]);
+    if (!dnpExists?.[":node/title"]) {
+      try {
+        await api.data.page.create({ page: { title: dnpTitle } });
+      } catch (_) { /* race or already exists */ }
+    }
+  }
+
+  // Find or create "Processed Chief of Staff items" heading on DNP
+  const headingText = "Processed Chief of Staff items";
+  const existingHeading = api.data.q?.(
+    `[:find ?uid . :where [?p :block/uid "${escapeForDatalog(dnpUid)}"] [?p :block/children ?b] [?b :block/string "${escapeForDatalog(headingText)}"] [?b :block/uid ?uid]]`
+  );
+
+  let headingUid = existingHeading;
+  if (!headingUid) {
+    headingUid = api.util?.generateUID?.();
+    await api.data.block.create({
+      location: { "parent-uid": dnpUid, order: "last" },
+      block: { uid: headingUid, string: headingText, heading: 3 }
+    });
+  }
+
+  // Move the inbox block under the heading
+  await api.data.block.move({
+    location: { "parent-uid": headingUid, order: "last" },
+    block: { uid: blockUid }
+  });
+
+  // Add COS response as child of the moved block
+  if (responseText) {
+    await api.data.block.create({
+      location: { "parent-uid": blockUid, order: "last" },
+      block: { string: responseText }
+    });
+  }
+}
+
+function enqueueInboxItems(newBlocks) {
+  let accepted = 0;
+  // Chain onto the sequential processing queue so items run one at a time
+  for (const block of newBlocks) {
+    const uid = String(block?.uid || "").trim();
+    if (!uid) continue;
+    if (inboxProcessingSet.has(uid) || inboxQueuedSet.has(uid)) continue;
+    if (inboxPendingQueueCount >= INBOX_MAX_PENDING_ITEMS) {
+      debugLog("[Chief flow] Inbox queue at capacity; deferring remaining items.");
+      break;
+    }
+    inboxQueuedSet.add(uid);
+    inboxPendingQueueCount += 1;
+    accepted += 1;
+    inboxProcessingQueue = inboxProcessingQueue
+      .then(async () => {
+        try {
+          await processInboxItem(block);
+        } finally {
+          inboxQueuedSet.delete(uid);
+          inboxPendingQueueCount = Math.max(0, inboxPendingQueueCount - 1);
+          if (inboxPendingQueueCount === 0) scheduleInboxCatchupScan(250);
+        }
+      })
+      .catch((e) => {
+        console.warn("[Chief of Staff] Inbox queue error for block", block?.uid, ":", e?.message || e);
+      });
+  }
+  if (accepted < newBlocks.length) {
+    debugLog("[Chief flow] Inbox queue limited:", { accepted, dropped: newBlocks.length - accepted });
+  }
+}
+
+// ── End inbox-as-input-channel ──────────────────────────────────────
+
+function registerMemoryPullWatches({ force = false } = {}) {
+  // When force=true, tear down existing watches first so pages that were
+  // registered before they existed in the graph get fresh watches.
+  if (force) {
+    teardownPullWatches();
+    resetInboxStaticUIDs();
+  }
+
   const api = getRoamAlphaApi();
   if (!api?.data?.addPullWatch || !api?.data?.removePullWatch) {
     debugLog("[Chief flow] Pull watches: API not available, skipping.");
@@ -9635,7 +11527,8 @@ function registerMemoryPullWatches() {
   }
 
   const allPages = [...getActiveMemoryPageTitles(), SKILLS_PAGE_TITLE];
-  const pullPattern = "[:block/children :block/string {:block/children ...}]";
+  const defaultPullPattern = "[:block/children :block/string {:block/children ...}]";
+  const inboxPullPattern = "[:block/children :block/string :block/uid {:block/children ...}]";
   const alreadyWatched = new Set(activePullWatches.map(w => w.pageTitle));
   let newCount = 0;
 
@@ -9643,12 +11536,73 @@ function registerMemoryPullWatches() {
     if (alreadyWatched.has(pageTitle)) continue;
 
     const isSkills = pageTitle === SKILLS_PAGE_TITLE;
+    const isInbox = pageTitle === "Chief of Staff/Inbox";
     const cacheType = isSkills ? "skills" : "memory";
+    const pullPattern = isInbox ? inboxPullPattern : defaultPullPattern;
     const entityId = `[:node/title "${escapeForDatalog(pageTitle)}"]`;
 
     const callback = function (_before, _after) {
       // Guard against firing during/after unload
       if (unloadInProgress) return;
+
+      if (isInbox) {
+        // Inbox-as-input-channel: diff for new blocks, queue for processing
+        if (pullWatchDebounceTimers["inbox"]) {
+          clearTimeout(pullWatchDebounceTimers["inbox"]);
+        }
+        pullWatchDebounceTimers["inbox"] = setTimeout(() => {
+          if (unloadInProgress) {
+            delete pullWatchDebounceTimers["inbox"];
+            return;
+          }
+          delete pullWatchDebounceTimers["inbox"];
+
+          // Backpressure: when queue is saturated, skip this scan entirely.
+          // This avoids repeated full inbox queries and noisy churn logs while
+          // existing work drains.
+          if (inboxPendingQueueCount >= INBOX_MAX_PENDING_ITEMS) {
+            debugLog("[Chief flow] Inbox queue at capacity; skipping inbox scan.");
+            return;
+          }
+
+          // Fast path: use pullWatch delta first, avoiding full q scans on every
+          // mutation while queue is draining.
+          const beforeMap = collectInboxBlockMap(_before);
+          const afterMap = collectInboxBlockMap(_after);
+          const deltaBlocks = [];
+          for (const [uid, str] of afterMap.entries()) {
+            if (beforeMap.has(uid)) continue;
+            deltaBlocks.push({ ":block/uid": uid, ":block/string": str });
+          }
+          const deltaCandidates = getInboxCandidateBlocksFromChildrenRows(deltaBlocks);
+          if (deltaCandidates.length > 0) {
+            const bounded = deltaCandidates.slice(0, INBOX_MAX_ITEMS_PER_SCAN);
+            debugLog("[Chief flow] Inbox delta: enqueueing", bounded.length, "of", deltaCandidates.length, "new block(s).");
+            enqueueInboxCandidates(bounded);
+          }
+
+          // While queue has pending work, skip expensive full scans unless we
+          // need a catch-up pass after the queue drains.
+          if (inboxPendingQueueCount > 0) {
+            if (deltaCandidates.length === 0) {
+              debugLog("[Chief flow] Inbox queue active; skipping full scan (no delta additions).");
+            }
+            scheduleInboxCatchupScan();
+            return;
+          }
+
+          // When idle and delta found nothing, run full scan to catch remote/sync
+          // changes that may not appear in pullWatch before/after payloads.
+          if (deltaCandidates.length === 0) {
+            if (shouldRunInboxFullScanFallback(afterMap.size)) {
+              runFullInboxScan("watch-full-fallback");
+            } else {
+              debugLog("[Chief flow] Inbox full scan skipped (cooldown/signature gate).");
+            }
+          }
+        }, 5000); // 5s debounce — let batch writes settle
+        return; // don't also run the memory/skills invalidation below
+      }
 
       // Debounce: rapid edits only trigger one invalidation
       if (pullWatchDebounceTimers[cacheType]) {
@@ -9668,7 +11622,7 @@ function registerMemoryPullWatches() {
           debugLog("[Chief flow] Pull watch fired: invalidating memory cache for", pageTitle);
           invalidateMemoryPromptCache();
         }
-      }, 1500); // 1.5s debounce
+      }, 3000); // 3s debounce — memory/skills pages change infrequently
     };
 
     try {
@@ -9680,7 +11634,7 @@ function registerMemoryPullWatches() {
         pageTitle
       });
       newCount++;
-      debugLog("[Chief flow] Pull watch registered:", pageTitle);
+      debugLog("[Chief flow] Pull watch registered:", pageTitle, isInbox ? "(inbox mode)" : "");
     } catch (error) {
       console.warn("[Chief of Staff] Failed to add pull watch for", pageTitle, error?.message || error);
     }
@@ -9694,6 +11648,7 @@ function teardownPullWatches() {
     clearTimeout(pullWatchDebounceTimers[key]);
   }
   pullWatchDebounceTimers = {};
+  clearInboxCatchupScanTimer();
 
   // Then remove watches — use window.roamAlphaAPI directly (not getRoamAlphaApi())
   // because the throwing helper breaks unload if Roam tears down its API first.
@@ -9741,11 +11696,42 @@ function onload({ extensionAPI }) {
   }
   registerCommandPaletteCommands(extensionAPI);
   scheduleComposioAutoConnect(extensionAPI);
+  scheduleLocalMcpAutoConnect();
+  // Defensive teardown in case a prior load cycle left orphan watches (e.g. hot-reload)
+  try { teardownPullWatches(); } catch { /* ignore */ }
   // Register live watches on memory/skills pages for auto-invalidation
   try { registerMemoryPullWatches(); } catch (e) {
     console.warn("[Chief of Staff] Pull watch setup failed:", e?.message || e);
     showInfoToast("Chief of Staff", "Memory live-sync unavailable — changes may take a few minutes to appear.");
   }
+  // Startup inbox sweep: process blocks added while Roam was closed.
+  // These exist on the page at load time, so primeInboxStaticUIDs would
+  // snapshot them as "already known" and silently ignore them. We run a
+  // full scan first, seeding the static set with only the bootstrap
+  // instruction blocks (identified by text match) so genuine user items
+  // get enqueued while instruction blocks are preserved in place.
+  try {
+    const startupApi = getRoamAlphaApi();
+    const startupRows = startupApi?.data?.q?.(
+      '[:find ?uid ?str :where [?p :node/title "Chief of Staff/Inbox"] [?p :block/children ?b] [?b :block/uid ?uid] [?b :block/string ?str]]'
+    ) || [];
+    const instructionTexts = new Set([
+      // Current bootstrap lines
+      "Drop items here for Chief of Staff to process automatically.",
+      "Works with Make, MCP, manual entry, or any external service.",
+      // Legacy bootstrap lines (graphs created before this update)
+      "Quick captures from chat (notes, ideas, reminders).",
+      "Triage periodically into Projects, Decisions, or Better Tasks."
+    ]);
+    inboxStaticUIDs = new Set(
+      startupRows.filter(([, str]) => instructionTexts.has((str || "").trim())).map(([uid]) => uid)
+    );
+    runFullInboxScan("startup");
+  } catch (e) {
+    debugLog("[Chief flow] Startup inbox sweep failed:", e?.message || e);
+  }
+  inboxStaticUIDs = null; // reset so primeInboxStaticUIDs re-snapshots
+  primeInboxStaticUIDs();
   setupExtensionBroadcastListeners();
   startCronScheduler();
   // Restore chat panel if it was open before reload
@@ -9758,10 +11744,12 @@ function onload({ extensionAPI }) {
   setTimeout(() => {
     if (unloadInProgress || extensionAPIRef === null) return;
     const hasCompleted = extensionAPI.settings.get(SETTINGS_KEYS.onboardingComplete);
-    const hasAnthropicKey = getSettingString(extensionAPI, SETTINGS_KEYS.anthropicApiKey, "");
-    const hasOpenaiKey = getSettingString(extensionAPI, SETTINGS_KEYS.openaiApiKey, "");
-    const hasLegacyKey = getSettingString(extensionAPI, SETTINGS_KEYS.llmApiKey, "");
-    const hasAnyKey = hasAnthropicKey || hasOpenaiKey || hasLegacyKey;
+    const hasAnyKey =
+      getSettingString(extensionAPI, SETTINGS_KEYS.anthropicApiKey, "") ||
+      getSettingString(extensionAPI, SETTINGS_KEYS.openaiApiKey, "") ||
+      getSettingString(extensionAPI, SETTINGS_KEYS.geminiApiKey, "") ||
+      getSettingString(extensionAPI, SETTINGS_KEYS.mistralApiKey, "") ||
+      getSettingString(extensionAPI, SETTINGS_KEYS.llmApiKey, "");
     if (!hasCompleted && !hasAnyKey) {
       launchOnboarding(extensionAPI, buildOnboardingDeps(extensionAPI));
     }
@@ -9785,6 +11773,7 @@ function onunload() {
   invalidateMemoryPromptCache();
   invalidateSkillsPromptCache();
   flushPersistChatPanelHistory(api);
+  flushPersistConversationContext(api);
   activeToastKeyboards.forEach((kb) => kb.detach());
   activeToastKeyboards.clear();
   approvedToolsThisSession.clear();
@@ -9794,9 +11783,18 @@ function onunload() {
   clearComposioAutoConnectTimer();
   clearAllAuthPolls();
   invalidateInstalledToolsFetchCache();
+  clearInboxCatchupScanTimer();
+  inboxQueuedSet.clear();
+  inboxPendingQueueCount = 0;
+  inboxProcessingQueue = Promise.resolve();
+  inboxLastFullScanAt = 0;
+  inboxLastFullScanUidSignature = "";
   latestEmailActionCache = { updatedAt: 0, messages: [], unreadEstimate: null, requestedCount: 0, returnedCount: 0, query: "" };
   roamNativeToolsCache = null;
+  externalExtensionToolsCache = null;
+  localMcpToolsCache = null;
   toolkitSchemaRegistryCache = null;
+  disconnectAllLocalMcp().catch(() => {});
   if (connectInFlightPromise) {
     connectInFlightPromise.finally(() => {
       if (!unloadInProgress) return;
