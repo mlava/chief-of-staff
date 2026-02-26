@@ -46,6 +46,7 @@ let chatWorkingTimerId = null;
 // ── Accessors (for index.js to read module-scoped state) ────────────
 export function getChatPanelIsOpen() { return chatPanelIsOpen; }
 export function getChatPanelContainer() { return chatPanelContainer; }
+export function getChatPanelMessages() { return chatPanelMessages; }
 export function getChatPanelIsSending() { return chatPanelIsSending; }
 
 // ── Toast wrappers ──────────────────────────────────────────────────
@@ -161,7 +162,7 @@ export function removeOrphanChiefPanels() {
 }
 
 // ── Chat panel message / history ────────────────────────────────────
-function refreshChatPanelElementRefs() {
+export function refreshChatPanelElementRefs() {
   if (!chatPanelContainer) return;
   chatPanelMessages = chatPanelContainer.querySelector(CHAT_PANEL_SELECTORS.messages);
   chatPanelInput = chatPanelContainer.querySelector(CHAT_PANEL_SELECTORS.input);
@@ -190,7 +191,7 @@ export function appendChatPanelMessage(role, text) {
   return item;
 }
 
-function addSaveToDailyPageButton(messageEl, promptText, responseText) {
+export function addSaveToDailyPageButton(messageEl, promptText, responseText) {
   if (!messageEl) return;
   const btn = document.createElement("button");
   btn.className = "chief-msg-save-btn";
