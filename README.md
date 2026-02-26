@@ -6,15 +6,17 @@ An AI assistant embedded in Roam Research. Chief of Staff connects your Roam gra
 
 ## What it does
 
-- **Ask anything** via the command palette or a persistent floating chat panel. The assistant can read your graph, create blocks, and call external tools in a guided, approval-gated agent loop.
+- **Ask anything** via the command palette or a persistent floating chat panel. The assistant can read your graph, create blocks, and call external tools in a guided, approval-gated agent loop. Common queries (task searches, memory saves, tool lists) are handled by a fast deterministic router that bypasses the LLM entirely.
 - **Multi-provider LLM support** — choose from Anthropic Claude, OpenAI GPT, Google Gemini, or Mistral as your primary provider. If one provider is unavailable, the assistant automatically fails over to the next available provider in the chain.
 - **Better Tasks integration** — search, create, and modify Better Tasks (TODO/DONE parent blocks with `BT_attr*` attribute children) directly from natural language. Supports filtering by due date, project, status, and free text.
 - **Persistent memory** — loads context from dedicated memory pages into the system prompt each run (see [Memory and learning](#memory-and-learning)).
 - **Skill routing** — reads `Chief of Staff/Skills`, injects a compact skill index into the prompt, and can apply a specific skill on request. A gathering completeness guard ensures the assistant calls all required data sources before writing.
 - **Inbox as input channel** — drop blocks into `Chief of Staff/Inbox` and they are automatically processed in read-only mode (the assistant can search and read but cannot mutate your graph). Responses are nested under the inbox block and moved to your daily page.
 - **Composio tool connections** — connect Google Calendar, Gmail, Todoist, and hundreds of other apps via Composio MCP. The assistant discovers and executes tools on your behalf.
+- **Local MCP server integration** — connect to local MCP servers (e.g. Zotero, GitHub, custom tools) running on your machine via SSE. Servers with many tools use a two-stage routing system (discover → execute) to keep token costs low. Includes runtime key validation, fuzzy tool name matching, and automatic connection retry.
 - **Scheduled jobs** — create recurring or one-shot scheduled tasks (cron expressions, intervals, or specific times) that the assistant runs automatically. Multi-tab safe via leader election.
-- **Three model tiers** — append `/power` for a more capable model (Claude Sonnet / GPT-4.1 / Gemini Flash / Mistral Medium), or `/ludicrous` for the most capable tier (Claude Opus / GPT-5.2 / Mistral Large). The assistant auto-escalates to power tier for complex multi-source requests.
+- **Self-healing tool calls** — if the LLM claims to have performed an action without actually calling a tool, a three-layer mitigation system detects the hallucination, retries with the correct tool, sanitises conversation context to prevent repeat failures, and auto-escalates to a more capable model tier if needed. No user intervention required.
+- **Three model tiers with automatic routing** — append `/power` for a more capable model (Claude Sonnet / GPT-4.1 / Gemini Flash / Mistral Medium), or `/ludicrous` for the most capable tier (Claude Opus / GPT-5.2 / Mistral Large). Without a prefix, a composite scoring system automatically selects the right tier: it evaluates tool count requirements (w=0.40), prompt complexity (w=0.35), and conversation trajectory (w=0.25) to produce a 0–1 score. Scores below 0.45 stay on the fast mini tier; scores at or above 0.45 escalate to power. Routed MCP servers (those with >15 tools behind two-stage dispatch) trigger a hard escalation to power regardless of score. Trivial follow-ups ("thanks", "ok") stay on mini even after complex MCP sessions.
 - **Dry-run mode** — simulate any mutating operation before it executes. Useful for reviewing what the agent would do before committing.
 - **Guided onboarding** — first-run onboarding walks you through API key setup, memory page bootstrapping, and chat panel introduction.
 
@@ -87,6 +89,15 @@ Wrangler will print your worker URL (e.g. `https://roam-mcp-proxy.<you>.workers.
 4. Run **Chief of Staff: Connect Composio** from the command palette.
 5. Run **Chief of Staff: Install Composio Tool** and enter a tool slug (e.g. `GOOGLECALENDAR`, `GMAIL`, `TODOIST`). You will be redirected to complete OAuth authentication in a new tab.
 
+### 3. Connect local MCP servers (optional)
+
+Local MCP servers let the assistant interact with tools running on your machine — for example, a Zotero research library, a local GitHub MCP server, or custom tools.
+
+1. Run an MCP server locally that exposes an SSE endpoint (e.g. via [supergateway](https://github.com/nicobailey/supergateway)).
+2. In **Settings > Chief of Staff**, under **Local MCP**, add the port number and optionally a display name for each server. Up to four servers can be configured.
+3. The extension auto-connects on load. Servers with ≤15 tools are registered directly (one-step calls). Servers with >15 tools use two-stage routing (`LOCAL_MCP_ROUTE` to discover, `LOCAL_MCP_EXECUTE` to call) to keep per-request token costs low.
+4. Connection status is logged to the browser console on startup. Failed connections retry automatically.
+
 ---
 
 ## Command palette
@@ -125,8 +136,8 @@ The floating chat panel (bottom-right corner by default) provides a persistent c
 
 - **Enter** to send, **Shift+Enter** for a new line.
 - **Arrow Up / Down** to cycle through previous messages (like a terminal).
+- `/clear` resets conversation history and context (same as the Clear button).
 - Suffix a message with `/power` or `/ludicrous` to use a more capable model for that request.
-- The **Clear** button resets conversation history.
 - A **session cost indicator** in the header shows cumulative API spend for the current session.
 - Each assistant response has a small pin icon at its bottom right. Click it to append the response to your daily note page.
 - **[[Page references]]** and **((block references))** in responses are clickable — click to navigate, Shift-click to open in the sidebar.
@@ -220,7 +231,7 @@ The assistant uses `cos_cron_create`, `cos_cron_list`, `cos_cron_update`, and `c
 | Type | Schedule format | Example |
 |---|---|---|
 | `cron` | 5-field cron expression + timezone | `0 8 * * *` (daily at 8am) |
-| `interval` | Every N minutes | `30` (every 30 minutes) |
+| `interval` | Every N minutes (minimum 5) | `30` (every 30 minutes) |
 | `once` | Specific timestamp | One-shot, auto-disables after execution |
 
 Jobs are stored in extension settings and persist across reloads. If you have multiple Roam tabs open, only one tab executes scheduled jobs (via automatic leader election with heartbeat and cross-tab detection) to prevent duplicates.
@@ -229,18 +240,65 @@ Run **Chief of Staff: Show Scheduled Jobs** from the command palette to inspect 
 
 ---
 
-## Safety and data
+## Security
 
-- **Approval gating** — every mutating operation (creating, modifying, or deleting blocks; sending emails; creating calendar events) requires explicit approval via a confirmation prompt before it executes. Approvals are remembered for 15 minutes per tool to reduce prompt fatigue.
-- **Dry-run mode** — enabling *Dry Run* in settings simulates the next mutating call without writing anything. The toggle disables itself after one use.
-- **Read-only inbox mode** — inbox-triggered processing runs in read-only mode. The assistant's tool set is restricted to an explicit allowlist of read-only tools, enforced both at the tool-filter layer (the LLM never sees mutating tools) and at the dispatch layer (defence-in-depth guard).
-- **Read-only tools are auto-approved** — searches, lookups, and list operations do not require confirmation.
-- **Hallucination guard** — if the assistant claims to have performed an action but no tool call actually succeeded, the claim is intercepted and the assistant is asked to retry with a real tool call.
-- **Tool-first live data guard** — for requests about recent emails, calendar, schedule, or connections, the assistant refuses to guess if no external tool call succeeded.
-- **Input sanitisation** — all user-facing HTML rendering uses `escapeHtml`. Datalog queries use `escapeForDatalog`. Markdown link hrefs are sanitised to block `javascript:`, `data:`, and `vbscript:` schemes.
-- **Streaming timeouts** — LLM requests have a 90-second connect timeout, 60-second per-chunk timeout, and 5-minute total stream cap to prevent runaway requests.
-- **Multi-provider failover** — if your primary LLM provider returns a rate-limit or server error, the assistant automatically retries with the next provider in the failover chain, carrying accumulated context forward to avoid lost work.
-- **Write safety** — block text is capped at 20,000 characters. Batch block creation is capped at 50 nodes per call. Block tree recursion is capped at 30 levels. Target UIDs are validated before writes to prevent hallucinated UIDs from placing content in the wrong location.
+Chief of Staff is an AI agent with broad access to your Roam graph and, optionally, to external services like Gmail and Google Calendar. That access demands careful safety engineering. The extension has been through a structured security audit against the [Doneyli 5-Phase AI Agent Security Audit Framework](https://doneyli.com), cross-referenced with the OWASP Top 10 for LLM Applications and MITRE ATLAS, and calibrated for its actual threat model: a single-user browser extension with no server-side state, no multi-tenancy, and no filesystem access.
+
+The full audit report is available in [`SECURITY-AUDIT.md`](SECURITY-AUDIT.md).
+
+### What the extension does to protect your data
+
+**Human-in-the-loop by default.** Every mutating operation — creating, modifying, or deleting blocks; sending emails; creating calendar events — requires explicit approval via a confirmation toast before it executes. Approvals are scoped per request: each new prompt starts with a clean slate, so approvals granted during one request never carry over to the next. Within a single agent run, the first write to a given page requires confirmation and subsequent writes to the same page are auto-approved to reduce prompt fatigue. A separate approval is required for each new page. Rate limits cap tool calls at 4 per LLM response and 5 per tool per agent run, preventing runaway loops.
+
+**Read-only inbox processing.** Blocks dropped into `Chief of Staff/Inbox` are processed with a restricted tool allowlist. The assistant can search, read, and gather information, but cannot create, update, move, or delete anything. This is enforced at both the tool-filter layer (the LLM never sees mutating tools) and the dispatch layer (defence-in-depth guard).
+
+**Prompt injection defence.** Content from external sources (emails, calendar events, MCP tool results, memory pages, Composio responses) is wrapped in `<untrusted>` boundary tags with explicit instructions to the LLM to treat it as data, not instructions. A semantic injection scanner checks all untrusted content against 14 pattern categories (instruction overrides, role assumption, authority claims, output manipulation, tool coercion) and annotates flagged content with an in-context warning. Provider-specific boundary tags are neutralised before content enters the prompt, preventing delimiter breakout attacks.
+
+**Memory poisoning defence.** Because memory content is loaded into every system prompt, it is a high-value target for persistent injection. All memory writes are scanned against 28 pattern categories (14 general injection + 14 memory-specific, covering directive language, approval bypass, hidden instruction embedding, data exfiltration, and tool manipulation). Flagged content is blocked before the write occurs, and the LLM receives an error with guidance to reformulate. This works in concert with the approval gate — even if the patterns were evaded, the user still confirms every memory write.
+
+**System prompt confidentiality.** The system prompt contains detailed architectural information. A confidentiality directive instructs the LLM to decline extraction attempts regardless of framing. An output-side guard scans every response against 38 distinctive fingerprint phrases; if three or more match, the response is replaced with a safe refusal.
+
+**PII scrubbing.** An opt-in layer (enabled by default) intercepts all outbound LLM API calls and redacts email addresses, phone numbers, SSNs, credit card numbers (Luhn-validated), IBANs, Medicare numbers, TFNs, and public IP addresses before content leaves the browser. This can be toggled off in settings if your workflow requires full fidelity.
+
+**Three-layer claimed-action mitigation.** Some models (especially smaller/faster tiers) occasionally generate text claiming an action was performed without actually issuing a tool call. Chief of Staff detects and recovers from this automatically via three layers working in concert. *Layer 1 — Detection + retry nudge:* a pattern-matching guard (`detectClaimedActionWithoutToolCall`) checks every assistant response against static action-claim patterns, tool-specific claim patterns (e.g. Focus Mode state, OCR results, definitions), and dynamic patterns built from the names of all currently registered tools. On detection, the assistant is given a targeted retry message naming the specific tool it should call, and recovers on the next attempt. *Layer 2 — Context hygiene:* if the model hallucinated in a prior turn, those poisoned conversation entries are sanitised before the next LLM call, breaking the feedback loop that would otherwise teach the model to repeat text-only responses. *Layer 3 — Tier escalation:* if the same session sees repeated hallucinations on the mini tier, the extension automatically escalates to the power tier (e.g. gemini-2.5-flash-lite → gemini-2.5-flash), which succeeds immediately. A separate fabrication guard detects long responses about external data produced without any tool call, forcing a retry with real results. A key validation guard rejects display names and path-style values in parameters that expect identifiers, catching a common LLM mistake before it wastes an API round-trip.
+
+**Credential handling.** API keys are stored in Roam Depot's settings store (browser IndexedDB) and transmitted only to their respective provider endpoints over HTTPS. All application-level console output is processed through a credential redaction layer that masks API key patterns, bearer tokens, and header values. Keys are never logged in cleartext.
+
+**CORS proxy hardening.** The included Cloudflare Worker proxy accepts requests only from `roamresearch.com`, forwards only to an allowlisted set of upstream hosts, enforces HTTPS for remote targets, blocks upstream redirects (SSRF defence), filters request headers to an explicit allowlist, and uses validated CORS header echo rather than wildcards. 62 security tests cover the proxy's validation logic.
+
+**XSS prevention.** All user-facing HTML rendering uses escape-then-reinsert with nonce placeholders. A post-processing DOM sanitiser strips dangerous elements and event handler attributes after every `innerHTML` assignment. Markdown link hrefs are sanitised to block `javascript:`, `data:`, and `vbscript:` schemes.
+
+### What data leaves your browser
+
+All LLM processing happens via direct API calls from your browser to your configured provider. There is no intermediate server, no telemetry, and no analytics. Here is what gets sent in each mode:
+
+**Chat (command palette or hotkey).** Your message, the system prompt, up to 12 recent conversation turns (truncated), any memory pages (capped at 3,000 chars each), and the results of any tool calls the assistant makes during the run. If PII scrubbing is enabled (it is by default), personal identifiers are redacted before the request leaves the browser.
+
+**Inbox processing.** The content of the inbox block, the system prompt, and any read-only tool results gathered during processing. The same PII scrubbing applies.
+
+**Scheduled jobs (cron).** The job's prompt, the system prompt, and any tool results. Identical data path to chat — jobs are just chat requests triggered by a timer instead of a keystroke.
+
+**Composio tools (Gmail, Calendar, Todoist, etc.).** When you use an external service, the assistant's tool call payload (e.g. an email search query or a calendar event body) is sent to Composio's MCP endpoint via the included CORS proxy. The proxy forwards only to allowlisted hosts and adds no tracking. Your Composio API key authenticates the request. The proxy itself stores nothing.
+
+**Local MCP servers.** If you connect a local MCP server (e.g. Zotero, GitHub), tool call payloads are sent to `localhost` on the port you configured. Nothing leaves your machine.
+
+**What is never sent.** Your full graph is never transmitted. The assistant reads specific blocks via Roam's local API and includes only the relevant results in the LLM context. Your API keys are sent only to their respective provider endpoints, never to Composio or the CORS proxy.
+
+### What the extension does not protect against
+
+**User-approved destructive actions.** The biggest realistic risk is approving something you shouldn't. The extension shows you what it intends to do before it does it, but if you confirm a deletion or an email send, it will execute. Review approval toasts carefully, especially for unfamiliar operations. Roam's built-in undo and daily backups provide a recovery path.
+
+**Determined adversarial content.** Pattern-based injection detection cannot catch every possible encoding of a malicious instruction. A sufficiently creative attacker who can get content into your graph (via a shared page, an imported file, or an email body) could theoretically craft a payload that evades all 28 memory injection patterns and 14 general injection patterns while still influencing the LLM's behaviour. The boundary wrapping and approval gating provide additional layers, but no detection system is perfect.
+
+**API key security at rest.** Keys are stored in browser IndexedDB in plaintext. Any browser extension with storage access, or anyone with physical access to your machine, could read them. Do not use Chief of Staff on shared or public computers, and do not install untrusted browser extensions alongside it.
+
+### Dry-run mode
+
+If you want to see what the assistant would do before it does anything, enable **Dry Run** in settings. The next mutating operation will be simulated without executing. The toggle disables itself after one use.
+
+### Reporting security issues
+
+If you discover a security issue, please report it directly rather than filing a public issue. Contact details are in the extension's Roam Depot listing.
 
 ---
 
@@ -248,7 +306,7 @@ Run **Chief of Staff: Show Scheduled Jobs** from the command palette to inspect 
 
 - **Graph scans** — task search queries scan all blocks in your graph that match TODO/DONE patterns. Performance scales with graph size. On very large graphs (100k+ blocks) this may take a second or two.
 - **Agent iterations** — the reasoning loop is capped at 10 iterations per request to prevent runaway API usage.
-- **Conversation context** — the assistant retains up to 12 recent turns (truncated to 500 characters each) for follow-up context. Older turns are dropped automatically. Within a single agent run, tool result payloads are progressively trimmed if the message budget (50,000 characters) is exceeded.
+- **Conversation context** — the assistant retains up to 12 recent turns (truncated to 500 user / 2,000 assistant characters each) for follow-up context. Older turns are dropped automatically. Within a single agent run, tool result payloads are progressively trimmed if the message budget (50,000 characters) is exceeded. Key references (identifiers from MCP tool results) are extracted and stored at the front of assistant turns to survive truncation.
 - **Composio dependency** — external tool features (Gmail, Google Calendar, Todoist, etc.) require an active Composio connection. Roam graph and task features work fully without Composio.
 - **LLM API costs** — requests are sent directly from your browser to your configured provider. Costs are billed to your API account. Structured briefings, multi-tool agent runs, and scheduled jobs consume more tokens than simple queries. The chat panel shows a running session cost estimate.
 - **Scheduled job execution** — scheduled jobs require at least one Roam tab to be open. If all tabs are closed, jobs will not fire until a tab is reopened. Only one tab executes jobs at a time (automatic leader election).
