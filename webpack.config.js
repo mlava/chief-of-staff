@@ -32,7 +32,7 @@ module.exports = {
   experiments: {
     outputModule: true,
   },
-  mode: "production",
+  mode: "development",
   externals: {
     // Roam APIs are available globally at runtime
     "roam-client": "roam-client",

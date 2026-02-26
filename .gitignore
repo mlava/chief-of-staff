@@ -14,13 +14,11 @@ pnpm-debug.log*
 .claude/
 .vscode/
 .idea/
+CLAUDE.md
 
 # Env files
 .env
 .env.*
 extension.js
 /docs
-CLAUDE.md
-com.mark.supergateway.scholar.plist
-com.mark.supergateway.zotero.plist
 mcp-install.sh
