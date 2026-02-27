@@ -28,7 +28,7 @@ An AI assistant embedded in Roam Research. Chief of Staff connects your Roam gra
 |---|---|
 | At least one LLM API key (Anthropic, OpenAI, Gemini, or Mistral) | Direct browser fetch — incurs API costs at your provider's rates |
 | Composio account + MCP URL | Only required for external tool integrations. Graph and task features work without it. |
-| [Better Tasks / Recurring Tasks](https://github.com/mlava/recurring-tasks) extension | Only required for Better Tasks integration. Plain TODO search works without it. |
+| [Better Tasks](https://github.com/mlava/recurring-tasks) extension | Only required for Better Tasks integration. Plain TODO search works without it. |
 
 ---
 
