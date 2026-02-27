@@ -67,16 +67,21 @@ Composio lets the assistant call external APIs (Gmail, Google Calendar, Todoist,
 
 #### 2a. Deploy a CORS proxy
 
-Roam runs in the browser, so cross-origin requests to Composio's MCP endpoint are blocked by default. You need a small proxy that adds CORS headers. A ready-to-deploy Cloudflare Worker is included in [`roam-mcp-proxy/`](roam-mcp-proxy/). It only accepts requests originating from `roamresearch.com` by default.
+Roam runs in the browser, so cross-origin requests to Composio's MCP endpoint are blocked by default. You need a small proxy that adds CORS headers. A ready-to-deploy Cloudflare Worker lives in a separate repo: [`roam-mcp-proxy`](https://github.com/mlava/roam-mcp-proxy). It only accepts requests originating from `roamresearch.com` by default.
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/mlava/roam-mcp-proxy)
+
+Or deploy manually:
 
 ```bash
+git clone https://github.com/mlava/roam-mcp-proxy.git
 cd roam-mcp-proxy
 npm install
 npx wrangler login   # one-time Cloudflare auth
 npx wrangler deploy
 ```
 
-Wrangler will print your worker URL (e.g. `https://roam-mcp-proxy.<you>.workers.dev`). See [roam-mcp-proxy/README.md](roam-mcp-proxy/README.md) for full details and optional security hardening.
+Wrangler will print your worker URL (e.g. `https://roam-mcp-proxy.<you>.workers.dev`). See the [roam-mcp-proxy README](https://github.com/mlava/roam-mcp-proxy#readme) for full details and optional security hardening.
 
 #### 2b. Configure the extension
 
@@ -270,7 +275,7 @@ The full audit report is available in [`SECURITY-AUDIT.md`](SECURITY-AUDIT.md).
 
 **Credential handling.** API keys are stored in Roam Depot's settings store (browser IndexedDB) and transmitted only to their respective provider endpoints over HTTPS. All application-level console output is processed through a credential redaction layer that masks API key patterns, bearer tokens, and header values. Keys are never logged in cleartext.
 
-**CORS proxy hardening.** The included Cloudflare Worker proxy accepts requests only from `roamresearch.com`, forwards only to an allowlisted set of upstream hosts, enforces HTTPS for remote targets, blocks upstream redirects (SSRF defence), filters request headers to an explicit allowlist, and uses validated CORS header echo rather than wildcards. 62 security tests cover the proxy's validation logic.
+**CORS proxy hardening.** The included Cloudflare Worker proxy accepts requests only from `roamresearch.com`, forwards only to an allowlisted set of upstream hosts, enforces HTTPS for remote targets, blocks upstream redirects (SSRF defence), filters request headers to an explicit allowlist, and uses validated CORS header echo rather than wildcards. 85 security tests cover the proxy's validation logic.
 
 **XSS prevention.** All user-facing HTML rendering uses escape-then-reinsert with nonce placeholders. A post-processing DOM sanitiser strips dangerous elements and event handler attributes after every `innerHTML` assignment. Markdown link hrefs are sanitised to block `javascript:`, `data:`, and `vbscript:` schemes.
 
