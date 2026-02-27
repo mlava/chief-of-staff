@@ -6,17 +6,17 @@ An AI assistant embedded in Roam Research. Chief of Staff connects your Roam gra
 
 ## What it does
 
-- **Ask anything** via the command palette or a persistent floating chat panel. The assistant can read your graph, create blocks, and call external tools in a guided, approval-gated agent loop. Common queries (task searches, memory saves, tool lists) are handled by a fast deterministic router that bypasses the LLM entirely.
+- **Ask anything** via the command palette or a persistent floating chat panel. The assistant can read your graph, create blocks, and call external tools — with your approval before any write operation. Common queries (task searches, memory saves, tool lists) are handled instantly without an LLM call.
 - **Multi-provider LLM support** — choose from Anthropic Claude, OpenAI GPT, Google Gemini, or Mistral as your primary provider. If one provider is unavailable, the assistant automatically fails over to the next available provider in the chain.
 - **Better Tasks integration** — search, create, and modify Better Tasks (TODO/DONE parent blocks with `BT_attr*` attribute children) directly from natural language. Supports filtering by due date, project, status, and free text.
 - **Persistent memory** — loads context from dedicated memory pages into the system prompt each run (see [Memory and learning](#memory-and-learning)).
 - **Skill routing** — reads `Chief of Staff/Skills`, injects a compact skill index into the prompt, and can apply a specific skill on request. A gathering completeness guard ensures the assistant calls all required data sources before writing.
 - **Inbox as input channel** — drop blocks into `Chief of Staff/Inbox` and they are automatically processed in read-only mode (the assistant can search and read but cannot mutate your graph). Responses are nested under the inbox block and moved to your daily page.
 - **Composio tool connections** — connect Google Calendar, Gmail, Todoist, and hundreds of other apps via Composio MCP. The assistant discovers and executes tools on your behalf.
-- **Local MCP server integration** — connect to local MCP servers (e.g. Zotero, GitHub, custom tools) running on your machine via SSE. Servers with many tools use a two-stage routing system (discover → execute) to keep token costs low. Includes runtime key validation, fuzzy tool name matching, and automatic connection retry.
+- **Local MCP server integration** — connect to MCP servers running on your machine (e.g. Zotero, GitHub, custom tools). Servers with many tools use a two-stage routing system to keep token costs low. Connections retry automatically on failure.
 - **Scheduled jobs** — create recurring or one-shot scheduled tasks (cron expressions, intervals, or specific times) that the assistant runs automatically. Multi-tab safe via leader election.
-- **Self-healing tool calls** — if the LLM claims to have performed an action without actually calling a tool, a three-layer mitigation system detects the hallucination, retries with the correct tool, sanitises conversation context to prevent repeat failures, and auto-escalates to a more capable model tier if needed. No user intervention required.
-- **Three model tiers with automatic routing** — append `/power` for a more capable model (Claude Sonnet / GPT-4.1 / Gemini Flash / Mistral Medium), or `/ludicrous` for the most capable tier (Claude Opus / GPT-5.2 / Mistral Large). Without a prefix, a composite scoring system automatically selects the right tier: it evaluates tool count requirements (w=0.40), prompt complexity (w=0.35), and conversation trajectory (w=0.25) to produce a 0–1 score. Scores below 0.45 stay on the fast mini tier; scores at or above 0.45 escalate to power. Routed MCP servers (those with >15 tools behind two-stage dispatch) trigger a hard escalation to power regardless of score. Trivial follow-ups ("thanks", "ok") stay on mini even after complex MCP sessions.
+- **Self-healing tool calls** — if the LLM claims to have done something without actually doing it, the extension detects the hallucination, retries with the correct tool, and auto-escalates to a smarter model if needed. No user intervention required.
+- **Three model tiers with automatic routing** — most requests use a fast, cheap model. Append `/power` or `/ludicrous` to your message to force a more capable tier, or let the extension auto-escalate based on request complexity. See [How tiers work](#how-tiers-work) for details.
 - **Dry-run mode** — simulate any mutating operation before it executes. Useful for reviewing what the agent would do before committing.
 - **Guided onboarding** — first-run onboarding walks you through API key setup, memory page bootstrapping, and chat panel introduction.
 
@@ -59,15 +59,34 @@ Default models by tier:
 | Power (`/power`) | claude-sonnet-4-6 | gpt-4.1 | gemini-3-flash-preview | mistral-medium |
 | Ludicrous (`/ludicrous`) | claude-opus-4-6 | gpt-5.2 | gemini-3.1-pro-preview-customtools | mistral-large |
 
+#### How tiers work
+
+By default, requests go to the **mini** tier — fast and cheap. You can force a higher tier by appending `/power` or `/ludicrous` to your message in the chat panel (e.g. "summarise my week /power"). The suffix is stripped before the message reaches the LLM.
+
+Most of the time, you don't need to think about tiers. A composite scoring system evaluates each request across three dimensions — tool count requirements (40% weight), prompt complexity (35%), and conversation trajectory (25%) — and automatically escalates to the power tier when the score exceeds 0.45. Requests involving routed MCP servers (those with more than 15 tools) are always escalated to power regardless of score. Trivial follow-ups ("thanks", "ok") stay on mini even after complex sessions.
+
+#### Automatic failover
+
+If your primary provider is unavailable or returns an error, the assistant automatically tries the next available provider in the chain. Each failed provider enters a 60-second cooldown before being retried. If all power-tier providers fail and you have **Ludicrous mode failover** enabled in settings, the assistant escalates to the most capable (and most expensive) models as a last resort. This means configuring API keys for multiple providers gives you resilience — the assistant keeps working even if one provider has an outage.
+
 > **Security note:** API keys are stored in Roam Depot's settings store (browser IndexedDB). They are never transmitted except directly to the LLM provider's API endpoint (via Roam's built-in CORS proxy when available). Do not use shared or public Roam graphs if you store API keys here.
 
 ### 2. Connect Composio (optional)
 
-Composio lets the assistant call external APIs (Gmail, Google Calendar, Todoist, etc.) via MCP. Skip this section if you only need graph and task features.
+Composio lets the assistant call external APIs (Gmail, Google Calendar, Todoist, etc.) via MCP. **Skip this section entirely if you only need graph and task features** — everything in the sections above works without Composio.
+
+If you do want external tool integrations, here is the dependency chain:
+
+> **You want external tools** (Gmail, Calendar, Todoist, …)
+> → you need a **Composio account** (free tier available at [composio.dev](https://composio.dev))
+> → Composio's MCP endpoint requires a **CORS proxy** (because Roam runs in the browser)
+> → the proxy runs on **Cloudflare Workers** (free tier, one-click deploy below)
+
+In short: Cloudflare account → deploy proxy → Composio account → configure extension → connect tools. Each step is covered below.
 
 #### 2a. Deploy a CORS proxy
 
-Roam runs in the browser, so cross-origin requests to Composio's MCP endpoint are blocked by default. You need a small proxy that adds CORS headers. A ready-to-deploy Cloudflare Worker lives in a separate repo: [`roam-mcp-proxy`](https://github.com/mlava/roam-mcp-proxy). It only accepts requests originating from `roamresearch.com` by default.
+Roam runs in the browser, so cross-origin requests to Composio's MCP endpoint are blocked by default. You need a small Cloudflare Worker that adds CORS headers. A ready-to-deploy worker lives in a separate repo: [`roam-mcp-proxy`](https://github.com/mlava/roam-mcp-proxy). It only accepts requests originating from `roamresearch.com` by default.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/mlava/roam-mcp-proxy)
 
@@ -166,14 +185,21 @@ Chief of Staff recognises natural language task queries and routes them to dedic
 - *"Show overdue tasks for Planning Committee"*
 - *"Create a better task to review the budget due next Friday"*
 - *"List my top 10 TODO tasks"*
+- *"What's overdue?"*
 
-If the Better Tasks extension is installed, all task queries use Better Tasks attributes (`BT_attrDue`, `BT_attrProject`, etc.). Otherwise, plain `{{[[TODO]]}}` / `{{[[DONE]]}}` blocks are searched.
+These queries are handled by a fast deterministic router that matches intent patterns and calls the right Roam queries directly — no LLM round-trip, so they are near-instant and cost nothing.
 
-### Better Tasks attributes recognised
+### With Better Tasks installed
 
-`BT_attrProject` · `BT_attrDue` · `BT_attrStart` · `BT_attrDefer` · `BT_attrRepeat` · `BT_attrGTD` · `BT_attrWaitingFor` · `BT_attrContext` · `BT_attrPriority` · `BT_attrEnergy`
+If the [Better Tasks / Recurring Tasks](https://github.com/mlava/recurring-tasks) extension is installed, task queries use Better Tasks attributes (`BT_attrDue`, `BT_attrProject`, etc.) and support filtering by due date, project, status, priority, energy, GTD context, and free text. You can create new Better Tasks from natural language ("create a better task to review the budget due next Friday for the Planning Committee project"), and the assistant will set the appropriate attributes.
 
-Custom attribute aliases configured in the Better Tasks extension are respected automatically.
+**Attributes recognised:** `BT_attrProject` · `BT_attrDue` · `BT_attrStart` · `BT_attrDefer` · `BT_attrRepeat` · `BT_attrGTD` · `BT_attrWaitingFor` · `BT_attrContext` · `BT_attrPriority` · `BT_attrEnergy`
+
+Custom attribute aliases configured in the Better Tasks extension are respected automatically. The assistant also loads project data from Better Tasks directly, so you don't need a separate `Chief of Staff/Projects` page.
+
+### Without Better Tasks
+
+Plain `{{[[TODO]]}}` / `{{[[DONE]]}}` block searches still work. Task queries find TODO and DONE markers across your graph and return matching blocks. You won't have access to attribute-based filtering (due dates, projects, etc.), but basic task listing and searching is fully functional. In this mode, `Chief of Staff/Projects` is also loaded into memory to give the assistant project context.
 
 ---
 
@@ -194,6 +220,10 @@ Memory content is capped at 3,000 characters per page and 8,000 characters total
 
 You can save memory explicitly in chat (for example: "remember this...", "note this idea...", "save this lesson..."), or via the native `cos_update_memory` tool path.
 
+### Memory protection
+
+Because memory content is loaded into every system prompt, it is a high-value target for prompt injection — if someone could sneak a malicious instruction into your memory pages, it would influence every future assistant response. To prevent this, all memory writes are scanned against 28 pattern categories (covering directive language, approval bypass attempts, hidden instruction embedding, data exfiltration, and tool manipulation). Flagged content is blocked before the write occurs, and the assistant receives an error with guidance to reformulate. This works in concert with the approval gate — even if the scan were somehow evaded, you still confirm every memory write via a toast notification before it executes.
+
 ---
 
 ## Inbox
@@ -206,26 +236,48 @@ This is useful for quick captures — jot down a question or instruction as a bl
 
 ## Skills
 
-Skills are sourced from `Chief of Staff/Skills`.
+Skills are custom instructions that teach the assistant how to perform specific workflows. They live on the `Chief of Staff/Skills` page in your graph and are automatically available to the assistant.
 
-Expected structure:
-- Parent block = **skill name**
-  - Child blocks = **skill instructions**
+### Page structure
 
-Example:
+Each skill is a top-level block (the skill name) with child blocks (the instructions). Keep skill names short and descriptive — they appear in a compact index in every system prompt, so the assistant always knows what skills are available.
 
 ```text
 - Weekly Review
   - Objective: Conduct a weekly review for the past 7 days.
   - Sources: Chief of Staff/Projects, Chief of Staff/Decisions, Better Tasks.
   - Output: Top priorities, overdue items, next-week plan.
+  - Write output to today's daily page under a "Weekly Review" heading.
 ```
 
-Skills are reloaded automatically when you edit the page (via a live pull watch). The prompt receives a compact skill index (all skill names + short summaries), while full skill bodies are used on explicit invocation.
+```text
+- Daily Briefing
+  - Objective: Summarise today's calendar, overdue tasks, and recent decisions.
+  - Sources: Google Calendar (today), Better Tasks (overdue + due today), Chief of Staff/Decisions.
+  - Output: A concise briefing with calendar, tasks, and decision sections.
+  - Write output to today's daily page.
+```
 
-When a skill lists **Sources**, a gathering completeness guard ensures the assistant calls all required data tools before writing output — preventing incomplete or hallucinated summaries.
+```text
+- Meeting Prep
+  - Objective: Prepare a briefing for an upcoming meeting.
+  - Input: The user will specify which meeting.
+  - Sources: Google Calendar (meeting details + attendees), Better Tasks (related project tasks).
+  - Output: Agenda summary, attendee context, relevant open tasks, and suggested talking points.
+```
 
-Skills that produce daily-page content (e.g. Daily Briefing) can be configured to write structured output directly to today's daily note page.
+### How skills work
+
+Skills are reloaded automatically when you edit the page (via a live pull watch). The prompt receives a compact skill index (all skill names + first-line summaries), while the full skill body is loaded only when you invoke a specific skill. You can invoke a skill by name: "run my Weekly Review" or "do a Daily Briefing".
+
+When a skill lists **Sources**, a gathering completeness guard ensures the assistant calls all required data tools before writing output. For example, if your Weekly Review lists "Better Tasks" as a source, the assistant must query Better Tasks before generating the review — it cannot skip the query and hallucinate task data.
+
+### Tips
+
+- Keep individual skill instructions under about 2,000 characters. The assistant has limited context space, and overly long skills crowd out other context.
+- Use **cross-references** to other Chief of Staff pages (e.g. "Sources: Chief of Staff/Decisions") to ground the assistant in your real data.
+- Skills that say "Write output to today's daily page" will produce structured output on your daily note page — useful for briefings and reviews you want to see in your daily workflow.
+- You can reference Composio tools by name in sources (e.g. "Google Calendar", "Gmail") and the assistant will call them during skill execution.
 
 ---
 
@@ -237,7 +289,7 @@ The assistant can create recurring or one-shot scheduled jobs that run automatic
 - *"Remind me to check my inbox every 30 minutes"*
 - *"At 5pm today, summarise what I worked on"*
 
-The assistant uses `cos_cron_create`, `cos_cron_list`, `cos_cron_update`, and `cos_cron_delete` tools to manage jobs. Supported types:
+Supported schedule types:
 
 | Type | Schedule format | Example |
 |---|---|---|
