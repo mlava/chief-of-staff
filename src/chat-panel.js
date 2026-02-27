@@ -641,17 +641,99 @@ export function setChatPanelSendingState(isSending) {
   }
 }
 
+function formatCostUsd(usd) {
+  const cents = usd * 100;
+  if (cents < 0.01) return "";
+  return cents < 1
+    ? cents.toFixed(2) + "\u00A2"
+    : "$" + usd.toFixed(2);
+}
+
 export function updateChatPanelCostIndicator() {
   const el = document.querySelector("[data-chief-chat-cost]");
   if (!el) return;
-  const cents = deps.getSessionTokenUsage().totalCostUsd * 100;
-  if (cents < 0.01) {
-    el.textContent = "";
+  const session = deps.getSessionTokenUsage();
+  const label = formatCostUsd(session.totalCostUsd);
+  el.textContent = label;
+  if (!label) {
+    el.classList.remove("chief-cost-has-value");
+  } else {
+    el.classList.add("chief-cost-has-value");
+  }
+}
+
+function buildCostTooltipContent() {
+  const session = deps.getSessionTokenUsage();
+  const summary = deps.getCostHistorySummary ? deps.getCostHistorySummary() : null;
+  const fmt = (usd) => {
+    if (usd < 0.0001) return "0¢";
+    const cents = usd * 100;
+    return cents < 1 ? cents.toFixed(2) + "¢" : "$" + usd.toFixed(2);
+  };
+  const tokFmt = (n) => n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
+
+  let html = `<div class="chief-cost-section">`;
+  html += `<div class="chief-cost-heading">Session</div>`;
+  html += `<div class="chief-cost-row"><span>Cost</span><span>${deps.escapeHtml(fmt(session.totalCostUsd))}</span></div>`;
+  html += `<div class="chief-cost-row"><span>Input tokens</span><span>${tokFmt(session.totalInputTokens)}</span></div>`;
+  html += `<div class="chief-cost-row"><span>Output tokens</span><span>${tokFmt(session.totalOutputTokens)}</span></div>`;
+  html += `<div class="chief-cost-row"><span>Requests</span><span>${session.totalRequests}</span></div>`;
+  html += `</div>`;
+
+  if (summary) {
+    html += `<div class="chief-cost-divider"></div>`;
+    html += `<div class="chief-cost-section">`;
+    html += `<div class="chief-cost-heading">Today</div>`;
+    html += `<div class="chief-cost-row"><span>Cost</span><span>${deps.escapeHtml(fmt(summary.today.cost))}</span></div>`;
+    html += `<div class="chief-cost-row"><span>Tokens</span><span>${tokFmt(summary.today.input + summary.today.output)}</span></div>`;
+    html += `<div class="chief-cost-row"><span>Requests</span><span>${summary.today.requests}</span></div>`;
+
+    if (summary.today.models && Object.keys(summary.today.models).length > 1) {
+      for (const [m, d] of Object.entries(summary.today.models)) {
+        const shortName = m.replace(/^claude-/, "").replace(/-20\d{6}$/, "").replace(/^gemini-/, "").replace(/-latest$/, "").replace(/-preview.*$/, "");
+        html += `<div class="chief-cost-row chief-cost-model"><span>${deps.escapeHtml(shortName)}</span><span>${deps.escapeHtml(fmt(d.cost))}</span></div>`;
+      }
+    }
+    html += `</div>`;
+
+    html += `<div class="chief-cost-divider"></div>`;
+    html += `<div class="chief-cost-section">`;
+    html += `<div class="chief-cost-row"><span>7 days</span><span>${deps.escapeHtml(fmt(summary.week.cost))}</span></div>`;
+    html += `<div class="chief-cost-row"><span>30 days</span><span>${deps.escapeHtml(fmt(summary.month.cost))}</span></div>`;
+    html += `</div>`;
+  }
+
+  return html;
+}
+
+function toggleCostTooltip(anchorEl) {
+  const existing = document.querySelector(".chief-cost-tooltip");
+  if (existing) {
+    existing.remove();
     return;
   }
-  el.textContent = cents < 1
-    ? cents.toFixed(2) + "\u00A2"
-    : "$" + (cents / 100).toFixed(2);
+
+  const tooltip = document.createElement("div");
+  tooltip.className = "chief-cost-tooltip";
+  tooltip.innerHTML = buildCostTooltipContent();
+
+  // Position relative to anchor
+  const rect = anchorEl.getBoundingClientRect();
+  tooltip.style.position = "fixed";
+  tooltip.style.top = (rect.bottom + 4) + "px";
+  tooltip.style.left = rect.left + "px";
+  tooltip.style.zIndex = "10001";
+
+  document.body.appendChild(tooltip);
+
+  // Close on click outside
+  const closeHandler = (e) => {
+    if (!tooltip.contains(e.target) && e.target !== anchorEl) {
+      tooltip.remove();
+      document.removeEventListener("mousedown", closeHandler);
+    }
+  };
+  window.setTimeout(() => document.addEventListener("mousedown", closeHandler), 0);
 }
 
 // ── Chat panel send handler ─────────────────────────────────────────
@@ -771,6 +853,7 @@ async function handleChatPanelSend() {
     streamingEl = null;
     appendChatPanelHistory("assistant", "Error: " + errorText);
     showErrorToastIfAllowed("Chat failed", errorText, true);
+    updateChatPanelCostIndicator(); // reflect costs accrued before failure
   } finally {
     clearTimeout(chatThinkingTimerId);
     clearTimeout(chatWorkingTimerId);
@@ -1048,7 +1131,13 @@ export function ensureChatPanel() {
 
   const costIndicator = document.createElement("span");
   costIndicator.setAttribute("data-chief-chat-cost", "true");
+  costIndicator.className = "chief-cost-badge";
   costIndicator.textContent = "";
+  costIndicator.title = "Click for cost breakdown";
+  costIndicator.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleCostTooltip(costIndicator);
+  });
   title.appendChild(costIndicator);
 
   header.appendChild(title);

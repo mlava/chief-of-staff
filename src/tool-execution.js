@@ -17,6 +17,31 @@ export function initToolExecution(injected) {
   deps = injected;
 }
 
+// ── JSON argument recovery ──────────────────────────────────────────────────
+// Gemini models sometimes append trailing text after the JSON object.
+// Find the outermost balanced {} and parse that substring.
+function recoverJsonArgs(raw, toolName) {
+  if (!raw || typeof raw !== "string") return {};
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("{")) return {};
+  let depth = 0, inString = false, escape = false;
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+    if (escape) { escape = false; continue; }
+    if (ch === "\\") { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === "{") depth++;
+    if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        try { return JSON.parse(trimmed.slice(0, i + 1)); } catch { return {}; }
+      }
+    }
+  }
+  return {};
+}
+
 // ── Approval management ─────────────────────────────────────────────────────
 
 export function clearToolApprovals() {
@@ -257,13 +282,19 @@ function extractTargetPageUids(toolName, args) {
 export async function executeToolCall(toolName, args, { readOnly = false } = {}) {
   // Tool name normalisation: LLMs (especially gemini-2.5-flash) sometimes hallucinate
   // hyphens in tool names (e.g. "cos_get-current-time" instead of "cos_get_current_time").
-  // Normalise hyphens to underscores before dispatch to catch these cases.
-  const normalisedToolName = String(toolName || "").replace(/-/g, "_");
-  if (normalisedToolName !== String(toolName || "")) {
-    deps.debugLog(`[Chief flow] Tool name normalised: "${toolName}" → "${normalisedToolName}"`);
+  // Try the original name first — MCP tools use hyphens natively (e.g. "list-events").
+  // Only fall back to underscore normalisation if the original name doesn't resolve.
+  toolName = String(toolName || "");
+  const hyphenNormalised = toolName.replace(/-/g, "_");
+  if (hyphenNormalised !== toolName && !resolveToolByName(toolName)) {
+    // Original name not found — try underscore-normalised form
+    if (resolveToolByName(hyphenNormalised)) {
+      deps.debugLog(`[Chief flow] Tool name normalised: "${toolName}" → "${hyphenNormalised}"`);
+      toolName = hyphenNormalised;
+    }
+    // If neither resolves, keep the original (later dispatch will handle the error)
   }
-  toolName = normalisedToolName;
-  const upperToolName = normalisedToolName.toUpperCase();
+  const upperToolName = toolName.toUpperCase();
   let effectiveArgs = args || {};
   if (upperToolName === "COMPOSIO_MULTI_EXECUTE_TOOL") {
     deps.debugLog("[Chief flow] MULTI_EXECUTE raw args:", JSON.stringify(args, null, 2));
@@ -530,7 +561,8 @@ export function extractToolCalls(provider, response) {
       try {
         parsedArgs = JSON.parse(toolCall?.function?.arguments || "{}");
       } catch (error) {
-        parsedArgs = {};
+        // Try to recover from trailing garbage (common with Gemini models)
+        parsedArgs = recoverJsonArgs(toolCall?.function?.arguments, toolCall?.function?.name);
       }
       return {
         id: toolCall.id,
@@ -708,6 +740,7 @@ export function isExternalDataToolCall(toolName) {
     upper.startsWith("COS_CRON_") ||
     upper === "COS_UPDATE_MEMORY" ||
     upper === "COS_GET_SKILL" ||
+    upper === "COS_GET_CURRENT_TIME" ||
     upper === "ROAM_SEARCH" ||
     upper === "ROAM_GET_PAGE" ||
     upper === "ROAM_GET_DAILY_PAGE" ||

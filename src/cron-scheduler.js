@@ -289,6 +289,7 @@ async function fireCronJob(job) {
     }
     deps.appendChatPanelHistory("assistant", `[Scheduled: ${job.name}] Error: ${errorText}`);
     deps.showErrorToast("Scheduled job failed", `${job.name}: ${errorText}`);
+    deps.updateChatPanelCostIndicator(); // reflect costs accrued before failure
     return errorText;
   }
 }

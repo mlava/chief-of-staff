@@ -66,11 +66,67 @@
   font-size: 13px;
 }
 
+/* --- Cost indicator badge --- */
 [data-chief-chat-cost] {
   font-size: 10px;
   font-weight: 400;
   color: var(--cos-muted);
   margin-left: 8px;
+}
+.chief-cost-badge.chief-cost-has-value {
+  cursor: pointer;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: var(--cos-bg-subtle, rgba(128,128,128,0.08));
+  transition: background 0.15s ease;
+}
+.chief-cost-badge.chief-cost-has-value:hover {
+  background: var(--cos-bg-hover, rgba(128,128,128,0.15));
+  color: var(--cos-text, inherit);
+}
+
+/* --- Cost tooltip popover --- */
+.chief-cost-tooltip {
+  background: var(--cos-bg, #fff);
+  border: 1px solid var(--cos-border-subtle, #ddd);
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-width: 180px;
+  max-width: 240px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  font-size: 11px;
+  color: var(--cos-text, #333);
+  line-height: 1.5;
+}
+.chief-cost-heading {
+  font-weight: 600;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--cos-muted, #888);
+  margin-bottom: 3px;
+}
+.chief-cost-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 1px 0;
+}
+.chief-cost-row span:first-child {
+  color: var(--cos-muted, #888);
+}
+.chief-cost-row span:last-child {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.chief-cost-model span:first-child {
+  padding-left: 8px;
+  font-size: 10px;
+}
+.chief-cost-divider {
+  height: 1px;
+  background: var(--cos-border-subtle, #eee);
+  margin: 6px 0;
 }
 
 .chief-panel-header-buttons {

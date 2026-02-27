@@ -104,12 +104,14 @@ const SETTINGS_KEYS = {
   onboardingComplete: "onboarding-complete",
   ludicrousModeEnabled: "ludicrous-mode-enabled",
   localMcpPorts: "local-mcp-ports",
-  piiScrubEnabled: "pii-scrub-enabled"
+  piiScrubEnabled: "pii-scrub-enabled",
+  costHistory: "cost-history"
 };
 const TOOLS_SCHEMA_VERSION = 3;
 const AUTH_POLL_INTERVAL_MS = 9000;
 const AUTH_POLL_TIMEOUT_MS = 180000;
 const MAX_AGENT_ITERATIONS = 10;
+const MAX_AGENT_ITERATIONS_SKILL = 16;    // Extended cap when gathering guard activates (skills need more iterations)
 const MAX_TOOL_CALLS_PER_ITERATION = 4;   // Caps tool calls from a single LLM response (prevents budget blowout)
 const MAX_CALLS_PER_TOOL_PER_LOOP = 5;    // Caps how many times the same tool can be called across the loop
 const MAX_TOOL_RESULT_CHARS = 12000;
@@ -180,7 +182,19 @@ const SOURCE_TOOL_NAME_MAP = {
   "roam_get_block_children": "roam_get_block_children",
   "roam_get_page": "roam_get_page",
   "roam_search": "roam_search",
-  "roam_search_text": "roam_search"
+  "roam_search_text": "roam_search",
+  // Local MCP tool aliases (Google Calendar, etc.)
+  "list-events": "list-events",
+  "search-events": "search-events",
+  "list-calendars": "list-calendars",
+  "get-event": "get-event",
+  "create-event": "create-event",
+  "get-freebusy": "get-freebusy",
+  // Legacy COS tool aliases → new MCP tool names
+  "cos_calendar_read": "list-events",
+  "cos_calendar_search": "search-events",
+  // Direct MCP tools (mcp-fetch, etc.)
+  "fetch": "fetch"
 };
 // Write tools that trigger the gathering completeness guard
 const WRITE_TOOL_NAMES = new Set([
@@ -343,6 +357,108 @@ const sessionTokenUsage = {
   totalRequests: 0,
   totalCostUsd: 0
 };
+
+// ── Persistent cost history ─────────────────────────────────────────
+// Daily cost records persisted to IndexedDB. Each entry tracks one day's
+// accumulated usage, broken down by model.
+// Shape: { days: { "2026-02-27": { cost, input, output, requests, models: { "model-id": { cost, input, output, requests } } } } }
+let costHistory = { days: {} };
+let costHistoryPersistTimeoutId = null;
+const COST_HISTORY_MAX_DAYS = 90; // Prune entries older than 90 days
+
+function todayDateKey() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function loadCostHistory(extensionAPI) {
+  const raw = extensionAPI?.settings?.get?.(SETTINGS_KEYS.costHistory);
+  if (raw && typeof raw === "object" && raw.days) {
+    costHistory = raw;
+  } else {
+    costHistory = { days: {} };
+  }
+}
+
+function persistCostHistory(extensionAPI = extensionAPIRef) {
+  if (costHistoryPersistTimeoutId) {
+    window.clearTimeout(costHistoryPersistTimeoutId);
+  }
+  costHistoryPersistTimeoutId = window.setTimeout(() => {
+    costHistoryPersistTimeoutId = null;
+    pruneCostHistory();
+    extensionAPI?.settings?.set?.(SETTINGS_KEYS.costHistory, costHistory);
+  }, 3000); // 3s debounce
+}
+
+function pruneCostHistory() {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - COST_HISTORY_MAX_DAYS);
+  const cutoffKey = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, "0")}-${String(cutoff.getDate()).padStart(2, "0")}`;
+  for (const key of Object.keys(costHistory.days)) {
+    if (key < cutoffKey) delete costHistory.days[key];
+  }
+}
+
+function recordCostEntry(model, inputTokens, outputTokens, callCost) {
+  const key = todayDateKey();
+  if (!costHistory.days[key]) {
+    costHistory.days[key] = { cost: 0, input: 0, output: 0, requests: 0, models: {} };
+  }
+  const day = costHistory.days[key];
+  day.cost += callCost;
+  day.input += inputTokens;
+  day.output += outputTokens;
+  day.requests += 1;
+  if (!day.models[model]) {
+    day.models[model] = { cost: 0, input: 0, output: 0, requests: 0 };
+  }
+  const m = day.models[model];
+  m.cost += callCost;
+  m.input += inputTokens;
+  m.output += outputTokens;
+  m.requests += 1;
+  persistCostHistory();
+}
+
+function getCostHistorySummary() {
+  const today = todayDateKey();
+  const todayData = costHistory.days[today] || { cost: 0, input: 0, output: 0, requests: 0, models: {} };
+
+  // Last 7 days
+  let week = { cost: 0, input: 0, output: 0, requests: 0 };
+  const now = new Date();
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - i);
+    const k = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const entry = costHistory.days[k];
+    if (entry) {
+      week.cost += entry.cost;
+      week.input += entry.input;
+      week.output += entry.output;
+      week.requests += entry.requests;
+    }
+  }
+
+  // Last 30 days
+  let month = { cost: 0, input: 0, output: 0, requests: 0 };
+  for (let i = 0; i < 30; i++) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - i);
+    const k = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const entry = costHistory.days[k];
+    if (entry) {
+      month.cost += entry.cost;
+      month.input += entry.input;
+      month.output += entry.output;
+      month.requests += entry.requests;
+    }
+  }
+
+  return { today: todayData, week, month };
+}
+
 let installedToolsFetchCache = {
   expiresAt: 0,
   promise: null,
@@ -548,6 +664,16 @@ function buildLocalMcpRouteTool() {
       }
 
       if (serverTools.length === 0) {
+        // Check if the server_name matches a DIRECT tool name or server — guide the LLM to call it directly
+        const lowerName2 = (serverName || "").toLowerCase();
+        const directMatch = cache.find(t => t._isDirect && (
+          t.name.toLowerCase() === lowerName2 ||
+          (t._serverName || "").toLowerCase() === lowerName2 ||
+          (t._serverName || "").toLowerCase().includes(lowerName2)
+        ));
+        if (directMatch) {
+          return { error: `"${serverName}" is a DIRECT tool, not a routed server. Do NOT use LOCAL_MCP_ROUTE for it. Instead, call the tool "${directMatch.name}" directly with its arguments — it is already registered as a callable tool.` };
+        }
         const available = [...new Set(cache.filter(t => !t._isDirect).map(t => t._serverName))];
         return { error: `Server "${serverName}" not found. Available routed servers: ${available.join(", ") || "(none)"}` };
       }
@@ -1271,6 +1397,104 @@ function safeJsonStringify(value, maxChars = MAX_TOOL_RESULT_CHARS) {
   } catch (error) {
     return String(value || "");
   }
+}
+
+/**
+ * Extract all top-level balanced JSON objects from a string.
+ * Used to detect Gemini concatenating multiple tool calls' arguments into one slot.
+ * Returns array of { parsed, start, end } for each valid JSON object found.
+ */
+function extractBalancedJsonObjects(raw) {
+  if (!raw || typeof raw !== "string") return [];
+  const trimmed = raw.trim();
+  const results = [];
+  let pos = 0;
+  while (pos < trimmed.length) {
+    // Skip to next '{'
+    while (pos < trimmed.length && trimmed[pos] !== "{") pos++;
+    if (pos >= trimmed.length) break;
+    let depth = 0, inString = false, escape = false;
+    let foundEnd = false;
+    for (let i = pos; i < trimmed.length; i++) {
+      const ch = trimmed[i];
+      if (escape) { escape = false; continue; }
+      if (ch === "\\") { escape = true; continue; }
+      if (ch === '"') { inString = !inString; continue; }
+      if (inString) continue;
+      if (ch === "{") depth++;
+      if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          try {
+            const parsed = JSON.parse(trimmed.slice(pos, i + 1));
+            results.push({ parsed, start: pos, end: i + 1 });
+          } catch { /* skip malformed */ }
+          pos = i + 1;
+          foundEnd = true;
+          break;
+        }
+      }
+    }
+    if (!foundEnd) break; // unbalanced, stop
+  }
+  return results;
+}
+
+/**
+ * Attempt to recover valid JSON from a malformed tool-argument string.
+ * Gemini models sometimes append trailing text/thinking after the JSON object,
+ * or concatenate multiple tool calls' arguments into a single string.
+ *
+ * Strategy:
+ * 1. Extract all balanced JSON objects from the string.
+ * 2. If only one, return it (original behaviour).
+ * 3. If multiple (Gemini parallel-call concatenation), pick the one whose keys
+ *    best match the tool's input_schema — or fall back to the first object.
+ *
+ * @param {string} raw - The raw argument string
+ * @param {string} toolName - Name of the tool these args are for
+ * @param {object} [toolSchema] - The tool's input_schema (optional, improves matching)
+ */
+function tryRecoverJsonArgs(raw, toolName, toolSchema) {
+  if (!raw || typeof raw !== "string") return {};
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("{")) return {};
+
+  const objects = extractBalancedJsonObjects(trimmed);
+  if (objects.length === 0) return {};
+
+  if (objects.length === 1) {
+    debugLog("[Chief flow] Recovered JSON args for", toolName, "by trimming",
+      trimmed.length - objects[0].end, "trailing chars, recovered:", JSON.stringify(objects[0].parsed));
+    return objects[0].parsed;
+  }
+
+  // Multiple concatenated JSON objects detected — Gemini parallel-call bug.
+  debugLog("[Chief flow] Detected", objects.length, "concatenated JSON objects in args for", toolName);
+
+  // If we have the tool's schema, pick the object whose keys best overlap.
+  if (toolSchema?.properties) {
+    const schemaKeys = new Set(Object.keys(toolSchema.properties));
+    let bestMatch = objects[0];
+    let bestScore = -1;
+    for (const obj of objects) {
+      const objKeys = Object.keys(obj.parsed);
+      const overlap = objKeys.filter(k => schemaKeys.has(k)).length;
+      // Penalise objects with keys NOT in the schema
+      const mismatch = objKeys.filter(k => !schemaKeys.has(k)).length;
+      const score = overlap - mismatch * 0.5;
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatch = obj;
+      }
+    }
+    debugLog("[Chief flow] Schema-matched JSON args for", toolName, "(score:", bestScore + "):", JSON.stringify(bestMatch.parsed));
+    return bestMatch.parsed;
+  }
+
+  // No schema available — return first object (best we can do).
+  debugLog("[Chief flow] No schema for", toolName, "— using first JSON object:", JSON.stringify(objects[0].parsed));
+  return objects[0].parsed;
 }
 
 function truncateForContext(value, maxChars) {
@@ -3647,9 +3871,10 @@ function parseSkillSources(skillContent, knownToolNames = null) {
     const cleanSeg = seg.replace(/`/g, "");
 
     // Check for known tool name prefix (try longest match first)
-    const toolThreeWord = cleanSeg.match(/^(\w+_\w+_\w+)/)?.[1] || "";
-    const toolTwoWord = cleanSeg.match(/^(\w+_\w+)/)?.[1] || "";
-    const toolOneWord = cleanSeg.match(/^(\w+)/)?.[1] || "";
+    // Support both underscore (roam_get_page) and hyphen (list-events) separators
+    const toolThreeWord = cleanSeg.match(/^([\w]+[-_][\w]+[-_][\w]+)/)?.[1] || "";
+    const toolTwoWord = cleanSeg.match(/^([\w]+[-_][\w]+)/)?.[1] || "";
+    const toolOneWord = cleanSeg.match(/^([\w]+)/)?.[1] || "";
     const resolvedTool = SOURCE_TOOL_NAME_MAP[toolThreeWord]
       || SOURCE_TOOL_NAME_MAP[toolTwoWord]
       || SOURCE_TOOL_NAME_MAP[toolOneWord];
@@ -3679,7 +3904,8 @@ function parseSkillSources(skillContent, knownToolNames = null) {
       }
       continue;
     }
-    // Skip unrecognised sources — not enforced
+    // Unrecognised source — log warning so skill authors can fix tool names
+    console.warn(`[Chief flow] Gathering guard: unrecognised source "${seg}" — not enforced. Update skill to use a known tool name.`);
   }
   return sources;
 }
@@ -3770,10 +3996,16 @@ ${systemPromptSuffix}`;
     debugLog(`[Chief flow] Gathering guard active: ${expectedSources.length} expected sources for "${skill.title}"`);
   }
 
+  // Boost iteration cap for skills with many sources (need sources + skill fetch + time + synthesis + buffer)
+  const skillMaxIterations = gatheringGuard
+    ? Math.min(expectedSources.length + 4, MAX_AGENT_ITERATIONS_SKILL)
+    : undefined;
+
   const result = await runAgentLoopWithFailover(skillPrompt, {
     systemPrompt,
     powerMode: true,
     gatheringGuard,
+    ...(skillMaxIterations ? { maxIterations: skillMaxIterations } : {}),
     onToolCall: (name) => {
       showInfoToastIfAllowed("Using tool", name, suppressToasts);
     }
@@ -4278,8 +4510,27 @@ async function callOpenAIStreaming(apiKey, model, system, messages, tools, onTex
         // Tool call deltas — accumulate arguments with bounds
         if (Array.isArray(delta.tool_calls)) {
           for (const tc of delta.tool_calls) {
-            const idx = tc.index ?? 0;
+            let idx = tc.index ?? 0;
             if (idx < 0 || idx > 64) continue;
+
+            // Gemini OpenAI-compat sometimes sends multiple parallel tool calls
+            // at the same index. Detect when a new tool name or id arrives at an
+            // already-occupied slot and redirect to a fresh slot to prevent
+            // argument concatenation across different tools.
+            const existing = toolCallDeltas[idx];
+            if (existing) {
+              const hasNewName = tc.function?.name && existing.name && tc.function.name !== existing.name;
+              const hasNewId = tc.id && existing.id && tc.id !== existing.id;
+              if (hasNewName || hasNewId) {
+                const keys = Object.keys(toolCallDeltas).map(Number).filter(n => !isNaN(n));
+                const newIdx = (keys.length > 0 ? Math.max(...keys) : -1) + 1;
+                debugLog("[Chief flow] Gemini parallel tool-call collision at index", tc.index ?? 0,
+                  "— redirecting", tc.function?.name || tc.id, "to slot", newIdx,
+                  "(existing:", existing.name + ")");
+                idx = newIdx;
+              }
+            }
+
             if (!toolCallDeltas[idx]) {
               toolCallDeltas[idx] = { id: tc.id || "", name: tc.function?.name || "", arguments: "" };
             }
@@ -4310,7 +4561,15 @@ async function callOpenAIStreaming(apiKey, model, system, messages, tools, onTex
     .filter((tc) => tc.name)
     .map((tc) => {
       let args = {};
-      try { args = JSON.parse(tc.arguments); } catch (e) { debugLog("[Chief flow] Tool argument JSON parse failed:", tc.name, e?.message); }
+      try { args = JSON.parse(tc.arguments); } catch (e) {
+        debugLog("[Chief flow] Tool argument JSON parse failed:", tc.name, e?.message);
+        // Look up the tool's input_schema for schema-aware recovery
+        const toolDef = Array.isArray(tools) ? tools.find(t =>
+          (t.function?.name || t.name) === tc.name
+        ) : null;
+        const schema = toolDef?.function?.parameters || toolDef?.input_schema || null;
+        args = tryRecoverJsonArgs(tc.arguments, tc.name, schema);
+      }
       const call = { id: tc.id, name: tc.name, arguments: args };
       // Gemini 3: carry thought_signature through to response reconstruction
       if (tc.thought_signature) call.thought_signature = tc.thought_signature;
@@ -4430,7 +4689,7 @@ function detectClaimedActionWithoutToolCall(text, registeredTools) {
 
 async function runAgentLoop(userMessage, options = {}) {
   const {
-    maxIterations = MAX_AGENT_ITERATIONS,
+    maxIterations: initialMaxIterations = MAX_AGENT_ITERATIONS,
     systemPrompt = null,
     onToolCall = null,
     onToolResult = null,
@@ -4443,6 +4702,7 @@ async function runAgentLoop(userMessage, options = {}) {
     readOnlyTools = false,
     carryoverWriteReplayGuard = null
   } = options;
+  let maxIterations = initialMaxIterations;
   let gatheringGuard = initialGatheringGuard;
 
   const extensionAPI = extensionAPIRef;
@@ -4546,6 +4806,11 @@ async function runAgentLoop(userMessage, options = {}) {
   let gatheringGuardFired = false;
   const gatheringCallNames = [];
   const toolCallCounts = new Map(); // Per-tool execution count across the entire loop (PI-1)
+  const toolConsecutiveErrors = new Map(); // toolName -> { error, count } — detects retry loops
+  const MAX_CONSECUTIVE_TOOL_ERRORS = 2; // Bail after 2 consecutive failures with same tool+error
+  let totalGuardBlocks = 0; // Counts how many times the consecutive error guard fires across all tools
+  const MAX_GUARD_BLOCKS_BEFORE_LOOP_BREAK = 3; // After 3 guard blocks, force-exit the agent loop
+  let forceExitAgentLoop = false; // Set by guard block limit to break out of outer for loop
   if (approximateMessageChars(messages) > MAX_AGENT_MESSAGES_CHAR_BUDGET) {
     const finalText = getAgentOverBudgetMessage();
     debugLog("[Chief flow] runAgentLoop early exit: over budget before first call.");
@@ -4571,6 +4836,10 @@ async function runAgentLoop(userMessage, options = {}) {
 
   try {
     for (let index = 0; index < maxIterations; index += 1) {
+      if (forceExitAgentLoop) {
+        debugLog("[Chief flow] Force-exiting agent loop (guard block limit reached)");
+        break;
+      }
       trace.iterations = index + 1;
       prunablePrefixCount = enforceAgentMessageBudgetInPlace(messages, { prunablePrefixCount });
       if (approximateMessageChars(messages) > MAX_AGENT_MESSAGES_CHAR_BUDGET) {
@@ -4601,6 +4870,7 @@ async function runAgentLoop(userMessage, options = {}) {
           sessionTokenUsage.totalRequests += 1;
           const callCost = (inputTokens / 1_000_000 * getModelCostRates(model).inputPerM) + (outputTokens / 1_000_000 * getModelCostRates(model).outputPerM);
           sessionTokenUsage.totalCostUsd += callCost;
+          recordCostEntry(model, inputTokens, outputTokens, callCost);
           debugLog("[Chief flow] API usage (stream):", {
             inputTokens, outputTokens,
             callCostCents: (callCost * 100).toFixed(3),
@@ -4650,6 +4920,7 @@ async function runAgentLoop(userMessage, options = {}) {
           const { inputPerM: costPerMInput, outputPerM: costPerMOutput } = getModelCostRates(model);
           const callCost = (inputTokens / 1_000_000 * costPerMInput) + (outputTokens / 1_000_000 * costPerMOutput);
           sessionTokenUsage.totalCostUsd += callCost;
+          recordCostEntry(model, inputTokens, outputTokens, callCost);
           debugLog("[Chief flow] API usage:", {
             inputTokens, outputTokens,
             callCostCents: (callCost * 100).toFixed(3),
@@ -4886,6 +5157,31 @@ async function runAgentLoop(userMessage, options = {}) {
           continue;
         }
 
+        // Consecutive error guard — bail early if the same tool keeps failing
+        const consec = toolConsecutiveErrors.get(toolCall.name);
+        if (consec && consec.count >= MAX_CONSECUTIVE_TOOL_ERRORS) {
+          totalGuardBlocks++;
+          debugLog("[Chief flow] Consecutive error guard:", toolCall.name, `(${consec.count} failures with: "${consec.error}", totalGuardBlocks: ${totalGuardBlocks})`);
+          toolResults.push({
+            toolCall,
+            result: { error: `Tool "${toolCall.name}" has failed ${consec.count} consecutive times with the same error: "${consec.error}". Do NOT retry this tool with the same arguments. Use a different tool or approach, or proceed with the data you already have.` }
+          });
+          trace.toolCalls.push({
+            name: toolCall.name,
+            argumentsPreview: safeJsonStringify(toolCall.arguments, 350),
+            startedAt: Date.now(),
+            durationMs: 0,
+            error: "Consecutive error guard"
+          });
+          // After too many guard blocks, hard-exit both loops to prevent wasting API calls
+          if (totalGuardBlocks >= MAX_GUARD_BLOCKS_BEFORE_LOOP_BREAK) {
+            debugLog("[Chief flow] Guard block limit reached (" + totalGuardBlocks + "), force-exiting agent loop");
+            forceExitAgentLoop = true;
+            break; // breaks inner toolCalls loop; forceExitAgentLoop breaks outer index loop on next check
+          }
+          continue;
+        }
+
         const isExternalToolCall = isExternalDataToolCall(toolCall.name);
         if (onToolCall) onToolCall(toolCall.name, toolCall.arguments);
         const startedAt = Date.now();
@@ -4924,6 +5220,17 @@ async function runAgentLoop(userMessage, options = {}) {
           error: errorMessage || null,
           result: errorMessage ? null : safeJsonStringify(result, 400)
         });
+        // Track consecutive errors for retry loop detection
+        if (errorMessage) {
+          const prev = toolConsecutiveErrors.get(toolCall.name);
+          if (prev && prev.error === errorMessage) {
+            prev.count += 1;
+          } else {
+            toolConsecutiveErrors.set(toolCall.name, { error: errorMessage, count: 1 });
+          }
+        } else {
+          toolConsecutiveErrors.delete(toolCall.name);
+        }
         // Dynamic gathering guard activation when LLM fetches a skill
         if (toolCall.name === "cos_get_skill" && result && !result.error && !gatheringGuard) {
           const skillText = typeof result === "string" ? result : safeJsonStringify(result, 10000);
@@ -4943,6 +5250,13 @@ async function runAgentLoop(userMessage, options = {}) {
           debugLog("[Chief flow] Gathering guard parsed sources:", expectedSources.length, expectedSources);
           if (expectedSources.length > 0) {
             gatheringGuard = { expectedSources, source: "mid-loop" };
+            // Dynamically boost iteration cap so skills with many sources can complete.
+            // Need: remaining sources + 1 synthesis + 1 buffer for retries.
+            const neededIterations = index + 1 + expectedSources.length + 2;
+            if (neededIterations > maxIterations && neededIterations <= MAX_AGENT_ITERATIONS_SKILL) {
+              debugLog(`[Chief flow] Gathering guard boosting maxIterations: ${maxIterations} → ${neededIterations} (${expectedSources.length} sources at iteration ${index + 1})`);
+              maxIterations = neededIterations;
+            }
           }
         }
         trace.toolCalls.push({
@@ -5004,6 +5318,17 @@ async function runAgentLoop(userMessage, options = {}) {
       }
     }
 
+    // If we force-exited due to guard block limit, return a graceful message
+    // instead of throwing (which would trigger failover and waste more API calls)
+    if (forceExitAgentLoop) {
+      const guardMsg = "I encountered repeated tool errors and stopped retrying to avoid wasting resources. Please try rephrasing your request or check that the tools/data you're referencing are available.";
+      trace.finishedAt = Date.now();
+      trace.error = "Force-exited: consecutive error guard limit";
+      trace.resultTextPreview = guardMsg;
+      updateChatPanelCostIndicator();
+      return { text: guardMsg, messages, mcpResultTexts };
+    }
+
     trace.finishedAt = Date.now();
     trace.error = "Agent loop exceeded maximum iterations";
     throw new Error("Agent loop exceeded maximum iterations");
@@ -5031,6 +5356,10 @@ async function runAgentLoop(userMessage, options = {}) {
   } finally {
     activeAgentAbortController = null;
     externalExtensionToolsCache = null; // release per-loop cache
+    // Always refresh cost indicator — costs accrue on every API call,
+    // not just successful completions. Without this, failover / error
+    // paths leave the tooltip stale until the next successful request.
+    updateChatPanelCostIndicator();
   }
 }
 
@@ -5111,7 +5440,7 @@ async function runAgentLoopWithFailover(userMessage, options = {}) {
           ...options,
           providerOverride: nextProvider,
           initialMessages: converted,
-          maxIterations: MAX_AGENT_ITERATIONS,
+          maxIterations: options.maxIterations || MAX_AGENT_ITERATIONS,
           powerMode: true,
           tier: baseTier,
           carryoverWriteReplayGuard: {
@@ -5184,7 +5513,7 @@ async function runAgentLoopWithFailover(userMessage, options = {}) {
               ...options,
               providerOverride: nextProvider,
               initialMessages: converted,
-              maxIterations: MAX_AGENT_ITERATIONS,
+              maxIterations: options.maxIterations || MAX_AGENT_ITERATIONS,
               tier: "ludicrous",
               carryoverWriteReplayGuard: {
                 active: priorSuccessfulWrites.length > 0,
@@ -7680,8 +8009,29 @@ function registerCommandPaletteCommands(extensionAPI) {
       sessionTokenUsage.totalOutputTokens = 0;
       sessionTokenUsage.totalRequests = 0;
       sessionTokenUsage.totalCostUsd = 0;
-      showInfoToast("Stats reset", "Token usage counters cleared.");
+      showInfoToast("Stats reset", "Session token counters cleared. Historical cost data is preserved.");
       debugLog("[Chief of Staff] Token usage stats reset");
+    }
+  });
+  extensionAPI.ui.commandPalette.addCommand({
+    label: "Chief of Staff: Show Cost History",
+    callback: () => {
+      const summary = getCostHistorySummary();
+      const fmt = (usd) => usd < 0.01 ? (usd * 100).toFixed(2) + "¢" : "$" + usd.toFixed(2);
+      const lines = [
+        `Today: ${fmt(summary.today.cost)} (${summary.today.requests} requests, ${(summary.today.input + summary.today.output).toLocaleString()} tokens)`,
+        `Last 7 days: ${fmt(summary.week.cost)} (${summary.week.requests} requests)`,
+        `Last 30 days: ${fmt(summary.month.cost)} (${summary.month.requests} requests)`
+      ];
+      if (summary.today.models && Object.keys(summary.today.models).length > 0) {
+        lines.push("", "Today by model:");
+        for (const [m, d] of Object.entries(summary.today.models)) {
+          const shortName = m.replace(/^claude-/, "").replace(/^gemini-/, "").replace(/^gpt-/, "gpt-").replace(/^mistral-/, "");
+          lines.push(`  ${shortName}: ${fmt(d.cost)} (${d.requests} calls)`);
+        }
+      }
+      showInfoToast("Cost History", lines.join("\n"));
+      debugLog("[Chief of Staff] Cost history:", summary);
     }
   });
   extensionAPI.ui.commandPalette.addCommand({
@@ -8224,6 +8574,7 @@ function onload({ extensionAPI }) {
     getSettingArray,
     SETTINGS_KEYS,
     getSessionTokenUsage: () => sessionTokenUsage,
+    getCostHistorySummary,
     getActiveAgentAbortController: () => activeAgentAbortController,
     writeResponseToTodayDailyPage,
     getRoamAlphaApi: () => window.roamAlphaAPI,
@@ -8342,6 +8693,7 @@ function onload({ extensionAPI }) {
   });
   setChiefNamespaceGlobals();
   loadConversationContext(extensionAPI);
+  loadCostHistory(extensionAPI);
   loadChatPanelHistory(extensionAPI);
   ensureToolsConfigState(extensionAPI);
   const state = getToolsConfigState(extensionAPI);
