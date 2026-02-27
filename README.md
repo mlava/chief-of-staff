@@ -162,7 +162,7 @@ The floating chat panel (bottom-right corner by default) provides a persistent c
 - **Arrow Up / Down** to cycle through previous messages (like a terminal).
 - `/clear` resets conversation history and context (same as the Clear button).
 - Suffix a message with `/power` or `/ludicrous` to use a more capable model for that request.
-- A **session cost indicator** in the header shows cumulative API spend for the current session.
+- A **cost indicator** in the header shows cumulative API spend. Hover for a detailed breakdown: session cost with input/output token counts, today's cost with per-model splits (e.g. `3-flash $2.06`), and rolling 7-day and 30-day totals. Cost history is persisted across sessions. Use **Chief of Staff: Reset Token Usage Stats** to zero the session counters.
 - Each assistant response has a small pin icon at its bottom right. Click it to append the response to your daily note page.
 - **[[Page references]]** and **((block references))** in responses are clickable — click to navigate, Shift-click to open in the sidebar.
 - Streaming responses render incrementally as the model generates text.
@@ -371,6 +371,6 @@ If you discover a security issue, please report it directly rather than filing a
 - **Agent iterations** — the reasoning loop is capped at 10 iterations per request to prevent runaway API usage.
 - **Conversation context** — the assistant retains up to 12 recent turns (truncated to 500 user / 2,000 assistant characters each) for follow-up context. Older turns are dropped automatically. Within a single agent run, tool result payloads are progressively trimmed if the message budget (50,000 characters) is exceeded. Key references (identifiers from MCP tool results) are extracted and stored at the front of assistant turns to survive truncation.
 - **Composio dependency** — external tool features (Gmail, Google Calendar, Todoist, etc.) require an active Composio connection. Roam graph and task features work fully without Composio.
-- **LLM API costs** — requests are sent directly from your browser to your configured provider. Costs are billed to your API account. Structured briefings, multi-tool agent runs, and scheduled jobs consume more tokens than simple queries. The chat panel shows a running session cost estimate.
+- **LLM API costs** — requests are sent directly from your browser to your configured provider. Costs are billed to your API account. Structured briefings, multi-tool agent runs, and scheduled jobs consume more tokens than simple queries. The chat panel shows a running cost estimate with per-model breakdowns. **Note:** displayed costs are estimates based on hardcoded per-model rates and may not reflect current provider pricing. Always check your provider's billing dashboard for authoritative usage and charges.
 - **Scheduled job execution** — scheduled jobs require at least one Roam tab to be open. If all tabs are closed, jobs will not fire until a tab is reopened. Only one tab executes jobs at a time (automatic leader election).
 - **Model support** — any model ID accepted by the configured provider can be used. Non-tool-use models will not function correctly with the agent loop.
