@@ -55,9 +55,9 @@ Default models by tier:
 
 | Tier | Anthropic | OpenAI | Gemini | Mistral |
 |---|---|---|---|---|
-| Mini (default) | claude-haiku-4-5 | gpt-5-mini | gemini-2.5-flash-lite | mistral-small |
-| Power (`/power`) | claude-sonnet-4-6 | gpt-4.1 | gemini-2.5-flash | mistral-medium |
-| Ludicrous (`/ludicrous`) | claude-opus-4-6 | gpt-5.2 | — | mistral-large |
+| Mini (default) | claude-haiku-4-5 | gpt-5-mini | gemini-2.5-flash | mistral-small |
+| Power (`/power`) | claude-sonnet-4-6 | gpt-4.1 | gemini-3-flash-preview | mistral-medium |
+| Ludicrous (`/ludicrous`) | claude-opus-4-6 | gpt-5.2 | gemini-3.1-pro-preview-customtools | mistral-large |
 
 > **Security note:** API keys are stored in Roam Depot's settings store (browser IndexedDB). They are never transmitted except directly to the LLM provider's API endpoint (via Roam's built-in CORS proxy when available). Do not use shared or public Roam graphs if you store API keys here.
 
