@@ -49,6 +49,305 @@ export function getChatPanelContainer() { return chatPanelContainer; }
 export function getChatPanelMessages() { return chatPanelMessages; }
 export function getChatPanelIsSending() { return chatPanelIsSending; }
 
+// ── Theme detection & observer ──────────────────────────────────────
+// Adapts to Blueprint (.bp3-dark), Roam Studio (data-theme="dark"),
+// third-party themes, and system preference. Samples Roam's computed
+// styles and sets --cos-* custom properties on the panel element.
+
+let cosThemeObserver = null;
+let cosThemeSyncTimer = null;
+let cosThemeVerifyTimer = null;
+let cosThemeMediaHandler = null;
+let cosThemeToggleHandler = null;
+let cosLastThemeDark = null;
+
+function isDarkMode() {
+  const body = document.body;
+  const root = document.documentElement;
+  return (
+    body?.classList.contains("bp3-dark") ||
+    root?.classList.contains("bp3-dark") ||
+    body?.dataset.theme === "dark" ||
+    root?.dataset.theme === "dark"
+  );
+}
+
+function getToastTheme() {
+  return isDarkMode() ? "dark" : "light";
+}
+
+// Parse any CSS colour to {r,g,b} or null
+function parseColorToRgb(value) {
+  if (!value || typeof value !== "string") return null;
+  const str = value.trim();
+  if (str.startsWith("#")) {
+    let hex = str.slice(1);
+    if (hex.length === 3) hex = hex.split("").map(c => c + c).join("");
+    if (hex.length === 6) {
+      const n = parseInt(hex, 16);
+      if (Number.isNaN(n)) return null;
+      return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+    }
+    return null;
+  }
+  const m = str.match(/rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/i);
+  return m ? { r: Number(m[1]), g: Number(m[2]), b: Number(m[3]) } : null;
+}
+
+// Relative luminance (0 = black, 1 = white)
+function computeLuminance(rgb) {
+  if (!rgb) return 0.5;
+  const f = c => { const v = c / 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+  return 0.2126 * f(rgb.r) + 0.7152 * f(rgb.g) + 0.0722 * f(rgb.b);
+}
+
+// Sample background colour from Roam's layout elements
+function sampleRoamBackground() {
+  const selectors = [
+    ".roam-main",
+    ".roam-body-main",
+    ".roam-body .bp3-card",
+    ".rm-all-pages",
+    ".roam-article",
+    ".roam-body",
+    "#app > div",
+    "#app",
+  ];
+  for (const sel of selectors) {
+    const el = document.querySelector(sel);
+    if (!el) continue;
+    const bg = window.getComputedStyle(el).backgroundColor;
+    if (bg && bg !== "rgba(0, 0, 0, 0)" && bg !== "transparent") return bg;
+  }
+  return null;
+}
+
+// Pick first non-empty/non-inherit CSS value, or the default
+function pickCssValue(fallback, ...candidates) {
+  for (const c of candidates) {
+    if (!c) continue;
+    const v = (typeof c === "string" ? c : String(c)).trim();
+    if (v && v !== "initial" && v !== "inherit" && v !== "unset") return v;
+  }
+  return fallback;
+}
+
+/**
+ * Sync theme by sampling Roam's computed styles and setting --cos-* on the panel.
+ * Called on panel open and whenever the theme changes.
+ */
+export function syncCosTheme() {
+  const panel = chatPanelContainer;
+  if (!panel) return;
+
+  const markerDark = isDarkMode();
+  const systemDark = window.matchMedia?.("(prefers-color-scheme: dark)")?.matches;
+
+  const computed = window.getComputedStyle(document.body);
+  const layoutBg = sampleRoamBackground();
+
+  // Luminance-based fallback: sample the actual rendered background.
+  // Handles Roam Studio themes that apply dark colours without setting
+  // .bp3-dark or data-theme="dark".
+  const layoutBgRgb = parseColorToRgb(layoutBg);
+  const layoutLum = layoutBgRgb ? computeLuminance(layoutBgRgb) : null;
+  const luminanceDark = layoutLum !== null ? layoutLum < 0.4 : false;
+
+  // When layoutBg is null (elements not found or transparent during CSS
+  // transitions), we have no luminance signal.  In that case, preserve the
+  // last known theme state rather than defaulting to light — this prevents
+  // the panel from flickering light→dark→light during animated transitions.
+  const hasLuminanceSignal = layoutLum !== null;
+  let finalDark;
+  if (markerDark || systemDark) {
+    finalDark = true;
+  } else if (hasLuminanceSignal) {
+    finalDark = luminanceDark;
+  } else if (cosLastThemeDark !== null) {
+    finalDark = cosLastThemeDark;
+  } else {
+    finalDark = false;
+  }
+
+  // Skip if nothing changed
+  if (finalDark === cosLastThemeDark) return;
+  cosLastThemeDark = finalDark;
+
+  // Detect whether Roam is using Blueprint or Roam Studio for fallback colours
+  const isBlueprint = !!document.querySelector(".blueprint-dm-toggle");
+
+  // Sample key colours from Roam's CSS variables.
+  // When luminance-based detection fires (custom theme dark, no markers),
+  // prefer the actual layout background over the CSS variable which can be stale.
+  const roamBg = luminanceDark && !markerDark
+    ? pickCssValue(null, layoutBg, computed.getPropertyValue("--background-color"), computed.backgroundColor)
+    : pickCssValue(null, computed.getPropertyValue("--background-color"), layoutBg, computed.backgroundColor);
+
+  const roamText = pickCssValue(
+    null,
+    computed.getPropertyValue("--bp3-text-color"),
+    computed.color
+  );
+
+  const roamBorder = pickCssValue(
+    null,
+    computed.getPropertyValue("--bp3-border-color"),
+    computed.getPropertyValue("--border-color")
+  );
+
+  if (finalDark) {
+    // --- Dark mode: derive panel colours from sampled Roam background ---
+    const darkFallbackBg = isBlueprint ? "#202B33" : "#1e293b";
+    let panelBg = roamBg || darkFallbackBg;
+    const bgRgb = parseColorToRgb(panelBg);
+    const luminance = bgRgb ? computeLuminance(bgRgb) : null;
+
+    // Clamp overly-light backgrounds in dark mode
+    if (bgRgb && luminance > 0.5) panelBg = darkFallbackBg;
+
+    // Ensure text has sufficient contrast against panel background.
+    // Some custom themes have muted text colours that work on the page
+    // but become unreadable on the panel's darker surface.
+    const highContrastFallback = isBlueprint ? "#F5F8FA" : "#e2e8f0";
+    let textColor = roamText || highContrastFallback;
+    const textRgb = parseColorToRgb(textColor);
+    const textLum = textRgb ? computeLuminance(textRgb) : null;
+    const bgLum = bgRgb ? computeLuminance(parseColorToRgb(panelBg) || bgRgb) : null;
+    if (textLum !== null && bgLum !== null) {
+      // WCAG contrast ratio: (L1 + 0.05) / (L2 + 0.05) where L1 > L2
+      const hi = Math.max(textLum, bgLum);
+      const lo = Math.min(textLum, bgLum);
+      const contrast = (hi + 0.05) / (lo + 0.05);
+      if (contrast < 3.5) textColor = highContrastFallback;
+    }
+    const borderColor = roamBorder || (isBlueprint ? "rgba(255,255,255,0.24)" : "rgba(148,163,184,0.25)");
+
+    panel.style.setProperty("--cos-panel-bg", panelBg);
+    panel.style.setProperty("--cos-panel-text", textColor);
+    panel.style.setProperty("--cos-border", borderColor);
+    panel.style.setProperty("--cos-border-subtle", borderColor);
+    panel.style.setProperty("--cos-muted", isBlueprint ? "rgba(255,255,255,0.65)" : "rgba(148,163,184,0.6)");
+    panel.style.setProperty("--cos-input-bg", "rgba(0,0,0,0.2)");
+    panel.style.setProperty("--cos-code-bg", "rgba(0,0,0,0.25)");
+    panel.style.setProperty("--cos-code-text", "#cbd5e1");
+    panel.style.setProperty("--cos-shadow", "rgba(0,0,0,0.4)");
+    panel.style.setProperty("--cos-tool-preview-bg", "rgba(0,0,0,0.2)");
+    panel.style.setProperty("--cos-toast-input-border", borderColor);
+  } else {
+    // --- Light mode: clear all inline overrides, let CSS defaults apply ---
+    const vars = [
+      "--cos-panel-bg", "--cos-panel-text", "--cos-border", "--cos-border-subtle",
+      "--cos-muted", "--cos-input-bg", "--cos-code-bg", "--cos-code-text",
+      "--cos-shadow", "--cos-tool-preview-bg", "--cos-toast-input-border"
+    ];
+    for (const v of vars) panel.style.removeProperty(v);
+  }
+}
+
+function triggerCosThemeResync(delay = 0) {
+  if (cosThemeSyncTimer) clearTimeout(cosThemeSyncTimer);
+  if (cosThemeVerifyTimer) clearTimeout(cosThemeVerifyTimer);
+  cosThemeSyncTimer = setTimeout(() => {
+    cosLastThemeDark = null;
+    syncCosTheme();
+    cosThemeSyncTimer = null;
+    // Verification re-sample after CSS transitions settle (Roam Studio ~2-4s)
+    cosThemeVerifyTimer = setTimeout(() => {
+      cosLastThemeDark = null;
+      syncCosTheme();
+      // Third pass for very slow Roam Studio transitions
+      cosThemeVerifyTimer = setTimeout(() => {
+        cosLastThemeDark = null;
+        syncCosTheme();
+        cosThemeVerifyTimer = null;
+      }, 1500);
+    }, 1500);
+  }, Math.max(800, delay));
+}
+
+/**
+ * Start observing theme changes. Call once after panel is created.
+ */
+export function observeCosThemeChanges() {
+  syncCosTheme();
+
+  // MutationObserver on body/html for class and data-theme changes.
+  // Head stylesheet mutations are throttled more aggressively because Roam
+  // Studio themes fire dozens of mutations during animated transitions.
+  if (!cosThemeObserver) {
+    let headMutationTimer = null;
+    const cb = (mutations) => {
+      const isBodyOrHtml = mutations.some(m =>
+        m.target === document.body || m.target === document.documentElement
+      );
+      if (isBodyOrHtml) {
+        // Class or data-theme change on body/html → high confidence signal
+        triggerCosThemeResync(800);
+      } else {
+        // Head/stylesheet change → likely animated transition.  Use a longer
+        // debounce and don't interrupt an already-scheduled resync.
+        if (!cosThemeSyncTimer && !headMutationTimer) {
+          headMutationTimer = setTimeout(() => {
+            headMutationTimer = null;
+            triggerCosThemeResync(1200);
+          }, 2000);
+        }
+      }
+    };
+    cosThemeObserver = new MutationObserver(cb);
+    try {
+      const targets = [document.body, document.documentElement, document.head].filter(Boolean);
+      for (const target of targets) {
+        const opts = target === document.head
+          ? { childList: true, subtree: true, attributes: true, attributeFilter: ["href", "data-theme"] }
+          : { attributes: true, attributeFilter: ["class", "data-theme"], subtree: false };
+        cosThemeObserver.observe(target, opts);
+      }
+    } catch (err) {
+      console.warn("[COS theme] MutationObserver setup error:", err);
+      cosThemeObserver = null;
+    }
+  } else {
+    // observer already exists, skip setup
+  }
+
+  // prefers-color-scheme media query
+  if (!cosThemeMediaHandler && window.matchMedia) {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    cosThemeMediaHandler = () => triggerCosThemeResync(0);
+    mq.addEventListener?.("change", cosThemeMediaHandler);
+  }
+
+  // Listen for clicks on Roam Studio / Blueprint dark-mode toggle buttons
+  if (!cosThemeToggleHandler) {
+    cosThemeToggleHandler = (e) => {
+      if (e.target.closest(".roamstudio-dm-toggle, .blueprint-dm-toggle")) {
+        triggerCosThemeResync(2000); // Roam Studio transitions take 2-4s to settle
+      }
+    };
+    document.body?.addEventListener("click", cosThemeToggleHandler, true);
+  }
+}
+
+/**
+ * Stop observing theme changes. Call on panel teardown.
+ */
+export function teardownCosThemeObserver() {
+  if (cosThemeObserver) { cosThemeObserver.disconnect(); cosThemeObserver = null; }
+  if (cosThemeSyncTimer) { clearTimeout(cosThemeSyncTimer); cosThemeSyncTimer = null; }
+  if (cosThemeVerifyTimer) { clearTimeout(cosThemeVerifyTimer); cosThemeVerifyTimer = null; }
+  if (cosThemeMediaHandler && window.matchMedia) {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    mq.removeEventListener?.("change", cosThemeMediaHandler);
+    cosThemeMediaHandler = null;
+  }
+  if (cosThemeToggleHandler) {
+    document.body?.removeEventListener("click", cosThemeToggleHandler, true);
+    cosThemeToggleHandler = null;
+  }
+  cosLastThemeDark = null;
+}
+
 // ── Toast wrappers ──────────────────────────────────────────────────
 export function showConnectedToast() {
   if (!iziToast?.success) return;
@@ -57,7 +356,8 @@ export function showConnectedToast() {
     title: "Connected",
     message: assistantName + " connected to Composio.",
     position: "topRight",
-    timeout: 2500
+    timeout: 2500,
+    theme: getToastTheme()
   });
 }
 
@@ -68,7 +368,8 @@ export function showDisconnectedToast() {
     title: "Disconnected",
     message: assistantName + " disconnected from Composio.",
     position: "topRight",
-    timeout: 2500
+    timeout: 2500,
+    theme: getToastTheme()
   });
 }
 
@@ -79,7 +380,8 @@ export function showReconnectedToast() {
     title: "Reconnected",
     message: assistantName + " reconnected to Composio.",
     position: "topRight",
-    timeout: 2500
+    timeout: 2500,
+    theme: getToastTheme()
   });
 }
 
@@ -89,7 +391,8 @@ export function showInfoToast(title, message) {
     title: deps.escapeHtml(title),
     message: deps.escapeHtml(message),
     position: "topRight",
-    timeout: 4500
+    timeout: 4500,
+    theme: getToastTheme()
   });
 }
 
@@ -99,7 +402,8 @@ export function showErrorToast(title, message) {
     title: deps.escapeHtml(title),
     message: deps.escapeHtml(message),
     position: "topRight",
-    timeout: 3500
+    timeout: 3500,
+    theme: getToastTheme()
   });
 }
 
@@ -191,8 +495,65 @@ export function appendChatPanelMessage(role, text) {
   return item;
 }
 
+/**
+ * Extract a short human-friendly label from a full model ID string.
+ * e.g. "claude-haiku-4-5-20251001" → "haiku", "gemini-2.5-flash-lite" → "flash-lite"
+ */
+function shortModelLabel(modelId) {
+  if (!modelId || typeof modelId !== "string") return "";
+  const id = modelId.toLowerCase();
+  // Anthropic
+  if (id.includes("opus"))   return "opus";
+  if (id.includes("sonnet")) return "sonnet";
+  if (id.includes("haiku"))  return "haiku";
+  // Gemini — check flash-lite before flash
+  if (id.includes("flash-lite")) return "flash-lite";
+  if (id.includes("flash"))      return "flash";
+  // OpenAI
+  if (id.includes("gpt-5-mini")) return "gpt-5-mini";
+  if (id.includes("gpt-5.2"))    return "gpt-5.2";
+  if (id.includes("gpt-4.1"))    return "gpt-4.1";
+  // Mistral
+  if (id.includes("mistral-small"))  return "mistral-small";
+  if (id.includes("mistral-medium")) return "mistral-medium";
+  if (id.includes("mistral-large"))  return "mistral-large";
+  // Fallback: return raw ID
+  return modelId;
+}
+
+/**
+ * Get or create the footer row at the bottom of an assistant message.
+ * Houses the model label (left) and save button (right) on the same line.
+ */
+function getOrCreateMessageFooter(messageEl) {
+  let footer = messageEl.querySelector(".chief-msg-footer");
+  if (!footer) {
+    footer = document.createElement("div");
+    footer.className = "chief-msg-footer";
+    messageEl.appendChild(footer);
+  }
+  return footer;
+}
+
+/**
+ * Append a small model-name indicator to an assistant message element.
+ * Shows on hover using the same pattern as the save button.
+ */
+export function addModelIndicator(messageEl, modelId) {
+  if (!messageEl || !modelId) return;
+  const label = shortModelLabel(modelId);
+  if (!label) return;
+  const footer = getOrCreateMessageFooter(messageEl);
+  const span = document.createElement("span");
+  span.className = "chief-msg-model";
+  span.textContent = label;
+  span.title = modelId;
+  footer.appendChild(span);
+}
+
 export function addSaveToDailyPageButton(messageEl, promptText, responseText) {
   if (!messageEl) return;
+  const footer = getOrCreateMessageFooter(messageEl);
   const btn = document.createElement("button");
   btn.className = "chief-msg-save-btn";
   btn.title = "Save to today's daily page";
@@ -211,7 +572,7 @@ export function addSaveToDailyPageButton(messageEl, promptText, responseText) {
       showErrorToast("Write failed", error?.message || "Could not write to daily page.");
     }
   });
-  messageEl.appendChild(btn);
+  footer.appendChild(btn);
 }
 
 function normaliseChatPanelMessage(input) {
@@ -296,7 +657,24 @@ export function updateChatPanelCostIndicator() {
 // ── Chat panel send handler ─────────────────────────────────────────
 async function handleChatPanelSend() {
   refreshChatPanelElementRefs();
-  if (chatPanelIsSending || deps.getActiveAgentAbortController() || !chatPanelInput) return;
+  if (chatPanelIsSending || !chatPanelInput) return;
+
+  // If a background agent run is active (e.g. inbox processing on startup),
+  // abort it so the user's chat message gets priority.
+  const existingController = deps.getActiveAgentAbortController();
+  if (existingController) {
+    deps.debugLog("[Chief chat] Aborting background agent run to prioritise chat send");
+    existingController.abort();
+    // Wait up to 2s for the agent loop finally-block to null the controller
+    for (let i = 0; i < 20 && deps.getActiveAgentAbortController(); i++) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+    if (deps.getActiveAgentAbortController()) {
+      appendChatPanelMessage("assistant", "A background task is still running — please try again in a moment.");
+      return;
+    }
+  }
+
   const message = String(chatPanelInput.value || "").trim();
   if (!message) return;
 
@@ -374,8 +752,11 @@ async function handleChatPanelSend() {
     const responseText = String(result?.text || "").trim().replace(/\[Key reference:[^\]]*\]\s*/g, "").trim() || "No response generated.";
 
     if (streamingEl && document.body.contains(streamingEl)) {
+      // Safe: renderMarkdownToSafeHtml escapes all input; sanitizeChatDom strips unsafe attrs
       streamingEl.innerHTML = deps.renderMarkdownToSafeHtml(responseText);
       deps.sanitizeChatDom(streamingEl);
+      const trace = typeof deps.getLastAgentRunTrace === "function" ? deps.getLastAgentRunTrace() : null;
+      addModelIndicator(streamingEl, trace?.model);
       addSaveToDailyPageButton(streamingEl, message, responseText);
     }
     streamingEl = null;
@@ -826,6 +1207,7 @@ export function ensureChatPanel() {
     appendChatPanelMessage("assistant", greeting);
     appendChatPanelHistory("assistant", greeting);
   }
+  observeCosThemeChanges();
   return chatPanelContainer;
 }
 
@@ -841,8 +1223,17 @@ export function setChatPanelOpen(nextOpen) {
   const panel = ensureChatPanel();
   if (!panel) return;
   refreshChatPanelElementRefs();
+  // Re-append to end of body to guarantee the panel stacks on top of
+  // anything Roam appended after our initial appendChild during onload.
+  // Moving an already-attached node preserves all event listeners.
+  if (nextOpen && panel.parentElement === document.body) {
+    document.body.appendChild(panel);
+  }
   panel.style.display = nextOpen ? "flex" : "none";
-  if (nextOpen) clampChatPanelToViewport(panel);
+  if (nextOpen) {
+    clampChatPanelToViewport(panel);
+    syncCosTheme();
+  }
   chatPanelIsOpen = nextOpen;
   if (nextOpen && chatPanelInput) chatPanelInput.focus();
   try { localStorage.setItem("chief-of-staff-panel-open", nextOpen ? "1" : "0"); } catch { /* ignore */ }
@@ -861,6 +1252,7 @@ export function toggleChatPanel() {
 }
 
 export function destroyChatPanel() {
+  teardownCosThemeObserver();
   unregisterChiefPanelCleanup(chatPanelContainer);
   if (chatPanelCleanupDrag) {
     chatPanelCleanupDrag();
@@ -1007,6 +1399,7 @@ export function promptToolSlugWithToast(defaultSlug = "") {
       }
     });
     iziToast.show({
+      theme: getToastTheme(),
       title: "Install Composio Tool",
       message: '<input data-chief-tool-input type="text" value="' + escapedValue + '" placeholder="GOOGLECALENDAR" />',
       position: "center",
@@ -1099,6 +1492,7 @@ export function promptTextWithToast({
     });
 
     iziToast.show({
+      theme: getToastTheme(),
       title: deps.escapeHtml(title),
       message: '<input data-chief-input type="text" value="' + escapedValue + '" placeholder="' + escapedPlaceholder + '" />',
       position: "center",
@@ -1187,6 +1581,7 @@ export function promptInstalledToolSlugWithToast(
     });
 
     iziToast.show({
+      theme: getToastTheme(),
       title: deps.escapeHtml(title),
       message: '<select data-chief-tool-select>' + optionsHtml + '</select>',
       position: "center",
@@ -1261,6 +1656,7 @@ export function promptToolExecutionApproval(toolName, args) {
     });
 
     iziToast.show({
+      theme: getToastTheme(),
       title: "Approve tool action",
       message: '<div><strong>' + escapedToolName + '</strong></div><pre class="chief-tool-preview">' + escapedArgsPreview + '</pre>',
       position: "center",
@@ -1330,6 +1726,7 @@ export function promptWriteToDailyPage() {
     });
 
     iziToast.show({
+      theme: getToastTheme(),
       title: "Write to Daily Page?",
       message: "Save this response under today's daily page?",
       position: "center",

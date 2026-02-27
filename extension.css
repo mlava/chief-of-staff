@@ -2,6 +2,36 @@
    Chief of Staff — Chat Panel Styles
    ========================================================================== */
 
+/* --- Theme custom properties (light defaults, overridden by JS or .bp3-dark) --- */
+[data-chief-chat-panel] {
+  --cos-panel-bg: #ffffff;
+  --cos-panel-text: #1e293b;
+  --cos-border: rgba(203, 213, 225, 0.5);
+  --cos-border-subtle: rgba(203, 213, 225, 0.4);
+  --cos-muted: rgba(100, 116, 139, 0.7);
+  --cos-input-bg: #f8fafc;
+  --cos-code-bg: #f1f5f9;
+  --cos-code-text: #334155;
+  --cos-user-bubble-bg: rgba(59, 130, 246, 0.07);
+  --cos-user-bubble-border: rgba(59, 130, 246, 0.18);
+  --cos-assistant-bubble-bg: rgba(100, 116, 139, 0.06);
+  --cos-assistant-bubble-border: rgba(100, 116, 139, 0.14);
+  --cos-scheduled-border: rgba(217, 119, 6, 0.5);
+  --cos-scheduled-bg: rgba(245, 158, 11, 0.06);
+  --cos-scheduled-header: rgba(180, 83, 9, 0.9);
+  --cos-blockquote-border: rgba(79, 70, 229, 0.4);
+  --cos-blockquote-text: rgba(30, 41, 59, 0.75);
+  --cos-table-border: rgba(100, 116, 139, 0.25);
+  --cos-table-header-bg: rgba(79, 70, 229, 0.08);
+  --cos-table-stripe: rgba(100, 116, 139, 0.04);
+  --cos-table-hover: rgba(79, 70, 229, 0.05);
+  --cos-scrollbar: rgba(148, 163, 184, 0.25);
+  --cos-scrollbar-hover: rgba(148, 163, 184, 0.4);
+  --cos-shadow: rgba(0, 0, 0, 0.12);
+  --cos-tool-preview-bg: rgba(0, 0, 0, 0.05);
+  --cos-toast-input-border: #d0d7de;
+}
+
 /* --- Panel Container --- */
 [data-chief-chat-panel] {
   position: fixed;
@@ -9,14 +39,14 @@
   bottom: 20px;
   width: 360px;
   height: 80%;
-  background: #ffffff;
-  border: 1px solid rgba(203, 213, 225, 0.5);
+  background: var(--cos-panel-bg);
+  border: 1px solid var(--cos-border);
   border-radius: 10px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 10px 30px var(--cos-shadow);
   z-index: 16;
   display: flex;
   flex-direction: column;
-  color: #1e293b;
+  color: var(--cos-panel-text);
   font-family: Inter, system-ui, -apple-system, sans-serif;
   overflow: hidden;
 }
@@ -27,7 +57,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 10px 12px;
-  border-bottom: 1px solid rgba(203, 213, 225, 0.4);
+  border-bottom: 1px solid var(--cos-border-subtle);
   cursor: move;
 }
 
@@ -39,7 +69,7 @@
 [data-chief-chat-cost] {
   font-size: 10px;
   font-weight: 400;
-  color: rgba(100, 116, 139, 0.7);
+  color: var(--cos-muted);
   margin-left: 8px;
 }
 
@@ -53,17 +83,28 @@
   font-size: 12px;
   padding: 4px 8px;
   cursor: pointer;
-  color: black;
+  color: var(--cos-panel-text);
+  background: var(--cos-input-bg);
+  border: 1px solid var(--cos-border);
+  border-radius: 4px;
+  font-family: inherit;
+  transition: opacity 0.15s;
+}
+.chief-panel-btn:hover {
+  opacity: 0.8;
 }
 
 .chief-panel-btn--close {
   font-size: 14px;
   padding: 2px 8px;
+  background: none;
+  border: none;
 }
 
 /* --- Messages Area --- */
 [data-chief-chat-messages] {
   flex: 1;
+  min-height: 0;            /* allow flex shrink below content height */
   overflow-y: auto;
   padding: 12px;
 }
@@ -82,42 +123,49 @@
 
 /* User bubble */
 .chief-msg--user {
-  background: rgba(59, 130, 246, 0.07);
-  border: 1px solid rgba(59, 130, 246, 0.18);
+  background: var(--cos-user-bubble-bg);
+  border: 1px solid var(--cos-user-bubble-border);
 }
 
 /* Assistant bubble */
 .chief-msg--assistant {
-  background: rgba(100, 116, 139, 0.06);
-  border: 1px solid rgba(100, 116, 139, 0.14);
+  background: var(--cos-assistant-bubble-bg);
+  border: 1px solid var(--cos-assistant-bubble-border);
 }
 
 /* Scheduled/cron job message bubble */
 .chief-msg--scheduled {
-  border-left: 3px solid rgba(217, 119, 6, 0.5);
-  background: rgba(245, 158, 11, 0.06);
+  border-left: 3px solid var(--cos-scheduled-border);
+  background: var(--cos-scheduled-bg);
 }
 .chief-msg-scheduled-header {
   font-size: 0.75rem;
-  color: rgba(180, 83, 9, 0.9);
+  color: var(--cos-scheduled-header);
   margin-bottom: 4px;
   font-weight: 600;
 }
 
+/* Message footer row (model label + save button) */
+.chief-msg-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 4px;
+}
+
 /* Save-to-daily-page button */
 .chief-msg-save-btn {
-  display: block;
-  margin-left: auto;
-  margin-top: 4px;
   background: none;
   border: none;
   cursor: pointer;
+  color: inherit;
   font-size: 12px;
   opacity: 0;
   transition: opacity 0.15s;
   padding: 2px 4px;
   border-radius: 4px;
   line-height: 1;
+  margin-left: auto;
 }
 
 .chief-msg--assistant:hover .chief-msg-save-btn {
@@ -126,7 +174,7 @@
 
 .chief-msg-save-btn:hover {
   opacity: 1 !important;
-  background: rgba(100, 116, 139, 0.1);
+  background: var(--cos-assistant-bubble-bg);
 }
 
 .chief-msg-save-btn--done {
@@ -134,9 +182,23 @@
   cursor: default;
 }
 
+/* Model / tier indicator */
+.chief-msg-model {
+  font-size: 10px;
+  color: var(--cos-muted);
+  opacity: 0;
+  transition: opacity 0.15s;
+  line-height: 1;
+  user-select: none;
+}
+
+.chief-msg--assistant:hover .chief-msg-model {
+  opacity: 0.5;
+}
+
 /* Thinking indicator */
 .chief-msg-thinking {
-  color: rgba(100, 116, 139, 0.6);
+  color: var(--cos-muted);
   font-size: 0.85rem;
   font-style: italic;
 }
@@ -153,10 +215,13 @@
 
 /* --- Composer Bar --- */
 .chief-panel-composer {
-  border-top: 1px solid rgba(203, 213, 225, 0.4);
+  border-top: 1px solid var(--cos-border-subtle);
   padding: 10px;
   display: flex;
   gap: 8px;
+  flex-shrink: 0;            /* never collapse the input area */
+  position: relative;        /* own stacking context */
+  z-index: 1;                /* stay above messages area */
 }
 
 /* --- Input --- */
@@ -164,24 +229,42 @@
   flex: 1;
   line-height: 21px;
   resize: none;
-  background: #f8fafc;
-  color: #1e293b;
-  border: 1px solid rgba(203, 213, 225, 0.6);
+  background: var(--cos-input-bg);
+  color: var(--cos-panel-text);
+  border: 1px solid var(--cos-border);
   border-radius: 6px;
   padding: 8px;
+  font-family: inherit;
+  font-size: 13px;
+}
+[data-chief-chat-input]::placeholder {
+  color: var(--cos-muted);
 }
 
 /* --- Send Button --- */
 [data-chief-chat-send] {
-  padding: 8px 10px;
+  padding: 8px 12px;
   cursor: pointer;
-  color: black;
+  color: var(--cos-panel-text);
+  background: var(--cos-input-bg);
+  border: 1px solid var(--cos-border);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  transition: opacity 0.15s;
+}
+[data-chief-chat-send]:hover {
+  opacity: 0.8;
+}
+[data-chief-chat-send]:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 /* --- Markdown: Inline Code --- */
 .chief-inline-code {
-  background: rgba(100, 116, 139, 0.1);
-  color: #334155;
+  background: var(--cos-assistant-bubble-bg);
+  color: var(--cos-code-text);
   padding: 1px 4px;
   border-radius: 4px;
 }
@@ -189,22 +272,22 @@
 /* --- Markdown: Code Blocks --- */
 .chief-code-block {
   overflow: auto;
-  background: #f1f5f9;
-  color: #334155;
+  background: var(--cos-code-bg);
+  color: var(--cos-code-text);
   padding: 8px;
   border-radius: 6px;
 }
 
 .chief-code-block code {
   background: none;
-  color: #334155;
+  color: var(--cos-code-text);
   padding: 0;
 }
 
 /* --- Markdown: Horizontal Rule --- */
 .chief-hr {
   border: none;
-  border-top: 1px solid rgba(203, 213, 225, 0.5);
+  border-top: 1px solid var(--cos-border);
   margin: 8px 0;
 }
 
@@ -237,8 +320,8 @@ h6.chief-heading { font-size: 0.8em; }
 .chief-blockquote {
   margin: 6px 0;
   padding: 4px 12px;
-  border-left: 3px solid rgba(79, 70, 229, 0.4);
-  color: rgba(30, 41, 59, 0.75);
+  border-left: 3px solid var(--cos-blockquote-border);
+  color: var(--cos-blockquote-text);
   font-style: italic;
 }
 
@@ -252,21 +335,21 @@ h6.chief-heading { font-size: 0.8em; }
 }
 .chief-table th,
 .chief-table td {
-  border: 1px solid rgba(100, 116, 139, 0.25);
+  border: 1px solid var(--cos-table-border);
   padding: 5px 10px;
   text-align: left;
 }
 .chief-table th {
-  background: rgba(79, 70, 229, 0.08);
+  background: var(--cos-table-header-bg);
   font-weight: 600;
   font-size: 0.9em;
   text-transform: none;
 }
 .chief-table tbody tr:nth-child(even) {
-  background: rgba(100, 116, 139, 0.04);
+  background: var(--cos-table-stripe);
 }
 .chief-table tbody tr:hover {
-  background: rgba(79, 70, 229, 0.05);
+  background: var(--cos-table-hover);
 }
 
 /* --- Markdown: Page References --- */
@@ -284,7 +367,7 @@ h6.chief-heading { font-size: 0.8em; }
   word-break: break-all;
 }
 
-/* --- Scrollbar (light theme) --- */
+/* --- Scrollbar --- */
 [data-chief-chat-messages]::-webkit-scrollbar {
   width: 6px;
 }
@@ -294,12 +377,12 @@ h6.chief-heading { font-size: 0.8em; }
 }
 
 [data-chief-chat-messages]::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.25);
+  background: var(--cos-scrollbar);
   border-radius: 3px;
 }
 
 [data-chief-chat-messages]::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, 0.4);
+  background: var(--cos-scrollbar-hover);
 }
 
 /* --- Toast Inline Inputs --- */
@@ -307,14 +390,14 @@ h6.chief-heading { font-size: 0.8em; }
 [data-chief-input] {
   width: 100%;
   padding: 6px 8px;
-  border: 1px solid #d0d7de;
+  border: 1px solid var(--cos-toast-input-border);
   border-radius: 4px;
 }
 
 [data-chief-tool-select] {
   width: 100%;
   padding: 6px 8px;
-  border: 1px solid #d0d7de;
+  border: 1px solid var(--cos-toast-input-border);
   border-radius: 4px;
 }
 
@@ -322,9 +405,52 @@ h6.chief-heading { font-size: 0.8em; }
 .chief-tool-preview {
   max-height: 140px;
   overflow: auto;
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--cos-tool-preview-bg);
   padding: 6px;
   border-radius: 4px;
+}
+
+/* ==========================================================================
+   Chief of Staff — Dark Mode Overrides
+   CSS-only fallback for .bp3-dark (Blueprint) and [data-theme="dark"] (Roam Studio).
+   JS theme observer (syncCosTheme) sets these same custom properties dynamically
+   for third-party themes and mixed-mode scenarios.
+   ========================================================================== */
+
+.bp3-dark [data-chief-chat-panel],
+[data-theme="dark"] [data-chief-chat-panel] {
+  --cos-panel-bg: #1e293b;
+  --cos-panel-text: #e2e8f0;
+  --cos-border: rgba(148, 163, 184, 0.25);
+  --cos-border-subtle: rgba(148, 163, 184, 0.2);
+  --cos-muted: rgba(148, 163, 184, 0.6);
+  --cos-input-bg: rgba(30, 41, 59, 0.8);
+  --cos-code-bg: rgba(15, 23, 42, 0.6);
+  --cos-code-text: #cbd5e1;
+  --cos-user-bubble-bg: rgba(59, 130, 246, 0.15);
+  --cos-user-bubble-border: rgba(59, 130, 246, 0.25);
+  --cos-assistant-bubble-bg: rgba(100, 116, 139, 0.15);
+  --cos-assistant-bubble-border: rgba(100, 116, 139, 0.25);
+  --cos-scheduled-border: rgba(251, 191, 36, 0.5);
+  --cos-scheduled-bg: rgba(245, 158, 11, 0.12);
+  --cos-scheduled-header: rgba(251, 191, 36, 0.9);
+  --cos-blockquote-border: rgba(99, 102, 241, 0.4);
+  --cos-blockquote-text: rgba(203, 213, 225, 0.75);
+  --cos-table-border: rgba(100, 116, 139, 0.35);
+  --cos-table-header-bg: rgba(79, 70, 229, 0.15);
+  --cos-table-stripe: rgba(100, 116, 139, 0.08);
+  --cos-table-hover: rgba(79, 70, 229, 0.12);
+  --cos-scrollbar: rgba(148, 163, 184, 0.3);
+  --cos-scrollbar-hover: rgba(148, 163, 184, 0.5);
+  --cos-shadow: rgba(0, 0, 0, 0.4);
+  --cos-tool-preview-bg: rgba(0, 0, 0, 0.2);
+  --cos-toast-input-border: rgba(148, 163, 184, 0.3);
+}
+
+/* Placeholder colour in dark mode */
+.bp3-dark [data-chief-chat-input]::placeholder,
+[data-theme="dark"] [data-chief-chat-input]::placeholder {
+  color: rgba(148, 163, 184, 0.5);
 }
 
 /* ==========================================================================

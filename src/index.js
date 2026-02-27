@@ -14,7 +14,7 @@ import {
   destroyChatPanel, promptToolSlugWithToast, promptTextWithToast,
   promptInstalledToolSlugWithToast, promptToolExecutionApproval,
   promptWriteToDailyPage, detachAllToastKeyboards,
-  refreshChatPanelElementRefs, addSaveToDailyPageButton
+  refreshChatPanelElementRefs, addSaveToDailyPageButton, addModelIndicator
 } from "./chat-panel.js";
 import { initRoamNativeTools, resetRoamNativeToolsCache, getRoamNativeTools } from "./roam-native-tools.js";
 import {
@@ -89,7 +89,6 @@ const SETTINGS_KEYS = {
   anthropicApiKey: "anthropic-api-key",
   geminiApiKey: "gemini-api-key",
   mistralApiKey: "mistral-api-key",
-  llmModel: "llm-model",
   debugLogging: "debug-logging",
   dryRunMode: "dry-run-mode",
   conversationContext: "conversation-context",
@@ -103,7 +102,6 @@ const SETTINGS_KEYS = {
   cronJobs: "cron-jobs",
   userName: "user-name",
   onboardingComplete: "onboarding-complete",
-  betterTasksEnabled: "better-tasks-enabled",
   ludicrousModeEnabled: "ludicrous-mode-enabled",
   localMcpPorts: "local-mcp-ports",
   piiScrubEnabled: "pii-scrub-enabled"
@@ -131,44 +129,44 @@ const LLM_RESPONSE_TIMEOUT_MS = 90_000; // 90s per-request timeout for non-strea
 const DEFAULT_LLM_PROVIDER = "anthropic";
 const FAILOVER_CHAINS = {
   mini: ["gemini", "mistral", "openai", "anthropic"],
-  power: ["mistral", "gemini", "openai", "anthropic"],
-  ludicrous: ["mistral", "openai", "gemini", "anthropic"]
+  power: ["gemini", "mistral", "openai", "anthropic"],
+  ludicrous: ["gemini", "openai", "mistral", "anthropic"]
 };
 const PROVIDER_COOLDOWN_MS = 60_000;
 const FAILOVER_CONTINUATION_MESSAGE = "Note: You are continuing a task started by another AI model which hit a temporary error. The conversation above contains all data gathered so far. Please complete the task using this context.";
 const DEFAULT_LLM_MODELS = {
   anthropic: "claude-haiku-4-5-20251001", // $1.00 / $5.00
   openai: "gpt-5-mini",  // $0.25 / $2.00
-  gemini: "gemini-2.5-flash-lite",  // $0.10 / $0.40
+  gemini: "gemini-2.5-flash",  // $0.30 / $2.50
   mistral: "mistral-small-latest" // $0.10 / $0.30
 };
 const POWER_LLM_MODELS = {
-  anthropic: "claude-sonnet-4-6-20250514",  // $3.00 / $15.00
+  anthropic: "claude-sonnet-4-6",  // $3.00 / $15.00
   openai: "gpt-4.1",  // $2.00 / $8.00
-  gemini: "gemini-2.5-flash",  // $0.30 / $2.50
+  gemini: "gemini-3-flash-preview",  // $0.50 / $3.00
   mistral: "mistral-medium-latest" // $0.40 / $2.00
 };
 const LUDICROUS_LLM_MODELS = {
   mistral: "mistral-large-2512",      // $0.50 / $1.50
   openai: "gpt-5.2",                  // $1.75 / $14.00
   gemini: "gemini-3.1-pro-preview-customtools",  // $2.00 / $12.00
-  anthropic: "claude-opus-4-6"        // $15.00 / $75.00
+  anthropic: "claude-opus-4-6"        // $5.00 / $25.00
 };
 
 const LLM_MODEL_COSTS = {
   // [inputPerM, outputPerM]
-  "claude-haiku-4-5-20251001": [1.00, 5.0],
-  "claude-sonnet-4-5-20250929": [3.0, 15.0],
+  "claude-haiku-4-5-20251001": [1.00, 5.00],
+  "claude-sonnet-4-6": [3.00, 15.00],
+  "claude-opus-4-6": [5.00, 25.00],
   "gpt-5-mini": [0.25, 2.00],
   "gpt-4.1": [2.00, 8.00],
-  "gemini-2.5-flash-lite": [0.10, 0.40],
+  "gpt-5.2": [1.75, 14.00],
   "gemini-2.5-flash": [0.30, 2.50],
+  "gemini-3-flash-preview": [0.50, 3.00],
   "gemini-3.1-pro-preview-customtools": [2.00, 12.00],
   "mistral-small-latest": [0.10, 0.30],
   "mistral-medium-latest": [0.40, 2.00],
-  "mistral-large-2512": [0.50, 1.50],
-  "claude-opus-4-6": [15.00, 75.00],
-  "gpt-5.2": [1.75, 14.00]
+  "mistral-large-2512": [0.50, 1.50]
 };
 // Map skill shorthand source names → actual LLM tool names
 const SOURCE_TOOL_NAME_MAP = {
@@ -791,9 +789,12 @@ function renderInlineMarkdown(text) {
   // Strip markdown image syntax ![alt](url) → [alt](url) — chat panel doesn't render images
   raw = raw.replace(/!\[([^\]]*)\]\(/g, "[$1](");
   // Markdown links [label](url) — extract before bare URLs so they don't double-match
-  raw = raw.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, href) => {
+  // Supports balanced parentheses in URLs (e.g. Wikipedia: Roam_(software))
+  raw = raw.replace(/\[([^\]]+)\]\(([^()]*(?:\([^()]*\)[^()]*)*)\)/g, (_, label, href) => {
     const key = `__MDLNK_${nonce}_${mdLinkChunks.length}__`;
-    const safeHref = sanitiseMarkdownHref(href);
+    // Strip trailing markdown artifacts (**, *, __, _) LLMs sometimes place inside link parens
+    const cleanHref = href.replace(/[*_]+$/, "");
+    const safeHref = sanitiseMarkdownHref(cleanHref);
     mdLinkChunks.push(`<a href="${safeHref}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`);
     return key;
   });
@@ -1211,8 +1212,6 @@ function getOpenAiApiKey(extensionAPI) {
 }
 
 function getLlmModel(extensionAPI, provider) {
-  const configured = getSettingString(extensionAPI, SETTINGS_KEYS.llmModel, "");
-  if (configured) return configured;
   return DEFAULT_LLM_MODELS[provider] || DEFAULT_LLM_MODELS.anthropic;
 }
 
@@ -4289,6 +4288,16 @@ async function callOpenAIStreaming(apiKey, model, system, messages, tools, onTex
             if (tc.function?.arguments && toolCallDeltas[idx].arguments.length < 32768) {
               toolCallDeltas[idx].arguments += tc.function.arguments;
             }
+            // Gemini 3 models require thought_signature to be echoed back for multi-turn tool calling.
+            // Without it, subsequent API calls return 400 "Function call is missing a thought_signature".
+            // In the OpenAI-compat SSE format, the signature is at tc.extra_content.google.thought_signature.
+            const sig = tc.extra_content?.google?.thought_signature || tc.thought_signature;
+            if (sig) {
+              toolCallDeltas[idx].thought_signature = sig;
+              // Preserve the full extra_content structure for echo-back
+              if (tc.extra_content) toolCallDeltas[idx].extra_content = tc.extra_content;
+              debugLog("[Chief flow] Captured thought_signature for tool call index", idx, "(length:", sig.length + ")");
+            }
           }
         }
       }
@@ -4302,7 +4311,10 @@ async function callOpenAIStreaming(apiKey, model, system, messages, tools, onTex
     .map((tc) => {
       let args = {};
       try { args = JSON.parse(tc.arguments); } catch (e) { debugLog("[Chief flow] Tool argument JSON parse failed:", tc.name, e?.message); }
-      return { id: tc.id, name: tc.name, arguments: args };
+      const call = { id: tc.id, name: tc.name, arguments: args };
+      // Gemini 3: carry thought_signature through to response reconstruction
+      if (tc.thought_signature) call.thought_signature = tc.thought_signature;
+      return call;
     });
 
   return { textContent, toolCalls, usage };
@@ -4357,6 +4369,18 @@ class ClaimedActionEscalationError extends Error {
   constructor(message, context) {
     super(message);
     this.name = "ClaimedActionEscalationError";
+    this.escalationContext = context || {};
+  }
+}
+
+/**
+ * Thrown when the model returns 0 output tokens even after a retry nudge.
+ * Signals runAgentLoopWithFailover to restart at power tier.
+ */
+class EmptyResponseEscalationError extends Error {
+  constructor(message, context) {
+    super(message);
+    this.name = "EmptyResponseEscalationError";
     this.escalationContext = context || {};
   }
 }
@@ -4593,11 +4617,21 @@ async function runAgentLoop(userMessage, options = {}) {
             message: {
               role: "assistant",
               content: streamedText || null,
-              tool_calls: toolCalls.length ? toolCalls.map((tc, i) => ({
-                id: tc.id || `call_${i}`,
-                type: "function",
-                function: { name: tc.name, arguments: JSON.stringify(tc.arguments) }
-              })) : undefined
+              tool_calls: toolCalls.length ? toolCalls.map((tc, i) => {
+                const call = {
+                  id: tc.id || `call_${i}`,
+                  type: "function",
+                  function: { name: tc.name, arguments: JSON.stringify(tc.arguments) }
+                };
+                // Gemini 3: preserve thought_signature for multi-turn tool calling.
+                // Must be echoed back in extra_content.google.thought_signature format.
+                if (tc.extra_content) {
+                  call.extra_content = tc.extra_content;
+                } else if (tc.thought_signature) {
+                  call.extra_content = { google: { thought_signature: tc.thought_signature } };
+                }
+                return call;
+              }) : undefined
             }
           }],
           usage: streamResult.usage
@@ -4660,14 +4694,35 @@ async function runAgentLoop(userMessage, options = {}) {
         // PI-2: System prompt leakage guard — redact if the model is dumping its instructions
         finalText = guardAgainstSystemPromptLeakage(finalText);
 
-        // Empty response guard: if the model returned 0 output tokens after successful tool calls,
-        // retry once with a nudge — flash-lite sometimes returns nothing after receiving tool results.
-        if (!finalText?.trim() && !emptyResponseRetried && trace.toolCalls.some(tc => !tc.error)) {
-          emptyResponseRetried = true;
-          debugLog("[Chief flow] runAgentLoop empty response guard — 0 output tokens after successful tool calls (iteration " + (index + 1) + "), retrying.");
-          messages.push(formatAssistantMessage(provider, response));
-          messages.push({ role: "user", content: "You returned an empty response after calling tools successfully. The tool results above contain the data needed. Please summarise the results for the user." });
-          continue;
+        // Empty response guard: if the model returned 0 output tokens, retry once with a nudge.
+        // Case 1: empty after successful tool calls — flash-lite sometimes returns nothing after receiving tool results.
+        // Case 2: empty on first iteration with no tool calls — model occasionally returns 0 tokens for simple queries.
+        // If the retry also returns empty, escalate to power tier (similar to claimed-action escalation).
+        if (!finalText?.trim()) {
+          const hasSuccessfulToolCalls = trace.toolCalls.some(tc => !tc.error);
+          const isFirstIterationEmpty = index === 0 && toolCalls.length === 0 && trace.toolCalls.length === 0;
+          const isRetryIterationEmpty = emptyResponseRetried && toolCalls.length === 0;
+          if (hasSuccessfulToolCalls || isFirstIterationEmpty || isRetryIterationEmpty) {
+            if (!emptyResponseRetried) {
+              // First empty response — retry with a nudge
+              emptyResponseRetried = true;
+              const reason = hasSuccessfulToolCalls ? "after successful tool calls" : "on first iteration (no tool calls)";
+              debugLog("[Chief flow] runAgentLoop empty response guard — 0 output tokens " + reason + " (iteration " + (index + 1) + "), retrying.");
+              messages.push(formatAssistantMessage(provider, response));
+              const nudge = hasSuccessfulToolCalls
+                ? "You returned an empty response after calling tools successfully. The tool results above contain the data needed. Please summarise the results for the user."
+                : "You returned an empty response. Please respond to the user's request.";
+              messages.push({ role: "user", content: nudge });
+              continue;
+            } else if (effectiveTier === "mini") {
+              // Retry also returned empty on mini tier — escalate to power
+              debugLog("[Chief flow] Empty response escalation: mini-tier returned 0 output tokens twice, escalating to power tier.");
+              throw new EmptyResponseEscalationError(
+                "Mini-tier returned 0 output tokens on both initial and retry attempts",
+                { provider, tier: effectiveTier, iterations: index + 1 }
+              );
+            }
+          }
         }
 
         // Hallucination guard (enhanced): if the model claims to have performed an action but made
@@ -5014,6 +5069,17 @@ async function runAgentLoopWithFailover(userMessage, options = {}) {
         powerMode: true
       });
     }
+    if (error instanceof EmptyResponseEscalationError) {
+      const esc = error.escalationContext || {};
+      debugLog(`[Chief flow] Empty response escalation: ${esc.provider} ${esc.tier} → power`);
+      showInfoToast("Upgrading model", "Mini tier unresponsive, switching to power tier\u2026");
+      return await runAgentLoop(userMessage, {
+        ...options,
+        providerOverride: primaryProvider,
+        tier: "power",
+        powerMode: true
+      });
+    }
     lastError = error;
     if (!isFailoverEligibleError(error)) throw error;
     setProviderCooldown(primaryProvider);
@@ -5065,6 +5131,17 @@ async function runAgentLoopWithFailover(userMessage, options = {}) {
         const esc = error.escalationContext || {};
         debugLog(`[Chief flow] Claimed-action escalation in fallback: ${esc.provider} ${esc.tier} → power`);
         showInfoToast("Upgrading model", "Switching to power tier for better tool-call reliability\u2026");
+        return await runAgentLoop(userMessage, {
+          ...options,
+          providerOverride: nextProvider,
+          tier: "power",
+          powerMode: true
+        });
+      }
+      if (error instanceof EmptyResponseEscalationError) {
+        const esc = error.escalationContext || {};
+        debugLog(`[Chief flow] Empty response escalation in fallback: ${esc.provider} ${esc.tier} → power`);
+        showInfoToast("Upgrading model", "Mini tier unresponsive, switching to power tier\u2026");
         return await runAgentLoop(userMessage, {
           ...options,
           providerOverride: nextProvider,
@@ -5346,124 +5423,174 @@ async function reconcileInstalledToolsWithComposio(extensionAPI) {
   return reconcileInFlightPromise;
 }
 
+// ---------------------------------------------------------------------------
+// Settings panel — progressive disclosure (rebuild-on-toggle)
+// ---------------------------------------------------------------------------
+// Three tiers:
+//   1. Always visible — provider, API keys, your name
+//   2. "Show Integration Settings" — Composio, Local MCP
+//   3. "Show Advanced Settings" — debug, dry run, PII, ludicrous
+// Toggle switches rebuild the panel so sections appear/disappear immediately.
+// ---------------------------------------------------------------------------
+
+const SETTINGS_SHOW_INTEGRATIONS = "show-integration-settings";
+const SETTINGS_SHOW_ADVANCED = "show-advanced-settings";
+
+function ensureSettingBool(extensionAPI, key, fallback) {
+  const val = extensionAPI.settings.get(key);
+  if (val === true || val === false) return val;
+  return fallback;
+}
+
+function rebuildSettingsPanel(extensionAPI) {
+  setTimeout(() => {
+    extensionAPI.settings.panel.create(buildSettingsConfig(extensionAPI));
+  }, 60);
+}
+
 function buildSettingsConfig(extensionAPI) {
-  return {
-    tabTitle: "Chief of Staff",
-    settings: [
+  const showIntegrations = ensureSettingBool(extensionAPI, SETTINGS_SHOW_INTEGRATIONS, false);
+  const showAdvanced = ensureSettingBool(extensionAPI, SETTINGS_SHOW_ADVANCED, false);
+
+  // --- Tier 1: Essential (always visible) -----------------------------------
+  const settings = [
+    {
+      id: SETTINGS_KEYS.userName,
+      name: "Your Name",
+      description: "How Chief of Staff addresses you.",
+      action: {
+        type: "input",
+        value: getSettingString(extensionAPI, SETTINGS_KEYS.userName, ""),
+        placeholder: "Your name"
+      }
+    },
+    {
+      id: SETTINGS_KEYS.assistantName,
+      name: "Assistant Name",
+      description: "Display name used in the chat panel and toasts. Defaults to \"Chief of Staff\".",
+      action: {
+        type: "input",
+        value: getAssistantDisplayName(extensionAPI),
+        placeholder: DEFAULT_ASSISTANT_NAME
+      }
+    },
+    {
+      id: SETTINGS_KEYS.llmProvider,
+      name: "LLM Provider",
+      description: "Primary AI provider. If this provider fails, Chief of Staff automatically falls back to other providers you have keys for.",
+      action: {
+        type: "select",
+        items: ["anthropic", "openai", "gemini", "mistral"],
+        value: getLlmProvider(extensionAPI)
+      }
+    },
+    {
+      id: SETTINGS_KEYS.anthropicApiKey,
+      name: "Anthropic API Key",
+      description: "Get yours at console.anthropic.com. Used for Claude models and as a failover provider.",
+      action: {
+        type: "input",
+        value: getSettingString(extensionAPI, SETTINGS_KEYS.anthropicApiKey, ""),
+        placeholder: "sk-ant-..."
+      }
+    },
+    {
+      id: SETTINGS_KEYS.openaiApiKey,
+      name: "OpenAI API Key",
+      description: "Get yours at platform.openai.com. Used for GPT models and as a failover provider.",
+      action: {
+        type: "input",
+        value: getSettingString(extensionAPI, SETTINGS_KEYS.openaiApiKey, "") || getSettingString(extensionAPI, SETTINGS_KEYS.llmApiKey, ""),
+        placeholder: "sk-..."
+      }
+    },
+    {
+      id: SETTINGS_KEYS.geminiApiKey,
+      name: "Google Gemini API Key",
+      description: "Get yours at aistudio.google.com. Used for Gemini models and as a failover provider.",
+      action: {
+        type: "input",
+        value: getSettingString(extensionAPI, SETTINGS_KEYS.geminiApiKey, ""),
+        placeholder: "AIza..."
+      }
+    },
+    {
+      id: SETTINGS_KEYS.mistralApiKey,
+      name: "Mistral API Key",
+      description: "Get yours at console.mistral.ai. Used for Mistral models and as a failover provider.",
+      action: {
+        type: "input",
+        value: getSettingString(extensionAPI, SETTINGS_KEYS.mistralApiKey, ""),
+        placeholder: "sk-..."
+      }
+    },
+  ];
+
+  // --- Tier 2 toggle: Integrations ------------------------------------------
+  settings.push({
+    id: SETTINGS_SHOW_INTEGRATIONS,
+    name: "Show Integration Settings",
+    description: "Composio (external tools like Gmail, Calendar, GitHub) and Local MCP server connections.",
+    action: {
+      type: "switch",
+      value: showIntegrations,
+      onChange: () => rebuildSettingsPanel(extensionAPI),
+    }
+  });
+
+  if (showIntegrations) {
+    settings.push(
       {
         id: SETTINGS_KEYS.composioMcpUrl,
         name: "Composio MCP URL",
-        description: "MCP endpoint URL used to connect this extension to Composio.",
+        description: "Full proxy URL including your Composio endpoint path. Format: https://your-proxy.workers.dev/https://mcp.composio.dev/your-endpoint — requires deploying roam-mcp-proxy (see docs). Leave blank if not using Composio.",
         action: {
           type: "input",
-          value: getSettingString(extensionAPI, SETTINGS_KEYS.composioMcpUrl, DEFAULT_COMPOSIO_MCP_URL),
-          placeholder: DEFAULT_COMPOSIO_MCP_URL
+          value: getComposioSettingOrBlank(extensionAPI, SETTINGS_KEYS.composioMcpUrl),
+          placeholder: "https://your-proxy.workers.dev/https://mcp.composio.dev/..."
         }
       },
       {
         id: SETTINGS_KEYS.composioApiKey,
         name: "Composio API Key",
-        description: "API key sent as the x-api-key header for Composio MCP requests.",
+        description: "Your Composio API key (starts with \"ak_\"). Found at app.composio.dev under Settings → API Keys. Leave blank if not using Composio.",
         action: {
           type: "input",
-          value: getSettingString(extensionAPI, SETTINGS_KEYS.composioApiKey, DEFAULT_COMPOSIO_API_KEY),
+          value: getComposioSettingOrBlank(extensionAPI, SETTINGS_KEYS.composioApiKey),
           placeholder: "ak_..."
         }
       },
       {
         id: SETTINGS_KEYS.localMcpPorts,
         name: "Local MCP Server Ports",
-        description: "Comma-separated ports for local MCP servers (supergateway SSE). Example: 8003,8004,8005",
+        description: "Comma-separated localhost ports where supergateway is exposing your MCP servers as SSE. Each port should be a running supergateway instance. Example: 8003,8004",
         action: {
           type: "input",
           value: getSettingString(extensionAPI, SETTINGS_KEYS.localMcpPorts, ""),
           placeholder: "8003,8004"
         }
-      },
-      {
-        id: SETTINGS_KEYS.userName,
-        name: "Your Name",
-        description: "How Chief of Staff addresses you.",
-        action: {
-          type: "input",
-          value: getSettingString(extensionAPI, SETTINGS_KEYS.userName, ""),
-          placeholder: "Your name"
-        }
-      },
-      {
-        id: SETTINGS_KEYS.assistantName,
-        name: "Assistant Name",
-        description: "Display name used in chat UI and assistant toasts.",
-        action: {
-          type: "input",
-          value: getAssistantDisplayName(extensionAPI),
-          placeholder: DEFAULT_ASSISTANT_NAME
-        }
-      },
-      {
-        id: SETTINGS_KEYS.llmProvider,
-        name: "LLM Provider",
-        description: "AI provider for Chief of Staff reasoning.",
-        action: {
-          type: "select",
-          items: ["anthropic", "openai", "gemini", "mistral"],
-          value: getLlmProvider(extensionAPI)
-        }
-      },
-      {
-        id: SETTINGS_KEYS.openaiApiKey,
-        name: "OpenAI API Key",
-        description: "Your OpenAI API key. Required for voice dictation (Whisper) and OpenAI models.",
-        action: {
-          type: "input",
-          value: getSettingString(extensionAPI, SETTINGS_KEYS.openaiApiKey, "") || getSettingString(extensionAPI, SETTINGS_KEYS.llmApiKey, ""),
-          placeholder: "sk-..."
-        }
-      },
-      {
-        id: SETTINGS_KEYS.anthropicApiKey,
-        name: "Anthropic API Key",
-        description: "Your Anthropic API key. Required when LLM Provider is set to Anthropic.",
-        action: {
-          type: "input",
-          value: getSettingString(extensionAPI, SETTINGS_KEYS.anthropicApiKey, ""),
-          placeholder: "sk-ant-..."
-        }
-      },
-      {
-        id: SETTINGS_KEYS.geminiApiKey,
-        name: "Google Gemini API Key",
-        description: "Your Gemini API key from AI Studio. Required when LLM Provider is set to Gemini.",
-        action: {
-          type: "input",
-          value: getSettingString(extensionAPI, SETTINGS_KEYS.geminiApiKey, ""),
-          placeholder: "AIza..."
-        }
-      },
-      {
-        id: SETTINGS_KEYS.mistralApiKey,
-        name: "Mistral API Key",
-        description: "Your Mistral API key. Required when LLM Provider is set to Mistral.",
-        action: {
-          type: "input",
-          value: getSettingString(extensionAPI, SETTINGS_KEYS.mistralApiKey, ""),
-          placeholder: "your-mistral-key"
-        }
-      },
-      {
-        id: SETTINGS_KEYS.llmModel,
-        name: "LLM Model",
-        description: "Model to use. Leave blank for default.",
-        action: {
-          type: "input",
-          value: getSettingString(extensionAPI, SETTINGS_KEYS.llmModel, ""),
-          placeholder: DEFAULT_LLM_MODELS.anthropic
-        }
-      },
+      }
+    );
+  }
+
+  // --- Tier 3 toggle: Advanced ----------------------------------------------
+  settings.push({
+    id: SETTINGS_SHOW_ADVANCED,
+    name: "Show Advanced Settings",
+    description: "Debug logging, dry run mode, PII scrubbing, and ludicrous mode failover.",
+    action: {
+      type: "switch",
+      value: showAdvanced,
+      onChange: () => rebuildSettingsPanel(extensionAPI),
+    }
+  });
+
+  if (showAdvanced) {
+    settings.push(
       {
         id: SETTINGS_KEYS.debugLogging,
         name: "Debug Logging",
-        description: "Enable verbose console logs for troubleshooting.",
+        description: "Enable verbose console logging. Useful for troubleshooting tool calls, failover, and connection issues.",
         action: {
           type: "switch",
           value: isDebugLoggingEnabled(extensionAPI)
@@ -5472,7 +5599,7 @@ function buildSettingsConfig(extensionAPI) {
       {
         id: SETTINGS_KEYS.dryRunMode,
         name: "Dry Run (one-shot)",
-        description: "When enabled, the next mutating tool call is simulated WITHOUT approval prompt. This setting auto-disables after one use.",
+        description: "Simulates the next mutating tool call — shows what would happen without writing to your graph. Auto-disables after one use. Approval prompt is still shown.",
         action: {
           type: "switch",
           value: isDryRunEnabled(extensionAPI)
@@ -5480,8 +5607,8 @@ function buildSettingsConfig(extensionAPI) {
       },
       {
         id: SETTINGS_KEYS.ludicrousModeEnabled,
-        name: "Ludicrous mode failover",
-        description: "Allow escalation to Opus / GPT-5.2 when all power-tier providers fail. These models are significantly more expensive.",
+        name: "Ludicrous Mode Failover",
+        description: "Allow escalation to top-tier models (Claude Opus, GPT-5.2) when all power-tier providers fail. These models are significantly more expensive — use with caution.",
         action: {
           type: "switch",
           value: getSettingBool(extensionAPI, SETTINGS_KEYS.ludicrousModeEnabled, false)
@@ -5489,15 +5616,28 @@ function buildSettingsConfig(extensionAPI) {
       },
       {
         id: SETTINGS_KEYS.piiScrubEnabled,
-        name: "PII scrubbing",
-        description: "Automatically redact emails, phone numbers, credit cards, SSNs, and other personal data before sending to LLM APIs.",
+        name: "PII Scrubbing",
+        description: "Automatically redact emails, phone numbers, credit cards, SSNs, and other personal data before sending to LLM APIs. Disable only if your workflow requires full data fidelity.",
         action: {
           type: "switch",
           value: getSettingBool(extensionAPI, SETTINGS_KEYS.piiScrubEnabled, true)
         }
       }
-    ]
+    );
+  }
+
+  return {
+    tabTitle: "Chief of Staff",
+    settings
   };
+}
+
+// Return blank string (not the placeholder default) for Composio settings
+// so unconfigured fields stay empty rather than sending placeholder strings.
+function getComposioSettingOrBlank(extensionAPI, key) {
+  const val = getSettingString(extensionAPI, key, "");
+  if (val === DEFAULT_COMPOSIO_MCP_URL || val === DEFAULT_COMPOSIO_API_KEY) return "";
+  return val;
 }
 
 async function connectComposio(extensionAPI, options = {}) {
@@ -5523,13 +5663,19 @@ async function connectComposio(extensionAPI, options = {}) {
       const composioMcpUrl = getSettingString(
         extensionAPI,
         SETTINGS_KEYS.composioMcpUrl,
-        DEFAULT_COMPOSIO_MCP_URL
+        ""
       );
       const composioApiKey = getSettingString(
         extensionAPI,
         SETTINGS_KEYS.composioApiKey,
-        DEFAULT_COMPOSIO_API_KEY
+        ""
       );
+      // Block connection if settings still contain placeholder defaults or are blank
+      if (!composioMcpUrl || composioMcpUrl === DEFAULT_COMPOSIO_MCP_URL
+          || !composioApiKey || composioApiKey === DEFAULT_COMPOSIO_API_KEY) {
+        debugLog("Composio connect skipped — MCP URL or API key not configured.");
+        return null;
+      }
       const headers = composioApiKey ? { "x-api-key": composioApiKey } : {};
       composioTransportAbortController = new AbortController();
 
@@ -5916,15 +6062,59 @@ async function connectLocalMcp(port) {
             _port: port,
             _isDirect: isDirect,
             execute: async (args = {}) => {
+              // Calendar auto-inject: for event-query tools, if calendarId is missing or invalid,
+              // auto-discover all calendars and inject their IDs BEFORE making the call.
+              // This prevents LLM failures from bad/missing calendarId on weaker models.
+              const CALENDAR_EVENT_TOOLS = ["list-events", "search-events", "get-freebusy"];
+              const isCalendarEventTool = CALENDAR_EVENT_TOOLS.includes(toolName);
+              if (isCalendarEventTool && !args.calendarId) {
+                try {
+                  debugLog(`[Local MCP] Calendar auto-inject: ${toolName} called without calendarId, discovering calendars...`);
+                  const calResult = await boundClient.callTool({ name: "list-calendars", arguments: {} });
+                  const calText = calResult?.content?.[0]?.text;
+                  let calendars;
+                  if (typeof calText === "string") { try { calendars = JSON.parse(calText); } catch { /* ignore */ } }
+                  const ids = (calendars?.calendars || []).map(c => c.id).filter(Boolean);
+                  if (ids.length > 0) {
+                    debugLog(`[Local MCP] Calendar auto-inject: adding ${ids.length} calendar IDs to ${toolName}`);
+                    args = { ...args, calendarId: ids };
+                  }
+                } catch (injectErr) {
+                  debugLog(`[Local MCP] Calendar auto-inject failed:`, injectErr?.message);
+                }
+              }
               try {
                 const result = await boundClient.callTool({ name: toolName, arguments: args });
                 const text = result?.content?.[0]?.text;
                 if (typeof text === "string") {
+                  // If the result is a calendar error about bad IDs, retry with discovered IDs
+                  if (isCalendarEventTool && /MCP error|calendar\(s\)\s*not\s*found/i.test(text)) {
+                    try {
+                      debugLog(`[Local MCP] Calendar retry: ${toolName} returned error, re-discovering calendars...`);
+                      const calResult = await boundClient.callTool({ name: "list-calendars", arguments: {} });
+                      const calText = calResult?.content?.[0]?.text;
+                      let calendars;
+                      if (typeof calText === "string") { try { calendars = JSON.parse(calText); } catch { /* ignore */ } }
+                      const ids = (calendars?.calendars || []).map(c => c.id).filter(Boolean);
+                      if (ids.length > 0) {
+                        debugLog(`[Local MCP] Calendar retry: retrying ${toolName} with ${ids.length} fresh calendar IDs`);
+                        const retryResult = await boundClient.callTool({ name: toolName, arguments: { ...args, calendarId: ids } });
+                        const retryText = retryResult?.content?.[0]?.text;
+                        if (typeof retryText === "string") {
+                          try { return JSON.parse(retryText); } catch { return { text: retryText }; }
+                        }
+                        return retryResult;
+                      }
+                    } catch (retryErr) {
+                      debugLog(`[Local MCP] Calendar retry failed:`, retryErr?.message);
+                    }
+                  }
                   try { return JSON.parse(text); } catch { return { text }; }
                 }
                 return result;
               } catch (e) {
-                return { error: e?.message || `Failed: ${toolName}` };
+                const errMsg = e?.message || `Failed: ${toolName}`;
+                return { error: errMsg };
               }
             }
           });
@@ -5937,6 +6127,7 @@ async function connectLocalMcp(port) {
       localMcpClients.set(port, { client, transport, lastFailureAt: 0, failureCount: 0, connectPromise: null, serverName, serverDescription, tools });
       localMcpToolsCache = null; // invalidate so getLocalMcpTools() rebuilds from Map
       debugLog(`[Local MCP] Connected to port ${port} — server: ${serverName}`);
+      showInfoToast("Local MCP connected", `${serverName} (port ${port}) — ${tools.length} tool${tools.length !== 1 ? "s" : ""} available.`);
       return client;
     } catch (error) {
       // Close transport to prevent orphaned EventSource zombie connections
@@ -5989,6 +6180,7 @@ function scheduleLocalMcpAutoConnect() {
     if (unloadInProgress || extensionAPIRef === null) return;
     if (attempt > LOCAL_MCP_AUTO_CONNECT_MAX_RETRIES) {
       debugLog(`[Local MCP] Auto-connect gave up on port ${port} after ${LOCAL_MCP_AUTO_CONNECT_MAX_RETRIES} retries`);
+      showErrorToast("Local MCP failed", `Could not connect to MCP server on port ${port} after ${LOCAL_MCP_AUTO_CONNECT_MAX_RETRIES} retries. Check that the server is running, then use "Refresh Local MCP Servers" to retry.`);
       return;
     }
 
@@ -7318,6 +7510,110 @@ function registerCommandPaletteCommands(extensionAPI) {
     callback: () => promptTestComposioTool(extensionAPI)
   });
   extensionAPI.ui.commandPalette.addCommand({
+    label: "Chief of Staff: Validate Composio Proxy",
+    callback: async () => {
+      // Step 1 — Settings check
+      const composioMcpUrl = getSettingString(extensionAPI, SETTINGS_KEYS.composioMcpUrl, "");
+      const composioApiKey = getSettingString(extensionAPI, SETTINGS_KEYS.composioApiKey, "");
+      const hasRealUrl = composioMcpUrl && composioMcpUrl !== DEFAULT_COMPOSIO_MCP_URL && /^https?:\/\//i.test(composioMcpUrl);
+      const hasRealKey = composioApiKey && composioApiKey !== DEFAULT_COMPOSIO_API_KEY && composioApiKey.length > 8;
+      if (!hasRealUrl || !hasRealKey) {
+        showErrorToast("Proxy validation failed", "Composio MCP URL or API key not configured. Update Settings first.");
+        return;
+      }
+
+      showInfoToast("Validating proxy…", "Running connectivity checks.");
+      const results = [];
+
+      // Step 2 — Proxy reachable (OPTIONS preflight to the configured MCP URL)
+      try {
+        const proxyResp = await fetch(composioMcpUrl, { method: "OPTIONS", signal: AbortSignal.timeout(10000) });
+        if (proxyResp.ok || proxyResp.status === 204) {
+          results.push("✓ Proxy reachable");
+        } else {
+          results.push(`✗ Proxy returned ${proxyResp.status}`);
+        }
+      } catch (e) {
+        results.push(`✗ Proxy unreachable: ${e?.message || "network error"}`);
+      }
+
+      // Step 3 — Upstream reachable (POST to the MCP URL with a JSON-RPC initialize-ish payload)
+      try {
+        const upstreamResp = await fetch(composioMcpUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": composioApiKey
+          },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "cos-validate", version: "1.0" } } }),
+          signal: AbortSignal.timeout(15000)
+        });
+        if (upstreamResp.ok) {
+          results.push("✓ Upstream MCP responds");
+          // Try to read body for API key validation
+          try {
+            const body = await upstreamResp.text();
+            if (body.includes("error") && (body.includes("auth") || body.includes("key") || body.includes("unauthorized"))) {
+              results.push("✗ API key may be invalid (auth error in response)");
+            } else {
+              results.push("✓ API key accepted");
+            }
+          } catch { /* body read failed, skip */ }
+        } else if (upstreamResp.status === 401 || upstreamResp.status === 403) {
+          results.push("✗ API key rejected (HTTP " + upstreamResp.status + ")");
+        } else if (upstreamResp.status === 502) {
+          results.push("✗ Proxy blocked upstream (502) — check target URL");
+        } else {
+          results.push(`⚠ Upstream returned ${upstreamResp.status}`);
+        }
+      } catch (e) {
+        results.push(`✗ Upstream check failed: ${e?.message || "network error"}`);
+      }
+
+      // Step 4 — Tool call probe (tools/list via the live MCP client, if connected)
+      if (mcpClient?.callTool) {
+        try {
+          // Use a raw JSON-RPC tools/list POST — lightweight, no side effects
+          const sessionId = mcpClient?._transport?._sessionId;
+          const toolListHeaders = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "x-api-key": composioApiKey
+          };
+          if (sessionId) toolListHeaders["mcp-session-id"] = sessionId;
+          const toolListResp = await fetch(composioMcpUrl, {
+            method: "POST",
+            headers: toolListHeaders,
+            body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
+            signal: AbortSignal.timeout(15000)
+          });
+          if (toolListResp.ok) {
+            results.push("✓ Tool calls accepted (tools/list OK)");
+          } else if (toolListResp.status === 406) {
+            results.push("✗ Tool calls rejected (406 Not Acceptable) — Composio may have changed their API");
+          } else {
+            results.push(`⚠ Tool call returned ${toolListResp.status}`);
+          }
+        } catch (e) {
+          results.push(`✗ Tool call probe failed: ${e?.message || "network error"}`);
+        }
+      } else {
+        results.push("⚠ Skipped tool call probe (not connected)");
+      }
+
+      // Step 5 — Report
+      // Only hard failures (✗) count against the verdict — warnings (⚠) are informational
+      const hasFailure = results.some(r => r.startsWith("✗"));
+      const summary = results.join("\n");
+      if (!hasFailure) {
+        showInfoToast("Proxy validation passed", summary);
+      } else {
+        showErrorToast("Proxy validation issues", summary);
+      }
+      debugLog("[Composio Proxy Validation]", summary);
+    }
+  });
+  extensionAPI.ui.commandPalette.addCommand({
     label: "Chief of Staff: Refresh Local MCP Servers",
     callback: async () => {
       const ports = getLocalMcpPorts();
@@ -7356,7 +7652,8 @@ function registerCommandPaletteCommands(extensionAPI) {
       if (connected === ports.length) {
         showInfoToast("Local MCP refreshed", `Connected to ${connected} server(s).`);
       } else {
-        showInfoToast("Local MCP refreshed", `Connected to ${connected}/${ports.length} server(s). Check console for errors.`);
+        const failedPorts = [...remaining].join(", ");
+        showErrorToast("Local MCP partially failed", `Connected to ${connected}/${ports.length} server(s). Failed ports: ${failedPorts}. Check that those servers are running.`);
       }
     }
   });
@@ -7933,6 +8230,7 @@ function onload({ extensionAPI }) {
     openRoamPageByTitle,
     askChiefOfStaff,
     getUserFacingLlmErrorMessage,
+    getLastAgentRunTrace: () => lastAgentRunTrace,
     debugLog
   });
   initRoamNativeTools({
@@ -7999,6 +8297,8 @@ function onload({ extensionAPI }) {
     appendChatPanelHistory,
     updateChatPanelCostIndicator,
     addSaveToDailyPageButton,
+    addModelIndicator,
+    getLastAgentRunTrace: () => lastAgentRunTrace,
     askChiefOfStaff,
     getUserFacingLlmErrorMessage,
     getActiveAgentAbortController: () => activeAgentAbortController,
@@ -8100,10 +8400,37 @@ function onload({ extensionAPI }) {
   primeInboxStaticUIDs();
   setupExtensionBroadcastListeners();
   startCronScheduler();
-  // Restore chat panel if it was open before reload
+  // Restore chat panel if it was open before reload.
+  // Blueprint.js overlays (used by Roam Settings / Depot) enforce a
+  // JavaScript focus trap — anything outside the overlay DOM is
+  // non-interactive regardless of z-index.  If we reopen the panel
+  // while such an overlay is active (common when reloading via Depot),
+  // the input field appears but can't be focused or clicked.
+  // Fix: open the panel immediately so it's visible, but poll until
+  // no Blueprint overlay is blocking focus, then re-focus the input.
   try {
     if (localStorage.getItem("chief-of-staff-panel-open") === "1") {
-      setChatPanelOpen(true);
+      setTimeout(() => {
+        if (unloadInProgress || extensionAPIRef === null) return;
+        setChatPanelOpen(true);
+        // If the Roam settings pane (.rm-settings) is open, its Blueprint
+        // overlay traps focus.  Poll until it closes, then re-focus.
+        const hasSettingsPane = () => Boolean(document.querySelector(".rm-settings"));
+        if (hasSettingsPane()) {
+          debugLog("[Chief chat] Roam settings pane detected — polling for close to re-focus input");
+          const pollId = setInterval(() => {
+            if (unloadInProgress || extensionAPIRef === null) { clearInterval(pollId); return; }
+            if (!hasSettingsPane()) {
+              clearInterval(pollId);
+              debugLog("[Chief chat] Roam settings pane closed — re-focusing input");
+              const inp = document.querySelector("[data-chief-chat-input]");
+              if (inp) inp.focus();
+            }
+          }, 300);
+          // Safety: stop polling after 60s
+          setTimeout(() => clearInterval(pollId), 60000);
+        }
+      }, 800);
     }
   } catch { /* ignore */ }
   // First-run onboarding

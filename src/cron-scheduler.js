@@ -271,6 +271,8 @@ async function fireCronJob(job) {
       streamingEl.textContent = "";
       streamingEl.insertAdjacentHTML("afterbegin", safeHtml);
       deps.sanitizeChatDom(streamingEl);
+      const trace = typeof deps.getLastAgentRunTrace === "function" ? deps.getLastAgentRunTrace() : null;
+      if (typeof deps.addModelIndicator === "function") deps.addModelIndicator(streamingEl, trace?.model);
       deps.addSaveToDailyPageButton(streamingEl, `[Scheduled: ${job.name}] ${job.prompt}`, responseText);
     }
     deps.appendChatPanelHistory("assistant", `[Scheduled: ${job.name}]\n${responseText}`);

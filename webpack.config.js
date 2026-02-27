@@ -12,8 +12,6 @@ module.exports = {
   resolve: {
     extensions: [".ts", ".tsx", ".js", ".jsx"],
     fallback: {
-      // The MCP SDK may try to import Node modules — 
-      // these tell webpack to skip them or provide browser polyfills
       "child_process": false,
       "fs": false,
       "net": false,
@@ -32,9 +30,5 @@ module.exports = {
   experiments: {
     outputModule: true,
   },
-  mode: "development",
-  externals: {
-    // Roam APIs are available globally at runtime
-    "roam-client": "roam-client",
-  },
+  mode: "production"
 };

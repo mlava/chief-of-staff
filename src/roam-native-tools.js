@@ -1007,13 +1007,17 @@ export function getRoamNativeTools() {
         const yesterday = new Date(now);
         yesterday.setDate(yesterday.getDate() - 1);
         const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        const localTime = now.toLocaleString("en-US", { timeZone: tz, hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true });
+        const localDate = now.toLocaleDateString("en-US", { timeZone: tz, weekday: "long", year: "numeric", month: "long", day: "numeric" });
         return {
+          currentTime: `${localDate} ${localTime}`,
           iso: now.toISOString(),
           dayOfWeek: dayNames[now.getDay()],
           today: deps.formatRoamDate(now),
           tomorrow: deps.formatRoamDate(tomorrow),
           yesterday: deps.formatRoamDate(yesterday),
-          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          timezone: tz,
           unix: Math.floor(now.getTime() / 1000)
         };
       }

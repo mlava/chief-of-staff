@@ -255,7 +255,15 @@ function extractTargetPageUids(toolName, args) {
 // ── Main tool execution dispatcher ──────────────────────────────────────────
 
 export async function executeToolCall(toolName, args, { readOnly = false } = {}) {
-  const upperToolName = String(toolName || "").toUpperCase();
+  // Tool name normalisation: LLMs (especially gemini-2.5-flash) sometimes hallucinate
+  // hyphens in tool names (e.g. "cos_get-current-time" instead of "cos_get_current_time").
+  // Normalise hyphens to underscores before dispatch to catch these cases.
+  const normalisedToolName = String(toolName || "").replace(/-/g, "_");
+  if (normalisedToolName !== String(toolName || "")) {
+    deps.debugLog(`[Chief flow] Tool name normalised: "${toolName}" → "${normalisedToolName}"`);
+  }
+  toolName = normalisedToolName;
+  const upperToolName = normalisedToolName.toUpperCase();
   let effectiveArgs = args || {};
   if (upperToolName === "COMPOSIO_MULTI_EXECUTE_TOOL") {
     deps.debugLog("[Chief flow] MULTI_EXECUTE raw args:", JSON.stringify(args, null, 2));
@@ -718,6 +726,9 @@ export function isExternalDataToolCall(toolName) {
   // Direct-call local MCP tools (from servers ≤15 tools, exposed by original name)
   const localToolsCache = deps.getLocalMcpToolsCache();
   if (Array.isArray(localToolsCache) && localToolsCache.some(t => t.name === name)) return true;
+  // Extension tools (registered via window.RoamExtensionTools, e.g. wp_get_featured_article)
+  const extTools = deps.getExternalExtensionTools();
+  if (Array.isArray(extTools) && extTools.some(t => t.name === name)) return true;
   // Composio slug interceptor: LLM called a Composio slug directly (e.g. GMAIL_FETCH_EMAILS)
   // which the executeToolCall interceptor will rewrite to COMPOSIO_MULTI_EXECUTE_TOOL.
   if (/^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(upper) && deps.getToolSchema(upper)) return true;

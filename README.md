@@ -145,6 +145,12 @@ The floating chat panel (bottom-right corner by default) provides a persistent c
 
 The panel suppresses non-essential toasts while open, and persists conversation history and position across reloads.
 
+### Theme responsiveness
+
+The chat panel automatically detects and adapts to your Roam theme — including Roam Studio custom themes and Blueprint dark mode. Three detection strategies work in concert: CSS class markers (`.bp3-dark`), the `prefers-color-scheme` system preference, and real-time luminance sampling of rendered background colours. This means custom Roam Studio themes that don't set standard dark-mode markers are still detected correctly.
+
+Theme transitions are handled gracefully: a hold-last-state guard prevents flicker during animated CSS transitions (common with Roam Studio themes), and a triple-pass verification re-sample ensures the panel settles on the correct theme even for slow multi-second transitions. All UI elements — buttons, inputs, borders, code blocks, and tool previews — use CSS custom properties that update in real time when the theme changes.
+
 ---
 
 ## Task integration
