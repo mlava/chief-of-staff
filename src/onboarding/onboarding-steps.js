@@ -31,6 +31,17 @@ function detectProvider(key) {
   return null;
 }
 
+/** Check if a Roam page exists by title. */
+function pageExists(title) {
+  try {
+    const result = window.roamAlphaAPI?.data?.pull?.(
+      "[:node/title]",
+      `[:node/title "${title}"]`
+    );
+    return !!(result?.[":node/title"]);
+  } catch { return false; }
+}
+
 function openCommandPalette() {
   const platform = window.roamAlphaAPI?.platform || {};
   const useMeta = !platform.isPC;
@@ -140,7 +151,7 @@ const ONBOARDING_STEPS = [
             extensionAPI.settings.set(deps.SETTINGS_KEYS.assistantName, cosName);
             deps.iziToast.success({
               title: "Hello",
-              message: `Nice to meet you, ${userName}. I\u2019m ${cosName}.`,
+              message: `Nice to meet you, ${deps.escapeHtml(userName)}. I\u2019m ${deps.escapeHtml(cosName)}.`,
               timeout: 4000,
               position: "bottomRight",
             });
@@ -185,12 +196,13 @@ const ONBOARDING_STEPS = [
 
       // Manual provider selector for keys that can't be auto-detected
       const providerSelectWrapper = document.createElement("div");
-      providerSelectWrapper.style.cssText = "margin: 8px 0; display: none;";
+      providerSelectWrapper.style.cssText = "margin: 8px 0; display: none; align-items: center; gap: 6px;";
       const providerSelectLabel = document.createElement("label");
-      providerSelectLabel.textContent = "Provider: ";
-      providerSelectLabel.style.cssText = "font-size: 13px; margin-right: 6px;";
+      providerSelectLabel.textContent = "Provider:";
+      providerSelectLabel.className = "cos-onboarding-label";
+      providerSelectLabel.style.cssText = "font-size: 13px; margin: 0; font-weight: 600;";
       const providerSelect = document.createElement("select");
-      providerSelect.style.cssText = "font-size: 13px; padding: 2px 6px;";
+      providerSelect.className = "cos-onboarding-select";
       for (const opt of ["mistral", "anthropic", "openai", "gemini"]) {
         const el = document.createElement("option");
         el.value = opt;
@@ -201,10 +213,39 @@ const ONBOARDING_STEPS = [
       providerSelectWrapper.appendChild(providerSelect);
       frag.appendChild(providerSelectWrapper);
 
-      // Show/hide manual selector based on whether we can auto-detect
+      // Auto-detection feedback element
+      const detectedFeedback = document.createElement("div");
+      detectedFeedback.className = "cos-onboarding-detected-provider";
+      detectedFeedback.style.cssText = "font-size: 13px; margin: 4px 0 8px; min-height: 20px;";
+      frag.appendChild(detectedFeedback);
+
+      const providerLabelsMap = { anthropic: "Anthropic (Claude)", openai: "OpenAI (GPT)", gemini: "Google (Gemini)" };
+
+      // Show/hide manual selector + detection feedback based on key prefix.
+      // Debounced to avoid excessive DOM updates during fast typing.
+      let _keyInputTimer = null;
       keyField.input.addEventListener("input", () => {
-        const detected = detectProvider(keyField.input.value.trim());
-        providerSelectWrapper.style.display = (!detected && keyField.input.value.trim()) ? "block" : "none";
+        clearTimeout(_keyInputTimer);
+        _keyInputTimer = setTimeout(() => {
+          const val = keyField.input.value.trim();
+          const detected = detectProvider(val);
+          providerSelectWrapper.style.display = (!detected && val) ? "flex" : "none";
+          detectedFeedback.textContent = "";
+          if (detected) {
+            const check = document.createElement("span");
+            check.style.color = "var(--cos-accent, #4a9eff)";
+            check.textContent = "\u2713 Detected: ";
+            const strong = document.createElement("strong");
+            strong.textContent = providerLabelsMap[detected];
+            check.appendChild(strong);
+            detectedFeedback.appendChild(check);
+          } else if (val) {
+            const hint = document.createElement("span");
+            hint.style.color = "var(--cos-text-muted, #888)";
+            hint.textContent = "Select your provider below";
+            detectedFeedback.appendChild(hint);
+          }
+        }, 150);
       });
 
       frag.appendChild(createInfoText(
@@ -277,7 +318,6 @@ const ONBOARDING_STEPS = [
           primary: true,
           onClick: () => {
             sessionState.betterTasksEnabled = true;
-            extensionAPI.settings.set(deps.SETTINGS_KEYS.betterTasksEnabled, true);
             deps.iziToast.success({
               title: "Better Tasks",
               message: "Excellent. I\u2019ll use Better Tasks for all task operations.",
@@ -292,7 +332,6 @@ const ONBOARDING_STEPS = [
           primary: false,
           onClick: () => {
             sessionState.betterTasksEnabled = false;
-            extensionAPI.settings.set(deps.SETTINGS_KEYS.betterTasksEnabled, false);
             deps.iziToast.info({
               title: "Standard TODOs",
               message: "No problem. I\u2019ll work with standard TODO/DONE blocks. If you install Better Tasks later, I\u2019ll detect it automatically.",
@@ -348,7 +387,13 @@ const ONBOARDING_STEPS = [
             try {
               await deps.runBootstrapMemoryPages({ silent: true });
             } catch (e) {
-              deps.showErrorToast("Bootstrap failed", e?.message || "Unknown error");
+              const errMsg = deps.escapeHtml(e?.message || "Unknown error");
+              deps.iziToast.error({
+                title: "Memory pages failed",
+                message: `${errMsg}. You can try again later via the command palette: <strong>Chief of Staff: Bootstrap Memory Pages</strong>.`,
+                timeout: 8000,
+                position: "bottomRight",
+              });
             }
             advanceStep();
           },
@@ -377,13 +422,7 @@ const ONBOARDING_STEPS = [
     id: "memory-questionnaire",
     skipIf() {
       // Skip if memory page doesn't exist (user declined creation in step 4)
-      try {
-        const result = window.roamAlphaAPI?.data?.pull?.(
-          "[:node/title]",
-          '[:node/title "Chief of Staff/Memory"]'
-        );
-        return !result?.[":node/title"];
-      } catch { return true; }
+      return !pageExists("Chief of Staff/Memory");
     },
     render(ctx) {
       const { advanceStep, deps } = ctx;
@@ -417,7 +456,15 @@ const ONBOARDING_STEPS = [
         {
           label: "I\u2019ll do it later",
           primary: false,
-          onClick: () => advanceStep(),
+          onClick: () => {
+            deps.iziToast.info({
+              title: "Memory",
+              message: "No rush. You can open [[Chief of Staff/Memory]] any time to fill in your context \u2014 even a few answers make a difference.",
+              timeout: 5000,
+              position: "bottomRight",
+            });
+            advanceStep();
+          },
         },
       ]));
 
@@ -433,7 +480,7 @@ const ONBOARDING_STEPS = [
       return !!(platform.isMobile || platform.isMobileApp);
     },
     render(ctx) {
-      const { advanceStep, deps } = ctx;
+      const { advanceStep, deps, sessionState } = ctx;
       const frag = document.createDocumentFragment();
 
       frag.appendChild(createInfoText(
@@ -451,18 +498,29 @@ const ONBOARDING_STEPS = [
           primary: true,
           onClick: () => {
             openCommandPalette();
+            // Validate command palette opened before showing guidance
             setTimeout(() => {
-              deps.iziToast.info({
-                title: "Hotkey setup",
-                message: "Search for <strong>Edit Hotkey: Chief of Staff: Ask</strong> and choose your preferred shortcut.",
-                timeout: 6000,
-                position: "bottomRight",
-              });
+              const paletteOpen = !!document.querySelector(".rm-command-palette, .bp3-omnibar");
+              if (paletteOpen) {
+                deps.iziToast.info({
+                  title: "Hotkey setup",
+                  message: "Search for <strong>Edit Hotkey: Chief of Staff: Ask</strong> and choose your preferred shortcut.",
+                  timeout: 8000,
+                  position: "bottomRight",
+                });
+              } else {
+                deps.iziToast.info({
+                  title: "Hotkey setup",
+                  message: "Open the command palette (<strong>Cmd+P</strong> or <strong>Ctrl+P</strong>), then search for <strong>Edit Hotkey: Chief of Staff: Ask</strong>.",
+                  timeout: 8000,
+                  position: "bottomRight",
+                });
+              }
             }, 300);
             sessionState._hotkeyTimerId = setTimeout(() => {
               delete sessionState._hotkeyTimerId;
               advanceStep();
-            }, 8000);
+            }, 10000);
           },
         },
         {
@@ -492,21 +550,24 @@ const ONBOARDING_STEPS = [
           label: "Show me the chat panel",
           primary: true,
           onClick: () => {
-            deps.toggleChatPanel();
+            if (!deps.chatPanelIsOpen()) deps.toggleChatPanel();
             deps.iziToast.success({
               title: "Chat panel",
-              message: "There I am. Say hello if you like.",
+              message: "There I am. Try typing something!",
               timeout: 4000,
               position: "bottomRight",
             });
             // Write initial message to chat
             const userName = deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.userName, "");
             const greeting = userName
-              ? `Hello, ${userName}. I\u2019m set up and ready to help. Try asking me something, or type \`/power\` before a message to use a more capable model.\n\nI\u2019d recommend setting a hotkey for **Chief of Staff: Toggle Chat Panel** too \u2014 same process as before via the command palette.`
-              : "Hello! I\u2019m set up and ready to help. Try asking me something, or type `/power` before a message to use a more capable model.";
+              ? `Hello, ${userName}. I\u2019m set up and ready to help. Try asking me something \u2014 here are a few ideas:\n\n\u2022 **What was I working on last week?**\n\u2022 **Run my daily briefing**\n\u2022 **Search my graph for [topic]**\n\nType \`/power\` before a message to use a more capable model. I\u2019d also recommend setting a hotkey for **Chief of Staff: Toggle Chat Panel** via the command palette.`
+              : "Hello! I\u2019m set up and ready to help. Try asking me something \u2014 here are a few ideas:\n\n\u2022 **What was I working on last week?**\n\u2022 **Run my daily briefing**\n\u2022 **Search my graph for [topic]**\n\nType `/power` before a message to use a more capable model.";
             setTimeout(() => {
               deps.appendChatPanelMessage("assistant", greeting);
               deps.appendChatPanelHistory("assistant", greeting);
+              // Focus the chat input so user can type immediately
+              const chatInput = document.querySelector(".cos-chat-input");
+              if (chatInput) chatInput.focus();
             }, 500);
             advanceStep();
           },
@@ -573,7 +634,13 @@ const ONBOARDING_STEPS = [
                 position: "bottomRight",
               });
             } catch (e) {
-              deps.showErrorToast("Skills install failed", e?.message || "Unknown error");
+              const errMsg = deps.escapeHtml(e?.message || "Unknown error");
+              deps.iziToast.error({
+                title: "Skills install failed",
+                message: `${errMsg}. You can try again later via the command palette: <strong>Chief of Staff: Bootstrap Skills Page</strong>.`,
+                timeout: 8000,
+                position: "bottomRight",
+              });
             }
             // Brief delay to let Roam settle after creating many blocks
             setTimeout(() => advanceStep(), 500);
@@ -679,7 +746,100 @@ const ONBOARDING_STEPS = [
     },
   },
 
-  // ---- Step 10: Finish ----
+  // ---- Step 10: Local MCP Servers ----
+  {
+    id: "local-mcp",
+    skipIf: null,
+    render(ctx) {
+      const { extensionAPI, deps, advanceStep } = ctx;
+      const frag = document.createDocumentFragment();
+
+      frag.appendChild(createInfoText(
+        "I can also connect to <strong>local MCP servers</strong> running on your machine \u2014 tools like Zotero, GitHub, or any custom server that speaks the Model Context Protocol."
+      ));
+      frag.appendChild(createInfoText(
+        "If you run MCP servers via <strong>supergateway</strong> (which bridges stdio servers to SSE), I can connect to them directly in your browser. No proxy needed."
+      ));
+
+      // Check current state
+      const configuredPorts = deps.getLocalMcpPorts(extensionAPI);
+      const connectedCount = Array.from(deps.localMcpClients.values()).filter(e => e?.client).length;
+
+      if (connectedCount > 0) {
+        const serverNames = [];
+        for (const [, entry] of deps.localMcpClients) {
+          if (entry?.client && entry.serverName) serverNames.push(deps.escapeHtml(entry.serverName));
+        }
+        frag.appendChild(createInfoText(
+          `<span style="color:var(--cos-accent,#4a9eff)">\u2713 Already connected to ${connectedCount} server${connectedCount > 1 ? "s" : ""}: <strong>${serverNames.join(", ")}</strong></span>`
+        ));
+        frag.appendChild(createButtonGroup([
+          {
+            label: "Continue \u2192",
+            primary: true,
+            onClick: () => advanceStep(),
+          },
+        ]));
+      } else if (configuredPorts.length > 0) {
+        frag.appendChild(createInfoText(
+          `You have ports configured (<strong>${configuredPorts.map(p => deps.escapeHtml(String(p))).join(", ")}</strong>) but no servers are connected yet. Make sure your supergateway is running, then connect.`
+        ));
+
+        const btnContainer = document.createElement("div");
+        frag.appendChild(btnContainer);
+        btnContainer.appendChild(createButtonGroup([
+          {
+            label: "Try connecting now",
+            primary: true,
+            onClick: async () => {
+              clearInlineError(btnContainer);
+              let connected = 0;
+              for (const port of configuredPorts) {
+                try {
+                  const result = await deps.connectLocalMcp(port);
+                  if (result) connected++;
+                } catch { /* ignore */ }
+              }
+              if (connected > 0) {
+                deps.iziToast.success({
+                  title: "Local MCP",
+                  message: `Connected to ${connected} server${connected > 1 ? "s" : ""}.`,
+                  timeout: 4000,
+                  position: "bottomRight",
+                });
+                advanceStep();
+              } else {
+                showInlineError(btnContainer, "Could not connect. Check that your servers are running and try again, or continue and connect later.");
+              }
+            },
+          },
+          {
+            label: "Skip",
+            primary: false,
+            onClick: () => advanceStep(),
+          },
+        ]));
+      } else {
+        frag.appendChild(createInfoText(
+          "To set this up, add your server ports in <strong>Settings \u2192 Chief of Staff \u2192 Local MCP Server Ports</strong> (comma-separated, e.g. <code>8765,8766</code>), then run <strong>Chief of Staff: Connect Local MCP</strong> from the command palette."
+        ));
+        frag.appendChild(createInfoText(
+          "<small>Full setup instructions are in the README. This is entirely optional \u2014 I work great without it.</small>"
+        ));
+        frag.appendChild(createButtonGroup([
+          {
+            label: "Continue \u2192",
+            primary: true,
+            onClick: () => advanceStep(),
+          },
+        ]));
+      }
+
+      return frag;
+    },
+  },
+
+  // ---- Step 11: Finish ----
   {
     id: "finish",
     skipIf: null,
@@ -709,22 +869,14 @@ const ONBOARDING_STEPS = [
       summaryContainer.appendChild(createSummaryItem(`AI provider: ${providerLabel}`, hasAnyKey));
 
       // Memory pages — check if the main memory page exists
-      let memoryCreated = false;
-      try {
-        const memResult = window.roamAlphaAPI?.data?.pull?.("[:node/title]", '[:node/title "Chief of Staff/Memory"]');
-        memoryCreated = !!(memResult?.[":node/title"]);
-      } catch { /* ignore */ }
+      const memoryCreated = pageExists("Chief of Staff/Memory");
       summaryContainer.appendChild(createSummaryItem(
         `Memory pages: ${memoryCreated ? "Created" : "Not yet"}`,
         memoryCreated
       ));
 
       // Skills
-      let skillsCreated = false;
-      try {
-        const skillsResult = window.roamAlphaAPI?.data?.pull?.("[:node/title]", '[:node/title "Chief of Staff/Skills"]');
-        skillsCreated = !!(skillsResult?.[":node/title"]);
-      } catch { /* ignore */ }
+      const skillsCreated = pageExists("Chief of Staff/Skills");
       summaryContainer.appendChild(createSummaryItem(
         `Skills: ${skillsCreated ? "Installed" : "Not yet"}`,
         skillsCreated
@@ -743,6 +895,13 @@ const ONBOARDING_STEPS = [
       summaryContainer.appendChild(createSummaryItem(
         `External tools: ${composioConfigured ? "Configured" : "Set up later"}`,
         composioConfigured
+      ));
+
+      // Local MCP
+      const localConnected = Array.from(deps.localMcpClients.values()).filter(e => e?.client).length;
+      summaryContainer.appendChild(createSummaryItem(
+        `Local MCP: ${localConnected > 0 ? localConnected + " server" + (localConnected > 1 ? "s" : "") + " connected" : "Not configured"}`,
+        localConnected > 0
       ));
 
       frag.appendChild(summaryContainer);

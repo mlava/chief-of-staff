@@ -13,7 +13,7 @@
  * Build the outer onboarding card (header + content area + footer).
  * Returns { card, contentArea, footer, stepIndicator, destroy }.
  */
-export function createOnboardingCard({ onSkip, onDoLater, title = "Chief of Staff" } = {}) {
+export function createOnboardingCard({ onSkip, onDoLater, onBack, title = "Chief of Staff" } = {}) {
   const card = document.createElement("div");
   card.className = "cos-onboarding-card cos-onboarding-enter";
 
@@ -73,6 +73,18 @@ export function createOnboardingCard({ onSkip, onDoLater, title = "Chief of Staf
   stepIndicator.className = "cos-onboarding-step-indicator";
   footer.appendChild(stepIndicator);
 
+  // Left-side back link
+  let backLink = null;
+  if (onBack) {
+    backLink = document.createElement("a");
+    backLink.className = "cos-onboarding-footer-link cos-onboarding-back-link";
+    backLink.textContent = "\u2190 Back";
+    backLink.href = "#";
+    backLink.style.display = "none"; // hidden on first step
+    backLink.addEventListener("click", (e) => { e.preventDefault(); onBack(); });
+    footer.appendChild(backLink);
+  }
+
   const footerLinks = document.createElement("span");
   footerLinks.className = "cos-onboarding-footer-links";
 
@@ -111,7 +123,7 @@ export function createOnboardingCard({ onSkip, onDoLater, title = "Chief of Staf
     card.classList.add("cos-onboarding-visible");
   });
 
-  return { card, contentArea, footer, stepIndicator, destroy };
+  return { card, contentArea, footer, stepIndicator, backLink, destroy };
 }
 
 // ---------------------------------------------------------------------------

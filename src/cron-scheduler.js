@@ -27,6 +27,7 @@ let cronStorageHandler = null; // "storage" event listener for cross-tab leader 
 let cronInitialTickTimeoutId = null; // initial 5s tick after scheduler start
 let cronSchedulerRunning = false;
 const cronRunningJobs = new Set(); // job IDs currently executing (prevent overlap)
+let lastKnownCronJobCount = -1; // -1 = unknown; updated on each tick
 
 // ─── DI Initialiser ────────────────────────────────────────────────────────────
 
@@ -48,7 +49,7 @@ function normaliseCronJob(input) {
   if (!input || typeof input !== "object") return null;
   const id = String(input.id || "").trim();
   if (!id) return null;
-  const type = ["cron", "interval", "once"].includes(input.type) ? input.type : "cron";
+  const type = ["cron", "interval", "once", "reminder"].includes(input.type) ? input.type : "cron";
   return {
     id,
     name: String(input.name || id).trim().slice(0, 100),
@@ -56,12 +57,13 @@ function normaliseCronJob(input) {
     expression: type === "cron" ? String(input.expression || "").trim() : "",
     intervalMinutes: type === "interval" ? Math.max(CRON_MIN_INTERVAL_MINUTES, Math.round(Number(input.intervalMinutes) || 60)) : 0,
     timezone: String(input.timezone || getDefaultBrowserTimezone()).trim(),
-    prompt: String(input.prompt || "").trim().slice(0, 2000),
+    prompt: type === "reminder" ? "" : String(input.prompt || "").trim().slice(0, 2000),
+    message: type === "reminder" ? String(input.message || input.prompt || "").trim().slice(0, 500) : "",
     enabled: input.enabled !== false,
     createdAt: Number.isFinite(input.createdAt) ? input.createdAt : Date.now(),
     lastRun: Number.isFinite(input.lastRun) ? input.lastRun : 0,
     runCount: Number.isFinite(input.runCount) ? input.runCount : 0,
-    runAt: type === "once" && Number.isFinite(input.runAt) ? input.runAt : 0,
+    runAt: (type === "once" || type === "reminder") && Number.isFinite(input.runAt) ? input.runAt : 0,
     lastRunError: input.lastRunError ? String(input.lastRunError).slice(0, 200) : null
   };
 }
@@ -173,7 +175,7 @@ function isCronJobDue(job, now) {
   if (!job.enabled) return false;
   const nowMs = now.getTime();
 
-  if (job.type === "once") {
+  if (job.type === "once" || job.type === "reminder") {
     if (job.lastRun > 0) return false; // already fired
     return job.runAt > 0 && nowMs >= job.runAt;
   }
@@ -208,13 +210,36 @@ async function fireCronJob(job) {
   deps.debugLog("[Chief cron] Firing job:", job.id, job.name);
   const timeLabel = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 
+  // ── Reminder jobs: sticky toast only, no agent loop ──
+  if (job.type === "reminder") {
+    const reminderText = job.message || job.name;
+    deps.debugLog("[Chief cron] Showing reminder toast:", reminderText);
+    deps.showReminderToast("Reminder", reminderText);
+
+    // Also render in chat panel if open
+    deps.refreshChatPanelElementRefs();
+    const msgsEl = deps.getChatPanelMessages();
+    if (msgsEl) {
+      const reminderEl = document.createElement("div");
+      reminderEl.classList.add("chief-msg", "chief-msg--assistant", "chief-msg--scheduled");
+      // Safe: renderMarkdownToSafeHtml escapes all input
+      const safeHtml = deps.renderMarkdownToSafeHtml(`🔔 **Reminder** (${timeLabel}): ${reminderText}`);
+      reminderEl.insertAdjacentHTML("afterbegin", safeHtml);
+      deps.sanitizeChatDom(reminderEl);
+      msgsEl.appendChild(reminderEl);
+      msgsEl.scrollTop = msgsEl.scrollHeight;
+    }
+    deps.appendChatPanelHistory("assistant", `[Reminder: ${job.name}] ${reminderText}`);
+    return null; // no error
+  }
+
   // Show toast regardless of chat panel state
   deps.showInfoToast("Scheduled job", `Running: ${job.name}`);
 
   // Render in chat panel if open
   deps.refreshChatPanelElementRefs();
   let streamingEl = null;
-  const streamChunks = [];
+  let streamText = "";
   let streamRenderPending = false;
 
   const msgsEl = deps.getChatPanelMessages();
@@ -239,8 +264,7 @@ async function fireCronJob(job) {
   function flushCronStreamRender() {
     streamRenderPending = false;
     if (!streamingEl || !document.body.contains(streamingEl)) return;
-    const joined = streamChunks.join("");
-    const capped = joined.length > 60000 ? joined.slice(joined.length - 60000) : joined;
+    const capped = streamText.length > 60000 ? streamText.slice(streamText.length - 60000) : streamText;
     // NOTE: renderMarkdownToSafeHtml already escapes all content; sanitizeChatDom deferred to final render
     streamingEl.textContent = "";
     const rendered = deps.renderMarkdownToSafeHtml(capped);
@@ -256,7 +280,7 @@ async function fireCronJob(job) {
       suppressToasts: true,
       onTextChunk: (chunk) => {
         if (!streamingEl) return;
-        streamChunks.push(chunk);
+        streamText += chunk;
         if (!streamRenderPending) {
           streamRenderPending = true;
           requestAnimationFrame(flushCronStreamRender);
@@ -310,6 +334,8 @@ async function cronTick() {
 
   const now = new Date();
   const jobs = loadCronJobs();
+  lastKnownCronJobCount = jobs.length;
+  if (!jobs.length) return; // No jobs configured — skip due-job filtering
   const dueJobs = jobs.filter(j => isCronJobDue(j, now) && !cronRunningJobs.has(j.id));
 
   if (!dueJobs.length) return;
@@ -331,7 +357,8 @@ async function cronTick() {
   // Fire sequentially to avoid concurrent agent loops
   for (const job of dueJobs) {
     if (deps.isUnloadInProgress()) break;
-    if (deps.getChatPanelIsSending() || deps.getActiveAgentAbortController()) {
+    // Reminder jobs don't use the agent loop — skip the busy guard
+    if (job.type !== "reminder" && (deps.getChatPanelIsSending() || deps.getActiveAgentAbortController())) {
       deps.debugLog("[Chief cron] Deferring remaining due jobs — agent loop started during execution");
       break;
     }
@@ -348,7 +375,7 @@ async function cronTick() {
         freshJobs[idx].runCount = (freshJobs[idx].runCount || 0) + 1;
         freshJobs[idx].lastRunError = errorText || null;
         // Disable one-shot jobs after execution
-        if (job.type === "once") freshJobs[idx].enabled = false;
+        if (job.type === "once" || job.type === "reminder") freshJobs[idx].enabled = false;
         saveCronJobs(freshJobs);
       }
     } finally {
@@ -378,8 +405,11 @@ export function startCronScheduler() {
   };
   window.addEventListener("storage", cronStorageHandler);
 
-  // Heartbeat: maintain leadership or try to claim if leader is stale
+  // Heartbeat: maintain leadership or try to claim if leader is stale.
+  // Only skip when confirmed zero AND not in the initial unknown state (-1).
+  // This prevents stale counts from another tab's job changes causing missed heartbeats.
   cronLeaderHeartbeatId = window.setInterval(() => {
+    if (lastKnownCronJobCount === 0) return;
     if (cronIsLeader()) cronHeartbeat();
     else cronTryClaimLeadership();
   }, CRON_LEADER_HEARTBEAT_MS);
@@ -450,7 +480,7 @@ export function getCronTools() {
               } else if (j.type === "interval" && j.enabled) {
                 const base = j.lastRun > 0 ? j.lastRun : j.createdAt;
                 nextRun = new Date(base + j.intervalMinutes * 60_000).toISOString();
-              } else if (j.type === "once" && j.runAt && j.lastRun === 0) {
+              } else if ((j.type === "once" || j.type === "reminder") && j.runAt && j.lastRun === 0) {
                 nextRun = new Date(j.runAt).toISOString();
               }
             } catch { /* ignore */ }
@@ -461,7 +491,8 @@ export function getCronTools() {
               expression: j.expression || undefined,
               intervalMinutes: j.intervalMinutes || undefined,
               timezone: j.timezone,
-              prompt: j.prompt,
+              prompt: j.prompt || undefined,
+              message: j.message || undefined,
               enabled: j.enabled,
               lastRun: j.lastRun ? new Date(j.lastRun).toISOString() : null,
               lastRunError: j.lastRunError || null,
@@ -476,22 +507,29 @@ export function getCronTools() {
     {
       name: "cos_cron_create",
       isMutating: true,
-      description: "Create a new scheduled job. Types: 'cron' (5-field expression with timezone), 'interval' (every N minutes), 'once' (one-shot at a specific time). The job prompt is sent to Chief of Staff as if the user typed it.",
+      description: "Create a new scheduled job. Types: 'cron' (5-field expression with timezone), 'interval' (every N minutes), 'once' (one-shot at a specific time), 'reminder' (one-shot sticky toast at a specific time — no agent loop, just a persistent notification). For 'reminder' type, use 'message' instead of 'prompt'.",
       input_schema: {
         type: "object",
         properties: {
           name: { type: "string", description: "Human-readable job name." },
-          type: { type: "string", enum: ["cron", "interval", "once"], description: "Schedule type." },
+          type: { type: "string", enum: ["cron", "interval", "once", "reminder"], description: "Schedule type. Use 'reminder' for a sticky toast notification at a specific time." },
           cron: { type: "string", description: "5-field cron expression (required for type 'cron'). E.g. '0 8 * * 1-5' for weekdays at 08:00." },
           interval_minutes: { type: "number", description: "Interval in minutes (required for type 'interval')." },
-          run_at: { type: "string", description: "ISO 8601 datetime for one-shot execution (required for type 'once')." },
+          run_at: { type: "string", description: "ISO 8601 datetime for one-shot execution (required for type 'once' or 'reminder')." },
           timezone: { type: "string", description: "IANA timezone. Default: auto-detected from browser." },
-          prompt: { type: "string", description: "The instruction to send to Chief of Staff when the job fires." }
+          prompt: { type: "string", description: "The instruction to send to Chief of Staff when the job fires (not used for 'reminder' type)." },
+          message: { type: "string", description: "The reminder text to display in the sticky toast (required for type 'reminder')." }
         },
-        required: ["name", "type", "prompt"]
+        required: ["name", "type"]
       },
-      execute: async ({ name, type, cron: cronExpr, interval_minutes, run_at, timezone, prompt } = {}) => {
-        if (!name || !type || !prompt) return { error: "name, type, and prompt are required." };
+      execute: async ({ name, type, cron: cronExpr, interval_minutes, run_at, timezone, prompt, message } = {}) => {
+        if (!name || !type) return { error: "name and type are required." };
+        if (type === "reminder") {
+          if (!message && !name) return { error: "message is required for type 'reminder'." };
+          if (!run_at) return { error: "run_at (ISO 8601 datetime) is required for type 'reminder'." };
+        } else if (!prompt) {
+          return { error: "prompt is required for non-reminder job types." };
+        }
 
         const jobs = loadCronJobs();
         if (jobs.length >= CRON_MAX_JOBS) return { error: `Maximum ${CRON_MAX_JOBS} scheduled jobs reached. Delete unused jobs first.` };
@@ -516,6 +554,12 @@ export function getCronTools() {
         if (type === "once" && !run_at) {
           return { error: "run_at (ISO 8601 datetime) is required for type 'once'." };
         }
+        if ((type === "once" || type === "reminder") && run_at) {
+          const parsedRunAt = new Date(run_at).getTime();
+          if (!Number.isFinite(parsedRunAt)) {
+            return { error: `Invalid run_at datetime: "${run_at}". Provide a valid ISO 8601 string.` };
+          }
+        }
 
         const baseId = generateCronJobId(name);
         const id = ensureUniqueCronJobId(baseId, jobs);
@@ -528,12 +572,13 @@ export function getCronTools() {
           expression: cronExpr || "",
           intervalMinutes: interval_minutes || 0,
           timezone: tz,
-          prompt,
+          prompt: prompt || "",
+          message: message || "",
           enabled: true,
           createdAt: Date.now(),
           lastRun: 0,
           runCount: 0,
-          runAt: type === "once" && run_at ? new Date(run_at).getTime() : 0
+          runAt: (type === "once" || type === "reminder") && run_at ? new Date(run_at).getTime() : 0
         });
 
         if (!newJob) return { error: "Failed to create job — invalid parameters." };
@@ -641,6 +686,7 @@ export function buildCronJobsPromptSection() {
     if (j.type === "cron") schedule = `cron: ${j.expression} (${j.timezone})`;
     else if (j.type === "interval") schedule = `every ${j.intervalMinutes} min`;
     else if (j.type === "once") schedule = `once at ${j.runAt ? new Date(j.runAt).toISOString() : "TBD"}`;
+    else if (j.type === "reminder") schedule = `reminder at ${j.runAt ? new Date(j.runAt).toISOString() : "TBD"}`;
 
     let nextRun = "";
     try {
@@ -651,12 +697,14 @@ export function buildCronJobsPromptSection() {
     } catch { /* ignore */ }
 
     const lastRunStr = j.lastRun > 0 ? ` | last: ${new Date(j.lastRun).toLocaleString("en-GB")}` : "";
-    return `- **${j.name}** (${j.id}) — ${schedule}${nextRun}${lastRunStr} — "${j.prompt.slice(0, 80)}"`;
+    const contentPreview = j.type === "reminder" ? (j.message || j.name).slice(0, 80) : j.prompt.slice(0, 80);
+    return `- **${j.name}** (${j.id}) — ${schedule}${nextRun}${lastRunStr} — "${contentPreview}"`;
   });
 
   return `## Scheduled Jobs
 
 You have access to cron job tools (cos_cron_list, cos_cron_create, cos_cron_update, cos_cron_delete).
+Use type 'reminder' with cos_cron_create to set one-shot reminders — these show a persistent sticky toast at the specified time without running the agent loop.
 The user currently has ${enabledJobs.length} active scheduled job(s):
 ${deps.wrapUntrustedWithInjectionScan("cron_jobs", lines.join("\n"))}`;
 }

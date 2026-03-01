@@ -129,7 +129,29 @@ function saveToolkitSchemaRegistry(extensionAPI = deps.getExtensionAPIRef(), reg
     reg.toolkits = Object.fromEntries(entries.slice(0, TOOLKIT_SCHEMA_MAX_TOOLKITS));
   }
   deps.setToolkitSchemaRegistryCache(reg);
-  extensionAPI?.settings?.set?.(deps.SETTINGS_KEYS.toolkitSchemaRegistry, reg);
+  // Strip transient _responseShape entries before persisting to avoid unbounded settings growth.
+  // Quick check: skip the deep clone if no _responseShape entries exist.
+  const regToolkits = Object.entries(reg.toolkits || {});
+  const hasResponseShapes = regToolkits.some(([, tk]) =>
+    Object.values(tk.tools || {}).some(t => t._responseShape));
+  if (hasResponseShapes) {
+    const persistable = { toolkits: {} };
+    for (const [tkName, tkEntry] of regToolkits) {
+      const cleanTools = {};
+      for (const [toolName, toolSchema] of Object.entries(tkEntry.tools || {})) {
+        if (toolSchema._responseShape) {
+          const { _responseShape, ...rest } = toolSchema;
+          cleanTools[toolName] = rest;
+        } else {
+          cleanTools[toolName] = toolSchema;
+        }
+      }
+      persistable.toolkits[tkName] = { ...tkEntry, tools: cleanTools };
+    }
+    extensionAPI?.settings?.set?.(deps.SETTINGS_KEYS.toolkitSchemaRegistry, persistable);
+  } else {
+    extensionAPI?.settings?.set?.(deps.SETTINGS_KEYS.toolkitSchemaRegistry, reg);
+  }
 }
 
 export function getToolkitEntry(toolkitName) {
@@ -332,6 +354,33 @@ export async function discoverToolkitSchema(toolkitName, options = {}) {
       tools
     };
 
+    // ─── MCP Supply Chain Hardening (scan → pin → BOM) ───
+    const toolsList = Object.values(tools).map(t => ({
+      name: t.slug,
+      description: t.description || "",
+      input_schema: t.input_schema || { type: "object", properties: {} }
+    }));
+    let composioFlaggedTools = [];
+    if (typeof deps.scanToolDescriptions === "function") {
+      composioFlaggedTools = deps.scanToolDescriptions(toolsList, key);
+    }
+    let composioPinResult = { status: "skipped" };
+    if (typeof deps.checkSchemaPin === "function") {
+      try {
+        composioPinResult = await deps.checkSchemaPin(`composio:${key}`, toolsList, key);
+      } catch (e) {
+        deps.debugLog("[MCP Security] Composio schema pin failed:", key, e?.message);
+      }
+    }
+    if (typeof deps.updateMcpBom === "function") {
+      try {
+        await deps.updateMcpBom(`composio:${key}`, key, "", toolsList, composioPinResult, composioFlaggedTools);
+      } catch (e) {
+        deps.debugLog("[MCP BOM] Composio BOM update failed:", key, e?.message);
+      }
+    }
+    // ─── End MCP Supply Chain Hardening ───
+
     const registry = getToolkitSchemaRegistry();
     registry.toolkits[key] = entry;
     saveToolkitSchemaRegistry(deps.getExtensionAPIRef(), registry);
@@ -378,10 +427,16 @@ export async function discoverAllConnectedToolkitSchemas(extensionAPI = deps.get
 // System Prompt Section Builder
 // ═══════════════════════════════════════════════════════════════════════
 
+let _schemaPromptCache = { key: "", value: "" };
+
 export function buildToolkitSchemaPromptSection(activeSections) {
   const registry = getToolkitSchemaRegistry();
   const toolkits = Object.values(registry.toolkits || {});
   if (!toolkits.length) return "";
+
+  // Cache by toolkit names + tool counts to avoid rebuilding when registry hasn't changed
+  const cacheKey = toolkits.map(tk => `${tk.toolkit}:${Object.keys(tk.tools || {}).length}`).sort().join("|");
+  if (_schemaPromptCache.key === cacheKey && _schemaPromptCache.value) return _schemaPromptCache.value;
 
   const installedToolkits = new Set();
   if (deps.getExtensionAPIRef()) {
@@ -457,7 +512,7 @@ export function buildToolkitSchemaPromptSection(activeSections) {
   {"tools": [{"tool_slug": "${firstTool.slug}", "arguments": {}}]}`
     : `Example: {"tools": [{"tool_slug": "TOOL_SLUG", "arguments": {}}]}`;
 
-  return `## Connected Toolkit Schemas
+  const result = `## Connected Toolkit Schemas
 
 IMPORTANT: Call these tools directly via COMPOSIO_MULTI_EXECUTE_TOOL. Do NOT call COMPOSIO_SEARCH_TOOLS first — the schemas below are already cached and ready.
 
@@ -466,6 +521,8 @@ ${exampleLine}
 Use the EXACT tool slugs listed below. Do not shorten or modify them.
 
 ${deps.wrapUntrustedWithInjectionScan("composio_schemas", sections.join("\n\n"))}`;
+  _schemaPromptCache = { key: cacheKey, value: result };
+  return result;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -565,7 +622,7 @@ export function canonicaliseComposioToolSlug(slug) {
   const tkEntry = registry.toolkits?.[toolkit];
   if (tkEntry?.tools) {
     const candidates = Object.keys(tkEntry.tools);
-    const contained = candidates.find(c => c.includes(raw) || raw.includes(c));
+    const contained = candidates.find(c => c.includes(raw));
     if (contained) {
       deps.debugLog("[Chief flow] Slug fuzzy-corrected:", raw, "→", contained);
       return contained;
@@ -687,10 +744,12 @@ export function extractAuthRedirectUrls(response) {
       urls.add(current.redirect_url.trim());
     }
 
-    Object.values(current).forEach((value) => {
-      if (Array.isArray(value)) value.forEach((item) => queue.push(item));
-      else if (value && typeof value === "object") queue.push(value);
-    });
+    if (queue.length < 2000) {
+      Object.values(current).forEach((value) => {
+        if (Array.isArray(value)) value.forEach((item) => queue.push(item));
+        else if (value && typeof value === "object") queue.push(value);
+      });
+    }
   }
 
   return Array.from(urls);
@@ -802,13 +861,15 @@ export function extractCandidateToolkitSlugsFromComposioSearch(result) {
       seen.add(slug);
       slugs.push(slug);
     });
-    Object.values(current).forEach((value) => {
-      if (Array.isArray(value)) {
-        value.forEach((item) => queue.push(item));
-      } else if (value && typeof value === "object") {
-        queue.push(value);
-      }
-    });
+    if (queue.length < 2000) {
+      Object.values(current).forEach((value) => {
+        if (Array.isArray(value)) {
+          value.forEach((item) => queue.push(item));
+        } else if (value && typeof value === "object") {
+          queue.push(value);
+        }
+      });
+    }
   }
   return slugs;
 }

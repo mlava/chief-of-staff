@@ -120,28 +120,16 @@ export function findClosestToolName(query, knownNames) {
 function isLikelyReadOnlyToolSlug(toolSlug) {
   const slug = String(toolSlug || "").toUpperCase();
   if (!slug) return false;
+  const words = slug.split("_");
   const mutatingTokens = ["DELETE", "REMOVE", "SEND", "CREATE", "UPDATE", "MODIFY", "WRITE", "POST", "TRASH", "MOVE", "EXECUTE"];
-  if (mutatingTokens.some((token) => slug.includes(token))) return false;
-  const readTokens = [
-    "GET",
-    "LIST",
-    "SEARCH",
-    "FIND",
-    "FETCH",
-    "READ",
-    "QUERY",
-    "LOOKUP",
-    "RETRIEVE",
-    "VIEW",
-    "DESCRIBE",
-    "DETAILS",
-    "SHOW"
-  ];
-  return readTokens.some((token) => slug.includes(token));
+  if (words.some((w) => mutatingTokens.includes(w))) return false;
+  const readTokens = ["GET", "LIST", "SEARCH", "FIND", "FETCH", "READ", "QUERY", "LOOKUP", "RETRIEVE", "VIEW", "DESCRIBE", "DETAILS", "SHOW"];
+  return words.some((w) => readTokens.includes(w));
 }
 
 function getUnknownMultiExecuteToolSlugs(args) {
   const tools = Array.isArray(args?.tools) ? args.tools : [];
+  if (!tools.length) return [];
   return tools
     .map((tool) => String(tool?.tool_slug || "").toUpperCase().trim())
     .filter(Boolean)
@@ -248,6 +236,7 @@ const SCOPED_PAGE_APPROVAL_TOOLS = new Set([
 function resolvePageUidForBlock(blockUid) {
   // Given a UID, return the page-level UID it belongs to.
   // If the UID itself is a page, return it directly.
+  if (!blockUid || !/^[\w-]{1,15}$/.test(blockUid)) return blockUid;
   const api = deps.getRoamAlphaApi();
   if (!api?.q) return blockUid;
   const escaped = deps.escapeForDatalog(blockUid);
@@ -360,6 +349,7 @@ export async function executeToolCall(toolName, args, { readOnly = false } = {})
 
     const unknownApproved = await confirmUnknownMultiExecuteToolSlugs(effectiveArgs);
     if (!unknownApproved) {
+      if (deps.recordUsageStat) deps.recordUsageStat("approvalsDenied");
       throw new Error("User denied unknown tool slugs in COMPOSIO_MULTI_EXECUTE_TOOL");
     }
   }
@@ -386,11 +376,22 @@ export async function executeToolCall(toolName, args, { readOnly = false } = {})
   // Defence-in-depth: block tools not on the read-only allowlist when the agent loop
   // is in read-only mode (inbox-triggered). Primary enforcement is tool filtering in
   // runAgentLoop; this catches edge cases like hallucinated tool names.
-  // Extension tools with explicit readOnly: true (isMutating === false) are auto-allowed.
+  // Extension tools must be on the explicit allowlist — don't trust their readOnly claims.
   if (readOnly && !deps.INBOX_READ_ONLY_TOOL_ALLOWLIST.has(toolName)) {
-    const isExplicitlyReadOnly = resolvedTool && resolvedTool.isMutating === false;
+    const isExplicitlyReadOnly = resolvedTool
+      && resolvedTool.isMutating === false
+      && resolvedTool._source !== "extension"; // don't trust extension readOnly claims
     if (!isExplicitlyReadOnly) {
       return { error: "Read-only mode: this tool is blocked for inbox-triggered requests. Summarise your findings for the human to act on." };
+    }
+  }
+
+  // Defence-in-depth: block tools from MCP servers whose schema has drifted
+  // until the user explicitly reviews and accepts the new schema.
+  if (typeof deps.getServerKeyForTool === "function" && typeof deps.isServerSuspended === "function") {
+    const serverKey = deps.getServerKeyForTool(toolName, resolvedTool, effectiveArgs);
+    if (serverKey && deps.isServerSuspended(serverKey)) {
+      return { error: `MCP server suspended (schema drift): tools from "${serverKey}" are blocked until you review the schema change. Use the command palette: "Chief of Staff: Review MCP Schema Changes".` };
     }
   }
 
@@ -423,8 +424,10 @@ export async function executeToolCall(toolName, args, { readOnly = false } = {})
       if (unapprovedPages.length > 0) {
         const approved = await deps.promptToolExecutionApproval(toolName, effectiveArgs);
         if (!approved) {
+          if (deps.recordUsageStat) deps.recordUsageStat("approvalsDenied");
           throw new Error(`User denied execution for ${toolName}`);
         }
+        if (deps.recordUsageStat) deps.recordUsageStat("approvalsGranted");
         // Approve all target pages (including already-approved ones, to refresh TTL)
         rememberPageWriteApproval(targetPageUids, Date.now());
         deps.debugLog("[Chief flow] Page write approved for UIDs (15m TTL):", targetPageUids.join(", "));
@@ -434,8 +437,10 @@ export async function executeToolCall(toolName, args, { readOnly = false } = {})
     } else if (!hasValidToolApproval(approvalKey, now)) {
       const approved = await deps.promptToolExecutionApproval(toolName, effectiveArgs);
       if (!approved) {
+        if (deps.recordUsageStat) deps.recordUsageStat("approvalsDenied");
         throw new Error(`User denied execution for ${toolName}`);
       }
+      if (deps.recordUsageStat) deps.recordUsageStat("approvalsGranted");
       rememberToolApproval(approvalKey, Date.now());
       deps.debugLog("[Chief flow] Tool approved and whitelisted for session (15m TTL):", approvalKey);
     }
@@ -451,7 +456,7 @@ export async function executeToolCall(toolName, args, { readOnly = false } = {})
   if (toolName === "LOCAL_MCP_EXECUTE") {
     deps.setSessionUsedLocalMcp(true);
     const innerName = effectiveArgs?.tool_name;
-    if (!innerName) throw new Error("LOCAL_MCP_EXECUTE requires tool_name");
+    if (!innerName) return { error: "LOCAL_MCP_EXECUTE requires tool_name parameter. Call LOCAL_MCP_ROUTE first to discover available tools." };
     const cache = deps.getLocalMcpToolsCache() || [];
     // Exact match first, then try stripping server-name prefix (LLMs sometimes send "server.tool_name")
     let tool = cache.find(t => t.name === innerName);

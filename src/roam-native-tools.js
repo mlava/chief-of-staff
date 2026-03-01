@@ -64,10 +64,14 @@ export function getRoamNativeTools() {
         }
         // Final case-insensitive filter in JS (catches any case the variants missed)
         const allResults = Array.isArray(results) ? results : [];
-        return allResults
-          .filter(([, text]) => text && text.toLowerCase().includes(queryText))
-          .slice(0, limit)
-          .map(([uid, text, page]) => ({ uid, text, page }));
+        const filtered = allResults.filter(([, text]) => text && text.toLowerCase().includes(queryText));
+        const capped = filtered.slice(0, limit).map(([uid, text, page]) => ({ uid, text, page }));
+        if (filtered.length > limit) {
+          capped.push({ _note: `Showing ${limit} of ${filtered.length} matches. Increase max_results (up to 500) to see more.` });
+        } else if (capped.length === 0) {
+          capped.push({ _note: `No matches found for "${String(args.query || "").slice(0, 80)}". Try a different or broader query.` });
+        }
+        return capped;
       }
     },
     {
@@ -309,6 +313,8 @@ export function getRoamNativeTools() {
         if (open !== undefined) blockPayload.open = !!open;
         if (props !== undefined) {
           if (typeof props !== "object" || props === null || Array.isArray(props)) throw new Error("props must be a plain object");
+          // Reject non-serialisable values (functions, symbols, circular refs)
+          try { JSON.stringify(props); } catch { throw new Error("props must be JSON-serialisable (no functions, circular references, or symbols)"); }
           // Read-merge-write: read current props, merge patch, write back.
           // This avoids clobbering unrelated props on the block.
           const pullData = api.pull?.("[:block/props]", [":block/uid", blockUid])
@@ -339,8 +345,19 @@ export function getRoamNativeTools() {
         const parentUid = String(parent_uid || "").trim();
         if (!blockUid) throw new Error("uid is required");
         if (!parentUid) throw new Error("parent_uid is required");
+        if (blockUid === parentUid) throw new Error("Cannot move a block under itself");
         deps.requireRoamUidExists(blockUid, "uid");
         deps.requireRoamUidExists(parentUid, "parent_uid");
+        // Guard against moving a block under one of its own descendants (creates cycles)
+        let ancestor = parentUid;
+        for (let i = 0; i < 30; i++) {
+          const puid = await deps.queryRoamDatalog(
+            `[:find ?puid . :where [?b :block/uid "${deps.escapeForDatalog(ancestor)}"] [?b :block/parent ?p] [?p :block/uid ?puid]]`
+          );
+          if (!puid) break;
+          if (puid === blockUid) throw new Error("Cannot move a block under its own descendant");
+          ancestor = puid;
+        }
         const api = deps.getRoamAlphaApi();
         if (!api?.moveBlock) throw new Error("Roam moveBlock API unavailable");
         await deps.withRoamWriteRetry(() => api.moveBlock({
@@ -414,7 +431,7 @@ export function getRoamNativeTools() {
         // Each iteration issues one query that finds the parent and pulls its data + children.
         const chain = [];
         let siblings = [];
-        const MAX_DEPTH = 20;
+        const MAX_DEPTH = 10;
         let currentUid = blockUid;
         for (let i = 0; i < MAX_DEPTH; i++) {
           const escapedCurrent = deps.escapeForDatalog(currentUid);
@@ -656,7 +673,9 @@ export function getRoamNativeTools() {
         // short titles, single-word lowercase) reduces the candidate set to typically <200 even
         // on large graphs; (b) this tool is only invoked on explicit user request, never in a
         // hot loop; (c) the Roam API 20-second query timeout provides a natural ceiling.
+        const titleQueryStart = performance.now();
         const titleRows = await deps.queryRoamDatalog(`[:find ?t :where [?p :node/title ?t]]`);
+        deps.debugLog?.("[Roam tools] roam_link_suggestions: all-pages query took", Math.round(performance.now() - titleQueryStart), "ms,", Array.isArray(titleRows) ? titleRows.length : 0, "titles");
         if (!Array.isArray(titleRows) || !titleRows.length) {
           return { found: true, title: pageTitle || pageUid, blocks_scanned: blockRows.length, suggestions: [] };
         }
@@ -766,6 +785,14 @@ export function getRoamNativeTools() {
         const original = originalText.slice(match.index, match.index + match[0].length);
         const after = originalText.slice(match.index + match[0].length);
         const newText = `${before}[[${original}]]${after}`;
+
+        // Re-read block text to guard against concurrent edits (TOCTOU)
+        const freshRows = await deps.queryRoamDatalog(
+          `[:find ?str . :where [?b :block/uid "${deps.escapeForDatalog(blockUid)}"] [?b :block/string ?str]]`
+        );
+        if (String(freshRows) !== originalText) {
+          return { success: false, uid: blockUid, title: pageTitle, error: "Block text changed since initial read — aborting to avoid overwriting concurrent edits." };
+        }
 
         const api = deps.requireRoamUpdateBlockApi(deps.getRoamAlphaApi());
         await deps.withRoamWriteRetry(() => api.updateBlock({ block: { uid: blockUid, string: deps.truncateRoamBlockText(newText) } }));
@@ -888,6 +915,7 @@ export function getRoamNativeTools() {
         deps.requireRoamUidExists(parentUid, "parent_uid");
         const md = String(markdown || "").trim();
         if (!md) throw new Error("markdown content is required");
+        if (md.length > 50000) throw new Error(`Markdown too large (${md.length} chars). Maximum is 50,000 characters.`);
         // Try Roam's native fromMarkdown first; fall back to our own parser if it fails.
         // fromMarkdown can throw internal errors ("n.map is not a function") on some markdown inputs;
         // these are bugs in Roam's parser, not transient — skip straight to fallback.
@@ -902,6 +930,9 @@ export function getRoamNativeTools() {
           });
           return { success: true, parent_uid: parentUid, uids: result };
         } catch (fmError) {
+          // Fallback: Roam has no batch API beyond fromMarkdown, so we create blocks
+          // sequentially via createRoamBlockTree. This path is rarely hit (only when
+          // Roam's parser throws) and the block count is safety-capped.
           deps.debugLog("[Chief flow] fromMarkdown failed, using fallback parser:", fmError?.message);
           const blockTree = deps.parseMarkdownToBlockTree(md);
           if (!blockTree.length) throw fmError;
@@ -982,6 +1013,10 @@ export function getRoamNativeTools() {
         // Parse content into block tree and create nested children
         const normalisedText = text.replace(/\\n/g, "\n").replace(/\\t/g, "\t");
         const blockTree = deps.parseMarkdownToBlockTree(normalisedText);
+        const totalNodes = deps.countBlockTreeNodes(blockTree);
+        if (totalNodes > deps.MAX_CREATE_BLOCKS_TOTAL) {
+          throw new Error(`Skill content too large (${totalNodes} blocks). Maximum is ${deps.MAX_CREATE_BLOCKS_TOTAL}.`);
+        }
         for (let i = 0; i < blockTree.length; i++) {
           await deps.createRoamBlockTree(skillUid, blockTree[i], i);
         }
@@ -1093,16 +1128,34 @@ export function getRoamNativeTools() {
     },
     {
       name: "roam_undo",
-      isMutating: false,
+      isMutating: true,
       description: "Undo the last action in Roam. Use when the user asks to undo a recent change.",
       input_schema: { type: "object", properties: {} },
       execute: async () => {
         const api = deps.getRoamAlphaApi();
-        if (api?.data?.undo) {
-          await api.data.undo();
-          return { success: true, action: "undo" };
+        if (!api?.data?.undo) {
+          throw new Error("Roam undo API unavailable");
         }
-        throw new Error("Roam undo API unavailable");
+        const result = await api.data.undo();
+        deps.debugLog("[Chief flow] roam_undo: data.undo() returned:", result);
+        await new Promise(r => setTimeout(r, 150));
+        return { success: true, action: "undo" };
+      }
+    },
+    {
+      name: "roam_redo",
+      isMutating: true,
+      description: "Redo the last undone action in Roam. Use when the user asks to redo something they just undid.",
+      input_schema: { type: "object", properties: {} },
+      execute: async () => {
+        const api = deps.getRoamAlphaApi();
+        if (!api?.data?.redo) {
+          throw new Error("Roam redo API unavailable");
+        }
+        const result = await api.data.redo();
+        deps.debugLog("[Chief flow] roam_redo: data.redo() returned:", result);
+        await new Promise(r => setTimeout(r, 150));
+        return { success: true, action: "redo" };
       }
     },
     {
@@ -1125,7 +1178,7 @@ export function getRoamNativeTools() {
       input_schema: { type: "object", properties: {} },
       execute: async () => {
         const api = deps.getRoamAlphaApi();
-        if (!api?.ui?.rightSidebar?.open) throw new Error("Roam sidebar open API unavailable");
+        if (!api?.ui?.rightSidebar?.open) throw new Error("Roam right sidebar open API unavailable");
         await api.ui.rightSidebar.open();
         return { success: true };
       }
@@ -1137,8 +1190,32 @@ export function getRoamNativeTools() {
       input_schema: { type: "object", properties: {} },
       execute: async () => {
         const api = deps.getRoamAlphaApi();
-        if (!api?.ui?.rightSidebar?.close) throw new Error("Roam sidebar close API unavailable");
+        if (!api?.ui?.rightSidebar?.close) throw new Error("Roam right sidebar close API unavailable");
         await api.ui.rightSidebar.close();
+        return { success: true };
+      }
+    },
+    {
+      name: "roam_open_left_sidebar",
+      isMutating: false,
+      description: "Open the left sidebar in Roam (navigation panel with daily notes, graph overview, shortcuts, etc.).",
+      input_schema: { type: "object", properties: {} },
+      execute: async () => {
+        const api = deps.getRoamAlphaApi();
+        if (!api?.ui?.leftSidebar?.open) throw new Error("Roam left sidebar open API unavailable");
+        await api.ui.leftSidebar.open();
+        return { success: true };
+      }
+    },
+    {
+      name: "roam_close_left_sidebar",
+      isMutating: false,
+      description: "Close the left sidebar in Roam (navigation panel).",
+      input_schema: { type: "object", properties: {} },
+      execute: async () => {
+        const api = deps.getRoamAlphaApi();
+        if (!api?.ui?.leftSidebar?.close) throw new Error("Roam left sidebar close API unavailable");
+        await api.ui.leftSidebar.close();
         return { success: true };
       }
     },
@@ -1183,11 +1260,31 @@ export function getRoamNativeTools() {
           windowDef["search-query-str"] = search_query;
         } else {
           if (!block_uid) throw new Error("block_uid is required for this window type");
-          windowDef["block-uid"] = block_uid;
+          // Resolve page title to UID if needed (LLMs often pass titles instead of UIDs)
+          let resolvedUid = block_uid;
+          const looksLikeUid = /^[a-zA-Z0-9_-]{9,10}$/.test(block_uid);
+          if (!looksLikeUid) {
+            // Strip [[ ]] wrapper if present
+            const cleanTitle = block_uid.replace(/^\[\[/, "").replace(/\]\]$/, "").trim();
+            try {
+              const rows = await deps.queryRoamDatalog(`[:find ?uid :where [?p :node/title "${deps.escapeForDatalog(cleanTitle)}"] [?p :block/uid ?uid]]`);
+              if (rows && rows.length > 0 && rows[0][0]) {
+                resolvedUid = rows[0][0];
+              } else {
+                throw new Error(`Could not find page with title "${cleanTitle}" — provide a valid block or page UID`);
+              }
+            } catch (e) {
+              if (e.message.includes("Could not find page")) throw e;
+              throw new Error(`Failed to resolve "${block_uid}" to a UID: ${e.message}`);
+            }
+          }
+          windowDef["block-uid"] = resolvedUid;
         }
         if (order != null) windowDef.order = order;
+        // Ensure sidebar is open before adding a window (open() is idempotent — no-op if already open)
+        if (api.ui.rightSidebar.open) await api.ui.rightSidebar.open();
         await api.ui.rightSidebar.addWindow({ window: windowDef });
-        return { success: true, type, uid: block_uid || search_query };
+        return { success: true, type, uid: windowDef["block-uid"] || search_query };
       }
     },
     {
@@ -1212,10 +1309,27 @@ export function getRoamNativeTools() {
           windowDef["search-query-str"] = search_query;
         } else {
           if (!block_uid) throw new Error("block_uid is required for this window type");
-          windowDef["block-uid"] = block_uid;
+          // Resolve page title to UID if needed (LLMs often pass titles instead of UIDs)
+          let resolvedUid = block_uid;
+          const looksLikeUid = /^[a-zA-Z0-9_-]{9,10}$/.test(block_uid);
+          if (!looksLikeUid) {
+            const cleanTitle = block_uid.replace(/^\[\[/, "").replace(/\]\]$/, "").trim();
+            try {
+              const rows = await deps.queryRoamDatalog(`[:find ?uid :where [?p :node/title "${deps.escapeForDatalog(cleanTitle)}"] [?p :block/uid ?uid]]`);
+              if (rows && rows.length > 0 && rows[0][0]) {
+                resolvedUid = rows[0][0];
+              } else {
+                throw new Error(`Could not find page with title "${cleanTitle}" — provide a valid block or page UID`);
+              }
+            } catch (e) {
+              if (e.message.includes("Could not find page")) throw e;
+              throw new Error(`Failed to resolve "${block_uid}" to a UID: ${e.message}`);
+            }
+          }
+          windowDef["block-uid"] = resolvedUid;
         }
         await api.ui.rightSidebar.removeWindow({ window: windowDef });
-        return { success: true, type, removed: block_uid || search_query };
+        return { success: true, type, removed: windowDef["block-uid"] || search_query };
       }
     },
 

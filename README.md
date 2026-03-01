@@ -177,6 +177,88 @@ Theme transitions are handled gracefully: a hold-last-state guard prevents flick
 
 ---
 
+## Instant commands (no LLM required)
+
+Many common tasks are handled by a **deterministic router** that matches your input against known patterns and calls Roam APIs directly — no LLM round-trip, no API cost, near-instant response. These work even without an LLM API key configured.
+
+### Quick capture
+
+| You type | What happens |
+|---|---|
+| `add "buy milk" to today` | Creates a block on today's daily page |
+| `note meeting at 3pm with Sarah` | Same — `note`, `log`, `jot down`, `capture` all work |
+| `add check quarterly numbers to today's page` | Quotes are optional |
+
+### Search & read
+
+| You type | What happens |
+|---|---|
+| `search project planning` | Full-text search across your graph |
+| `find meeting notes` | Same — `find`, `look up`, `search for` all work |
+| `show me [[Project Plan]]` | Returns the page contents (top 4 levels, 3K chars) |
+| `what's on [[Weekly Review]]` | Same — `read`, `get`, `contents of` |
+| `what's on today's page` | Shows today's daily page content |
+| `today's notes` | Same |
+
+### Tasks
+
+| You type | What happens |
+|---|---|
+| `show my todos` | Lists open TODO items (uses Better Tasks if available) |
+| `pending tasks` | Same — `list todos`, `open tasks`, `action items` |
+| `show done tasks` | Lists completed DONE items |
+| `completed tasks` | Same — `finished tasks`, `what did I finish` |
+
+### Navigation
+
+| You type | What happens |
+|---|---|
+| `open [[Project Plan]]` | Navigates to the page |
+| `go to today` | Opens today's daily page |
+| `go to yesterday` | Opens yesterday's daily page |
+| `open tomorrow` | Opens tomorrow's daily page |
+| `go to last Monday` | Opens last Monday's daily page |
+| `open next Friday` | Opens next Friday's daily page |
+| `open inbox` | Opens `Chief of Staff/Inbox` |
+| `open skills` | Opens `Chief of Staff/Skills` |
+
+### Graph information
+
+| You type | What happens |
+|---|---|
+| `graph stats` | Page count, block count, today's activity |
+| `how big is my graph` | Same |
+| `what changed today` | Pages modified in the last 24 hours |
+| `recent edits` | Same |
+| `backlinks for [[Page]]` | What links to a page |
+| `stats for [[Page]]` | Created/edited dates, block/word/reference counts |
+
+### Sidebar & UI
+
+| You type | What happens |
+|---|---|
+| `open sidebar` | Opens the right sidebar |
+| `open left sidebar` | Opens the left sidebar |
+| `close sidebar` | Closes the right sidebar |
+| `open [[Page]] in sidebar` | Opens a page in the right sidebar |
+
+### Utilities
+
+| You type | What happens |
+|---|---|
+| `undo` | Undoes the last Roam action |
+| `redo` | Redoes the last undone action |
+| `what time is it` | Current time and today's daily page title |
+| `help` | Context-aware capability summary |
+| `tools` | Lists all available tools by category |
+| `what roam tools do you have` | Lists tools for a specific category |
+| `remember that X` | Saves to memory (no LLM needed) |
+| `run daily briefing` | Triggers a skill directly by name |
+
+All of the above work in both the chat panel and the command palette prompt. They respond in under 100ms since there's no network call to an LLM provider.
+
+---
+
 ## Task integration
 
 Chief of Staff recognises natural language task queries and routes them to dedicated handlers — no LLM call required for common patterns:

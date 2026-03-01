@@ -24,6 +24,7 @@ let activeExtensionAPI = null;
 let activeDeps = null;
 let activeContentArea = null;
 let activeStepIndicator = null;
+let activeBackLink = null;
 // Mutable session state shared across steps (survives async settings timing)
 let sessionState = {};
 
@@ -40,10 +41,63 @@ function loadOnboardingState(extensionAPI, deps) {
     deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.mistralApiKey, "") ||
     deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.llmApiKey, "")
   );
+
+  // Check for memory and skills pages (user may have set up manually)
+  let hasMemory = false;
+  let hasSkills = false;
+  try {
+    const memResult = window.roamAlphaAPI?.data?.pull?.(
+      "[:node/title]", '[:node/title "Chief of Staff/Memory"]'
+    );
+    hasMemory = !!(memResult?.[":node/title"]);
+    const skillsResult = window.roamAlphaAPI?.data?.pull?.(
+      "[:node/title]", '[:node/title "Chief of Staff/Skills"]'
+    );
+    hasSkills = !!(skillsResult?.[":node/title"]);
+  } catch { /* ignore */ }
+
+  // Walk forward: skip steps whose preconditions are already met
+  // Steps: 0=welcome, 1=introductions, 2=api-key, 3=better-tasks,
+  //        4=memory-pages, 5=memory-questionnaire, 6=hotkey,
+  //        7=chat-panel, 8=skills, 9=composio, 10=local-mcp, 11=finish
   if (!hasName && !hasKey) return { currentStep: 0 };
   if (hasName && !hasKey) return { currentStep: 2 };
-  if (hasKey) return { currentStep: 3 };
-  return { currentStep: 0 };
+  // Has key — skip past intro/key steps
+  if (hasMemory && hasSkills) return { currentStep: 9 }; // Jump to composio/local-mcp/finish
+  if (hasMemory) return { currentStep: 8 }; // Jump to skills
+  return { currentStep: 3 }; // Start from better-tasks
+}
+
+// ---------------------------------------------------------------------------
+// Back navigation
+// ---------------------------------------------------------------------------
+
+/**
+ * Walk backward from the given index, skipping steps whose skipIf returns true.
+ * Returns the previous visible step index, or -1 if there is none.
+ */
+function findPreviousVisibleStep(fromIndex) {
+  const ctx = {
+    extensionAPI: activeExtensionAPI,
+    deps: activeDeps,
+    advanceStep: () => {},
+    skipToEnd: () => {},
+    card: onboardingCardEl,
+    contentArea: activeContentArea,
+    sessionState,
+  };
+  for (let i = fromIndex - 1; i >= 0; i--) {
+    const s = ONBOARDING_STEPS[i];
+    if (typeof s.skipIf !== "function" || !s.skipIf(ctx)) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function goBack() {
+  const prev = findPreviousVisibleStep(currentStepIndex);
+  if (prev >= 0) renderStep(prev);
 }
 
 // ---------------------------------------------------------------------------
@@ -67,6 +121,7 @@ function renderStep(stepIndex) {
     extensionAPI: activeExtensionAPI,
     deps: activeDeps,
     advanceStep: () => renderStep(stepIndex + 1),
+    goBack: () => goBack(),
     skipToEnd: () => teardownOnboarding(),
     card: onboardingCardEl,
     contentArea: activeContentArea,
@@ -76,6 +131,12 @@ function renderStep(stepIndex) {
   if (typeof step.skipIf === "function" && step.skipIf(ctx)) {
     renderStep(stepIndex + 1);
     return;
+  }
+
+  // Show/hide back link based on whether there's a previous visible step
+  if (activeBackLink) {
+    const hasPrev = findPreviousVisibleStep(stepIndex) >= 0;
+    activeBackLink.style.display = hasPrev ? "" : "none";
   }
 
   // Render step content
@@ -144,9 +205,11 @@ export function launchOnboarding(extensionAPI, deps) {
     card,
     contentArea,
     stepIndicator,
+    backLink,
     destroy,
   } = createOnboardingCard({
     title: deps.getAssistantDisplayName(extensionAPI),
+    onBack: () => goBack(),
     onSkip: () => {
       // "Skip" footer link — advance one step
       renderStep(currentStepIndex + 1);
@@ -183,6 +246,7 @@ export function launchOnboarding(extensionAPI, deps) {
   onboardingDestroyFn = destroy;
   activeContentArea = contentArea;
   activeStepIndicator = stepIndicator;
+  activeBackLink = backLink;
 
   document.body.appendChild(card);
 
@@ -220,6 +284,7 @@ export function teardownOnboarding() {
   activeDeps = null;
   activeContentArea = null;
   activeStepIndicator = null;
+  activeBackLink = null;
   currentStepIndex = 0;
   sessionState = {};
 }

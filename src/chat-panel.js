@@ -13,6 +13,10 @@ let deps = {};
 
 export function initChatPanel(injected) {
   deps = injected;
+  // Limit concurrent toasts to prevent overlap during rapid tool approvals
+  if (iziToast?.settings) {
+    iziToast.settings({ maxOpenToasts: 3 });
+  }
 }
 
 // ── Constants (duplicated from index.js to keep module self-contained) ──
@@ -42,6 +46,9 @@ const activeToastKeyboards = new Set();
 let chatPanelPersistTimeoutId = null;
 let chatThinkingTimerId = null;
 let chatWorkingTimerId = null;
+let activeTab = "chat";          // "chat" | "activity"
+let activityLogContainer = null;  // DOM element for the activity tab
+let activityLogLoaded = false;    // tracks whether entries have been fetched
 
 // ── Accessors (for index.js to read module-scoped state) ────────────
 export function getChatPanelIsOpen() { return chatPanelIsOpen; }
@@ -72,7 +79,7 @@ function isDarkMode() {
   );
 }
 
-function getToastTheme() {
+export function getToastTheme() {
   return isDarkMode() ? "dark" : "light";
 }
 
@@ -407,6 +414,20 @@ export function showErrorToast(title, message) {
   });
 }
 
+export function showReminderToast(title, message) {
+  if (!iziToast?.show) return;
+  iziToast.show({
+    title: deps.escapeHtml(title),
+    message: deps.escapeHtml(message),
+    position: "topRight",
+    timeout: false,
+    close: true,
+    icon: "icon-bell",
+    color: "yellow",
+    theme: getToastTheme()
+  });
+}
+
 export function showInfoToastIfAllowed(title, message, suppressToasts = false) {
   if (suppressToasts) return;
   showInfoToast(title, message);
@@ -586,9 +607,9 @@ function normaliseChatPanelMessage(input) {
   };
 }
 
-function persistChatPanelHistory() {
-  const extensionAPI = deps.getExtensionAPIRef();
-  extensionAPI?.settings?.set?.(deps.SETTINGS_KEYS.chatPanelHistory, chatPanelHistory);
+function persistChatPanelHistory(extensionAPI) {
+  const api = extensionAPI || deps.getExtensionAPIRef();
+  api?.settings?.set?.(deps.SETTINGS_KEYS.chatPanelHistory, chatPanelHistory);
 }
 
 export function loadChatPanelHistory() {
@@ -616,12 +637,12 @@ export function appendChatPanelHistory(role, text) {
   }, 5000);
 }
 
-export function flushPersistChatPanelHistory() {
+export function flushPersistChatPanelHistory(extensionAPI) {
   if (chatPanelPersistTimeoutId) {
     window.clearTimeout(chatPanelPersistTimeoutId);
     chatPanelPersistTimeoutId = null;
   }
-  persistChatPanelHistory();
+  persistChatPanelHistory(extensionAPI);
 }
 
 export function clearChatPanelHistory() {
@@ -763,10 +784,19 @@ async function handleChatPanelSend() {
   if (/^\/clear$/i.test(message)) {
     chatPanelInput.value = "";
     clearChatPanelHistory();
-    appendChatPanelMessage("assistant", "History cleared. Ask me anything and I'll continue from fresh chat history.");
+    renderEmptyStateHint(chatPanelMessages, deps.getAssistantDisplayName());
     return;
   }
 
+  if (/^\/help$/i.test(message)) {
+    chatPanelInput.value = "";
+    removeEmptyStateHint();
+    const helpText = typeof deps.buildHelpSummary === "function" ? await deps.buildHelpSummary() : "Help is not available.";
+    appendChatPanelMessage("assistant", helpText);
+    return;
+  }
+
+  removeEmptyStateHint();
   appendChatPanelMessage("user", message);
   appendChatPanelHistory("user", message);
   chatPanelInput.value = "";
@@ -775,7 +805,7 @@ async function handleChatPanelSend() {
   setChatPanelSendingState(true);
 
   let streamingEl = null;
-  const streamChunks = [];
+  let streamText = "";
   let streamRenderPending = false;
 
   function ensureStreamingEl() {
@@ -791,7 +821,7 @@ async function handleChatPanelSend() {
   function flushStreamRender() {
     streamRenderPending = false;
     if (!streamingEl || !document.body.contains(streamingEl)) return;
-    const joined = streamChunks.join("").replace(/\[Key reference:[^\]]*\]\s*/g, "");
+    const joined = streamText.replace(/\[Key reference:[^\]]*\]\s*/g, "");
     const capped = joined.length > 60000 ? joined.slice(joined.length - 60000) : joined;
     streamingEl.innerHTML = deps.renderMarkdownToSafeHtml(capped);
     if (chatPanelMessages) chatPanelMessages.scrollTop = chatPanelMessages.scrollHeight;
@@ -804,12 +834,12 @@ async function handleChatPanelSend() {
   }
 
   chatThinkingTimerId = setTimeout(() => {
-    if (streamingEl && streamChunks.length === 0 && document.body.contains(streamingEl)) {
+    if (streamingEl && streamText.length === 0 && document.body.contains(streamingEl)) {
       streamingEl.innerHTML = '<span class="chief-msg-thinking">Still thinking</span>';
     }
   }, 5000);
   chatWorkingTimerId = setTimeout(() => {
-    if (streamingEl && streamChunks.length === 0 && document.body.contains(streamingEl)) {
+    if (streamingEl && streamText.length === 0 && document.body.contains(streamingEl)) {
       streamingEl.innerHTML = '<span class="chief-msg-thinking">Still working</span>';
     }
   }, 15000);
@@ -824,7 +854,7 @@ async function handleChatPanelSend() {
           chatPanelSendButton.textContent = "Generating response...";
         }
         ensureStreamingEl();
-        streamChunks.push(chunk);
+        streamText += chunk;
         if (!streamRenderPending) {
           streamRenderPending = true;
           requestAnimationFrame(flushStreamRender);
@@ -922,6 +952,8 @@ function clampChatPanelToViewport(panelEl) {
 
 // ── Drag & resize behaviour ─────────────────────────────────────────
 function installChatPanelDragBehavior(handleEl, panelEl) {
+  const ac = new AbortController();
+  const sig = { signal: ac.signal };
   let dragRafId = null;
   const onDragMove = (event) => {
     if (!chatPanelDragState || !document.body.contains(panelEl)) return;
@@ -954,9 +986,9 @@ function installChatPanelDragBehavior(handleEl, panelEl) {
     };
     event.preventDefault();
   };
-  handleEl.addEventListener("mousedown", onDragDown);
-  window.addEventListener("mousemove", onDragMove);
-  window.addEventListener("mouseup", onDragUp);
+  handleEl.addEventListener("mousedown", onDragDown, sig);
+  window.addEventListener("mousemove", onDragMove, sig);
+  window.addEventListener("mouseup", onDragUp, sig);
 
   const GRIP = 6;
   let resizeState = null;
@@ -1055,22 +1087,310 @@ function installChatPanelDragBehavior(handleEl, panelEl) {
     }
   };
 
-  panelEl.addEventListener("mousemove", onPanelMouseMove);
-  panelEl.addEventListener("mousedown", onPanelMouseDown);
-  window.addEventListener("mousemove", onResizeMove);
-  window.addEventListener("mouseup", onResizeUp);
+  panelEl.addEventListener("mousemove", onPanelMouseMove, sig);
+  panelEl.addEventListener("mousedown", onPanelMouseDown, sig);
+  window.addEventListener("mousemove", onResizeMove, sig);
+  window.addEventListener("mouseup", onResizeUp, sig);
 
   return () => {
+    ac.abort();
     if (dragRafId) { cancelAnimationFrame(dragRafId); dragRafId = null; }
     if (resizeRafId) { cancelAnimationFrame(resizeRafId); resizeRafId = null; }
-    handleEl.removeEventListener("mousedown", onDragDown);
-    panelEl.removeEventListener("mousemove", onPanelMouseMove);
-    panelEl.removeEventListener("mousedown", onPanelMouseDown);
-    window.removeEventListener("mousemove", onDragMove);
-    window.removeEventListener("mouseup", onDragUp);
-    window.removeEventListener("mousemove", onResizeMove);
-    window.removeEventListener("mouseup", onResizeUp);
+    // Reset body styles in case panel is destroyed mid-resize
+    if (resizeState) {
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      resizeState = null;
+    }
   };
+}
+
+// ── Empty-state hint ────────────────────────────────────────────────
+const EMPTY_STATE_HINT_ATTR = "data-chief-empty-hint";
+
+function renderEmptyStateHint(messagesEl, assistantName) {
+  if (!messagesEl) return;
+  const hint = document.createElement("div");
+  hint.setAttribute(EMPTY_STATE_HINT_ATTR, "true");
+  hint.className = "chief-empty-hint";
+
+  const name = assistantName || "your assistant";
+  const caps = typeof deps.getChipCapabilities === "function" ? deps.getChipCapabilities() : {};
+
+  // Base chips — always available (Roam native tools + COS tools)
+  const examples = [
+    // Roam graph
+    "Search my graph for…",
+    "Create a page about…",
+    "Summarise my notes on…",
+    "Find references to [[…]]",
+    "Build an outline for…",
+    // Tasks & productivity
+    "What tasks are due this week?",
+    "Run my daily briefing",
+    "What did I work on yesterday?",
+    // Memory
+    "Remember that I prefer…",
+    "What do you know about me?",
+    // Skills & scheduling
+    "What skills do I have?",
+    "Schedule a daily reminder to…",
+    // Meta
+    "What tools do you have?",
+    "Help me plan…",
+  ];
+  // Email (Composio Gmail)
+  if (caps.composioEmail) {
+    examples.push("Check my email for…", "Draft an email to…");
+  }
+  // Calendar (Composio Google Calendar)
+  if (caps.composioCalendar) {
+    examples.push("What's on my calendar today?");
+  }
+  // Research / Local MCP
+  if (caps.localMcp) {
+    examples.push("Look up a paper about…", "Summarise this article: …");
+  }
+  // Extension Tools — generate contextual chips from installed extension names
+  const extNames = Array.isArray(caps.extensionToolNames) ? caps.extensionToolNames : [];
+  for (const extName of extNames) {
+    const lower = extName.toLowerCase();
+    if (lower.includes("task")) {
+      examples.push(`Show my tasks from ${extName}`);
+    } else if (lower.includes("focus")) {
+      examples.push(`Start a focus session with ${extName}`);
+    } else if (lower.includes("research") || lower.includes("deep")) {
+      examples.push(`Research a topic with ${extName}`);
+    } else {
+      examples.push(`Use ${extName}…`);
+    }
+  }
+
+  // Pick 3 random examples each time for variety
+  const shuffled = examples.sort(() => Math.random() - 0.5).slice(0, 3);
+
+  const greeting = document.createElement("p");
+  greeting.className = "chief-empty-hint-greeting";
+  greeting.textContent = `Hi — I'm ${name}.`;
+  hint.appendChild(greeting);
+
+  const subtitle = document.createElement("p");
+  subtitle.className = "chief-empty-hint-subtitle";
+  subtitle.textContent = "Try something like:";
+  hint.appendChild(subtitle);
+
+  const chipsContainer = document.createElement("div");
+  chipsContainer.className = "chief-empty-hint-examples";
+  shuffled.forEach(ex => {
+    const chip = document.createElement("span");
+    chip.className = "chief-empty-hint-chip";
+    chip.textContent = ex;
+    chip.addEventListener("click", () => {
+      if (chatPanelInput) {
+        chatPanelInput.value = ex;
+        chatPanelInput.focus();
+      }
+    });
+    chipsContainer.appendChild(chip);
+  });
+  hint.appendChild(chipsContainer);
+
+  const footer = document.createElement("p");
+  footer.className = "chief-empty-hint-footer";
+  footer.textContent = "Type ";
+  const code = document.createElement("code");
+  code.textContent = "/help";
+  footer.appendChild(code);
+  footer.appendChild(document.createTextNode(" for a full summary of what I can do."));
+  hint.appendChild(footer);
+
+  // "Connect external tools" nudge — only when no Composio tools are installed
+  if (!caps.composioEmail && !caps.composioCalendar) {
+    const connectLine = document.createElement("p");
+    connectLine.className = "chief-empty-hint-connect";
+    const connectLink = document.createElement("a");
+    connectLink.href = "#";
+    connectLink.textContent = "Connect external tools";
+    connectLink.title = "Set up Gmail, Google Calendar, GitHub, Todoist, and more";
+    connectLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      removeEmptyStateHint();
+      const guide = [
+        "### Connect External Tools",
+        "",
+        "I can integrate with **Gmail, Google Calendar, GitHub, Todoist, Slack**, and more via [Composio](https://composio.dev).",
+        "",
+        "**Quick setup:**",
+        "",
+        "1. Create a free account at [composio.dev](https://composio.dev) and copy your API key",
+        "2. Deploy the CORS proxy — see the [setup guide](https://github.com/mlava/chief-of-staff#2-connect-composio-optional) for one-click Cloudflare deploy",
+        "3. In Roam → **Settings → Extensions → Chief of Staff**, paste your Composio API key and proxy URL",
+        "4. Open the **Command Palette** → `Chief of Staff: Install Composio Tool` → pick an app (e.g. Gmail)",
+        "5. Authenticate with the app when prompted",
+        "",
+        "Once connected, just ask me naturally — *\"check my email\"*, *\"what's on my calendar today?\"*, etc.",
+      ].join("\n");
+      appendChatPanelMessage("assistant", guide);
+    });
+    connectLine.appendChild(connectLink);
+    connectLine.appendChild(document.createTextNode(" like Gmail, Calendar, and more."));
+    hint.appendChild(connectLine);
+  }
+
+  messagesEl.appendChild(hint);
+}
+
+function removeEmptyStateHint() {
+  if (!chatPanelMessages) return;
+  const hint = chatPanelMessages.querySelector(`[${EMPTY_STATE_HINT_ATTR}]`);
+  if (hint) hint.remove();
+}
+
+// ── Activity Log Tab ────────────────────────────────────────────────
+
+function switchTab(target, els) {
+  activeTab = target;
+  const tabs = els.tabBar.querySelectorAll("[data-chief-tab]");
+  tabs.forEach(t => t.classList.toggle("chief-tab--active",
+    t.getAttribute("data-chief-tab") === target));
+
+  if (target === "chat") {
+    els.messages.style.display = "";
+    els.composer.style.display = "";
+    els.activityPanel.style.display = "none";
+  } else {
+    els.messages.style.display = "none";
+    els.composer.style.display = "none";
+    els.activityPanel.style.display = "";
+    if (!activityLogLoaded) loadActivityLog(els.activityPanel);
+  }
+}
+
+function parseAuditLogEntry(text) {
+  // Format: [[Date]] **model** (N iter, Xs, T tok, $X.XXXX) — outcome
+  const m = text.match(
+    /^\[\[([^\]]+)\]\]\s+\*\*([^*]+)\*\*\s+\((\d+)\s+iter,\s+([\d.?]+)s,\s+(\d+)\s+tok(?:,\s+([^)]+))?\)\s+\u2014\s+(.+)$/
+  );
+  if (!m) return null;
+  return {
+    date: m[1], model: m[2], iterations: parseInt(m[3], 10),
+    duration: m[4], tokens: parseInt(m[5], 10),
+    cost: m[6] || "", outcome: m[7].trim()
+  };
+}
+
+function renderActivityCard(block) {
+  const text = block.string || block.text || "";
+  const parsed = parseAuditLogEntry(text);
+  if (!parsed) {
+    const div = document.createElement("div");
+    div.classList.add("chief-activity-card");
+    div.textContent = text.slice(0, 200);
+    return div;
+  }
+
+  const card = document.createElement("div");
+  card.classList.add("chief-activity-card");
+  if (parsed.outcome.startsWith("error")) card.classList.add("chief-activity-card--error");
+  if (parsed.outcome === "cap-exceeded") card.classList.add("chief-activity-card--cap");
+
+  // Header: model + outcome badge
+  const headerLine = document.createElement("div");
+  headerLine.classList.add("chief-activity-card-header");
+  const modelSpan = document.createElement("span");
+  modelSpan.classList.add("chief-activity-model");
+  modelSpan.textContent = parsed.model;
+  headerLine.appendChild(modelSpan);
+
+  const badge = document.createElement("span");
+  badge.classList.add("chief-activity-badge");
+  if (parsed.outcome === "success") {
+    badge.textContent = "\u2713";
+    badge.classList.add("chief-activity-badge--success");
+  } else if (parsed.outcome === "cap-exceeded") {
+    badge.textContent = "cap";
+    badge.classList.add("chief-activity-badge--cap");
+  } else {
+    badge.textContent = "\u2717";
+    badge.classList.add("chief-activity-badge--error");
+  }
+  headerLine.appendChild(badge);
+  card.appendChild(headerLine);
+
+  // Stats: iter, duration, tokens, cost
+  const statsLine = document.createElement("div");
+  statsLine.classList.add("chief-activity-stats");
+  let stats = parsed.iterations + " iter \u00b7 " + parsed.duration + "s \u00b7 " + parsed.tokens + " tok";
+  if (parsed.cost) stats += " \u00b7 " + parsed.cost;
+  statsLine.textContent = stats;
+  card.appendChild(statsLine);
+
+  // Date
+  const dateLine = document.createElement("div");
+  dateLine.classList.add("chief-activity-date");
+  dateLine.textContent = parsed.date;
+  card.appendChild(dateLine);
+
+  // Child blocks: prompt and tools
+  for (const child of (block.children || [])) {
+    const childText = child.string || child.text || "";
+    if (childText.startsWith("Prompt:") || childText.startsWith("Tools:")) {
+      const detail = document.createElement("div");
+      detail.classList.add("chief-activity-detail");
+      detail.textContent = childText;
+      card.appendChild(detail);
+    }
+  }
+  return card;
+}
+
+async function loadActivityLog(container) {
+  while (container.firstChild) container.firstChild.remove();
+  const loadingMsg = document.createElement("div");
+  loadingMsg.classList.add("chief-activity-loading");
+  loadingMsg.textContent = "Loading activity log\u2026";
+  container.appendChild(loadingMsg);
+
+  try {
+    const tree = await deps.getPageTreeByTitleAsync("Chief of Staff/Audit Log");
+    if (!tree || !tree.children || tree.children.length === 0) {
+      while (container.firstChild) container.firstChild.remove();
+      const emptyMsg = document.createElement("div");
+      emptyMsg.classList.add("chief-activity-empty");
+      emptyMsg.textContent = "No activity logged yet.";
+      container.appendChild(emptyMsg);
+      activityLogLoaded = true;
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+
+    // Refresh button at top
+    const refreshRow = document.createElement("div");
+    refreshRow.classList.add("chief-activity-refresh-row");
+    const refreshBtn = document.createElement("button");
+    refreshBtn.classList.add("chief-panel-btn", "chief-activity-refresh-btn");
+    refreshBtn.textContent = "\u21bb Refresh";
+    refreshBtn.onclick = () => { activityLogLoaded = false; loadActivityLog(container); };
+    refreshRow.appendChild(refreshBtn);
+    fragment.appendChild(refreshRow);
+
+    // Render up to 50 most recent entries (page is already newest-first)
+    const entries = tree.children.slice(0, 50);
+    for (const block of entries) {
+      const card = renderActivityCard(block);
+      if (card) fragment.appendChild(card);
+    }
+    while (container.firstChild) container.firstChild.remove();
+    container.appendChild(fragment);
+    activityLogLoaded = true;
+  } catch (err) {
+    while (container.firstChild) container.firstChild.remove();
+    const errMsg = document.createElement("div");
+    errMsg.classList.add("chief-activity-empty");
+    errMsg.textContent = "Failed to load activity log.";
+    container.appendChild(errMsg);
+    deps.debugLog("[Chief flow] Activity log load error:", err);
+  }
 }
 
 // ── ensureChatPanel ─────────────────────────────────────────────────
@@ -1093,6 +1413,9 @@ export function ensureChatPanel() {
     chatPanelDragState = null;
     chatPanelIsSending = false;
     chatPanelIsOpen = false;
+    activeTab = "chat";
+    activityLogContainer = null;
+    activityLogLoaded = false;
   }
   if (chatPanelContainer) {
     refreshChatPanelElementRefs();
@@ -1113,6 +1436,9 @@ export function ensureChatPanel() {
     chatPanelDragState = null;
     chatPanelIsSending = false;
     chatPanelIsOpen = false;
+    activeTab = "chat";
+    activityLogContainer = null;
+    activityLogLoaded = false;
   }
   if (!document?.body) return null;
 
@@ -1150,10 +1476,7 @@ export function ensureChatPanel() {
   clearButton.classList.add("chief-panel-btn");
   clearButton.onclick = () => {
     clearChatPanelHistory();
-    appendChatPanelMessage(
-      "assistant",
-      "History cleared. Ask me anything and I'll continue from fresh chat history."
-    );
+    renderEmptyStateHint(chatPanelMessages, deps.getAssistantDisplayName());
   };
   headerButtons.appendChild(clearButton);
 
@@ -1224,8 +1547,38 @@ export function ensureChatPanel() {
 
   composer.appendChild(input);
   composer.appendChild(sendButton);
+
+  // Tab bar: Chat | Activity
+  const tabBar = document.createElement("div");
+  tabBar.classList.add("chief-tab-bar");
+  const chatTab = document.createElement("button");
+  chatTab.classList.add("chief-tab", "chief-tab--active");
+  chatTab.setAttribute("data-chief-tab", "chat");
+  chatTab.textContent = "Chat";
+  const activityTab = document.createElement("button");
+  activityTab.classList.add("chief-tab");
+  activityTab.setAttribute("data-chief-tab", "activity");
+  activityTab.textContent = "Activity";
+  tabBar.appendChild(chatTab);
+  tabBar.appendChild(activityTab);
+
+  const activityPanel = document.createElement("div");
+  activityPanel.classList.add("chief-activity-log");
+  activityPanel.style.display = "none";
+
+  const tabClickHandler = (e) => {
+    const tab = e.target.closest("[data-chief-tab]");
+    if (!tab) return;
+    const target = tab.getAttribute("data-chief-tab");
+    if (target === activeTab) return;
+    switchTab(target, { messages, composer, activityPanel, tabBar });
+  };
+  tabBar.addEventListener("click", tabClickHandler);
+
   container.appendChild(header);
+  container.appendChild(tabBar);
   container.appendChild(messages);
+  container.appendChild(activityPanel);
   container.appendChild(composer);
   document.body.appendChild(container);
 
@@ -1233,6 +1586,7 @@ export function ensureChatPanel() {
   chatPanelMessages = messages;
   chatPanelInput = input;
   chatPanelSendButton = sendButton;
+  activityLogContainer = activityPanel;
   chatPanelCleanupDrag = installChatPanelDragBehavior(header, container);
   chatPanelIsOpen = true;
 
@@ -1275,6 +1629,7 @@ export function ensureChatPanel() {
   chatPanelCleanupListeners = () => {
     input.removeEventListener("keydown", inputKeydownHandler);
     messages.removeEventListener("click", messagesClickHandler);
+    tabBar.removeEventListener("click", tabClickHandler);
   };
   registerChiefPanelCleanup(container, () => {
     try { chatPanelCleanupDrag?.(); } catch { /* ignore */ }
@@ -1292,9 +1647,7 @@ export function ensureChatPanel() {
     messages.appendChild(fragment);
     messages.scrollTop = messages.scrollHeight;
   } else {
-    const greeting = "Hi — ask me anything. I keep context from this session, so follow-ups work.";
-    appendChatPanelMessage("assistant", greeting);
-    appendChatPanelHistory("assistant", greeting);
+    renderEmptyStateHint(messages, assistantName);
   }
   observeCosThemeChanges();
   return chatPanelContainer;
@@ -1322,6 +1675,10 @@ export function setChatPanelOpen(nextOpen) {
   if (nextOpen) {
     clampChatPanelToViewport(panel);
     syncCosTheme();
+    // Show empty-state hint if messages area is empty (e.g. after clear + close + reopen)
+    if (chatPanelMessages && !chatPanelMessages.hasChildNodes()) {
+      renderEmptyStateHint(chatPanelMessages, deps.getAssistantDisplayName());
+    }
   }
   chatPanelIsOpen = nextOpen;
   if (nextOpen && chatPanelInput) chatPanelInput.focus();
@@ -1341,6 +1698,7 @@ export function toggleChatPanel() {
 }
 
 export function destroyChatPanel() {
+  flushPersistChatPanelHistory();
   teardownCosThemeObserver();
   unregisterChiefPanelCleanup(chatPanelContainer);
   if (chatPanelCleanupDrag) {
@@ -1592,19 +1950,111 @@ export function promptTextWithToast({
       buttons: [
         [
           "<button>" + escapedConfirmLabel + "</button>",
-          (instance, toast) => confirmAction(instance, toast),
+          (firstArg, secondArg) => { const { instance, toast } = normaliseToastContext(firstArg, secondArg); confirmAction(instance, toast); },
           true
         ],
         [
           "<button>Cancel</button>",
-          (instance, toast) => cancelAction(instance, toast)
+          (firstArg, secondArg) => { const { instance, toast } = normaliseToastContext(firstArg, secondArg); cancelAction(instance, toast); }
         ]
       ],
-      onOpening: (instance, toast) => {
+      onOpening: (firstArg, secondArg) => {
+        const { instance, toast } = normaliseToastContext(firstArg, secondArg);
         activeInstance = instance;
         activeToast = toast;
         keyboard.attach(toast);
         focusToastField(toast, "[data-chief-input]");
+      },
+      onClosing: () => {
+        keyboard.detach();
+        activeInstance = null;
+        activeToast = null;
+        finish(null);
+      }
+    });
+  });
+}
+
+export function promptTextareaWithToast({
+  title = "Chief of Staff",
+  placeholder = "Paste content here...",
+  confirmLabel = "Submit",
+  initialValue = "",
+  rows = 10
+} = {}) {
+  return new Promise((resolve) => {
+    if (!iziToast?.show) {
+      resolve(null);
+      return;
+    }
+    let resolved = false;
+    const finish = (value) => {
+      if (resolved) return;
+      resolved = true;
+      resolve(value);
+    };
+
+    const escapedValue = deps.escapeHtml(String(initialValue || ""));
+    const escapedPlaceholder = deps.escapeHtml(String(placeholder || ""));
+    const escapedConfirmLabel = deps.escapeHtml(String(confirmLabel || ""));
+    let activeInstance = null;
+    let activeToast = null;
+    const confirmAction = (instance, toast) => {
+      const textarea = toast.querySelector("[data-chief-textarea]");
+      const value = typeof textarea?.value === "string" ? textarea.value.trim() : "";
+      keyboard.detach();
+      finish(value || null);
+      hideToastSafely(instance, toast);
+    };
+    const cancelAction = (instance, toast) => {
+      keyboard.detach();
+      finish(null);
+      hideToastSafely(instance, toast);
+    };
+    // Only Escape cancels — Enter is allowed inside textarea for newlines
+    const keyboard = createToastConfirmCancelKeyboardHandlers({
+      onConfirm: () => {},
+      onCancel: () => {
+        if (!activeInstance || !activeToast) return;
+        cancelAction(activeInstance, activeToast);
+      }
+    });
+
+    iziToast.show({
+      theme: getToastTheme(),
+      title: "",
+      message: '<div style="font-size:14px;font-weight:600;margin-bottom:10px;">' + deps.escapeHtml(title) + '</div>'
+        + '<textarea data-chief-textarea rows="' + rows + '" placeholder="' + escapedPlaceholder + '" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:12px;resize:vertical;min-height:80px;padding:8px 10px;border:1px solid var(--cos-border,#ccc);border-radius:6px;">' + escapedValue + '</textarea>',
+      position: "center",
+      timeout: false,
+      close: false,
+      overlay: true,
+      drag: false,
+      maxWidth: 560,
+      buttons: [
+        [
+          "<button>" + escapedConfirmLabel + "</button>",
+          (firstArg, secondArg) => { const { instance, toast } = normaliseToastContext(firstArg, secondArg); confirmAction(instance, toast); },
+          true
+        ],
+        [
+          "<button>Cancel</button>",
+          (firstArg, secondArg) => { const { instance, toast } = normaliseToastContext(firstArg, secondArg); cancelAction(instance, toast); }
+        ]
+      ],
+      onOpening: (firstArg, secondArg) => {
+        const { instance, toast } = normaliseToastContext(firstArg, secondArg);
+        activeInstance = instance;
+        activeToast = toast;
+        // Force vertical layout: stack body sections so textarea gets full width
+        const body = toast.querySelector(".iziToast-body");
+        if (body) { body.style.flexDirection = "column"; body.style.alignItems = "stretch"; }
+        const texts = toast.querySelector(".iziToast-texts");
+        if (texts) { texts.style.width = "100%"; texts.style.marginRight = "0"; }
+        const btns = toast.querySelector(".iziToast-buttons");
+        if (btns) { btns.style.width = "100%"; btns.style.justifyContent = "flex-end"; btns.style.marginTop = "8px"; }
+        keyboard.attach(toast);
+        focusToastField(toast, "[data-chief-textarea]");
       },
       onClosing: () => {
         keyboard.detach();
@@ -1681,15 +2131,16 @@ export function promptInstalledToolSlugWithToast(
       buttons: [
         [
           "<button>" + escapedConfirmLabel + "</button>",
-          (instance, toast) => confirmAction(instance, toast),
+          (firstArg, secondArg) => { const { instance, toast } = normaliseToastContext(firstArg, secondArg); confirmAction(instance, toast); },
           true
         ],
         [
           "<button>Cancel</button>",
-          (instance, toast) => cancelAction(instance, toast)
+          (firstArg, secondArg) => { const { instance, toast } = normaliseToastContext(firstArg, secondArg); cancelAction(instance, toast); }
         ]
       ],
-      onOpening: (instance, toast) => {
+      onOpening: (firstArg, secondArg) => {
+        const { instance, toast } = normaliseToastContext(firstArg, secondArg);
         activeInstance = instance;
         activeToast = toast;
         keyboard.attach(toast);
@@ -1756,15 +2207,16 @@ export function promptToolExecutionApproval(toolName, args) {
       buttons: [
         [
           "<button>Approve</button>",
-          (instance, toast) => confirmAction(instance, toast),
+          (firstArg, secondArg) => { const { instance, toast } = normaliseToastContext(firstArg, secondArg); confirmAction(instance, toast); },
           true
         ],
         [
           "<button>Deny</button>",
-          (instance, toast) => cancelAction(instance, toast)
+          (firstArg, secondArg) => { const { instance, toast } = normaliseToastContext(firstArg, secondArg); cancelAction(instance, toast); }
         ]
       ],
-      onOpening: (instance, toast) => {
+      onOpening: (firstArg, secondArg) => {
+        const { instance, toast } = normaliseToastContext(firstArg, secondArg);
         activeInstance = instance;
         activeToast = toast;
         keyboard.attach(toast);
@@ -1826,15 +2278,16 @@ export function promptWriteToDailyPage() {
       buttons: [
         [
           "<button>Write</button>",
-          (instance, toast) => confirmAction(instance, toast),
+          (firstArg, secondArg) => { const { instance, toast } = normaliseToastContext(firstArg, secondArg); confirmAction(instance, toast); },
           true
         ],
         [
           "<button>Skip</button>",
-          (instance, toast) => cancelAction(instance, toast)
+          (firstArg, secondArg) => { const { instance, toast } = normaliseToastContext(firstArg, secondArg); cancelAction(instance, toast); }
         ]
       ],
-      onOpening: (instance, toast) => {
+      onOpening: (firstArg, secondArg) => {
+        const { instance, toast } = normaliseToastContext(firstArg, secondArg);
         activeInstance = instance;
         activeToast = toast;
         keyboard.attach(toast);
