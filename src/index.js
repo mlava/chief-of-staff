@@ -78,6 +78,12 @@ import {
   withComposioSessionArgs
 } from "./tool-execution.js";
 import {
+  LLM_API_ENDPOINTS,
+  DEFAULT_LLM_MODELS,
+  POWER_LLM_MODELS,
+  LUDICROUS_LLM_MODELS
+} from "./aibom-config.js";
+import {
   sanitiseUserContentForPrompt as sanitiseUserContentForPromptCore,
   sanitiseMarkdownHref as sanitiseMarkdownHrefCore,
   detectSystemPromptLeakage as detectSystemPromptLeakageCore,
@@ -151,25 +157,6 @@ const FAILOVER_CHAINS = {
 };
 const PROVIDER_COOLDOWN_MS = 60_000;
 const FAILOVER_CONTINUATION_MESSAGE = "Note: You are continuing a task started by another AI model which hit a temporary error. The conversation above contains all data gathered so far. Please complete the task using this context.";
-const DEFAULT_LLM_MODELS = {
-  anthropic: "claude-haiku-4-5-20251001", // $1.00 / $5.00
-  openai: "gpt-5-mini",  // $0.25 / $2.00
-  gemini: "gemini-2.5-flash",  // $0.30 / $2.50
-  mistral: "mistral-small-latest" // $0.10 / $0.30
-};
-const POWER_LLM_MODELS = {
-  anthropic: "claude-sonnet-4-6",  // $3.00 / $15.00
-  openai: "gpt-4.1",  // $2.00 / $8.00
-  gemini: "gemini-3-flash-preview",  // $0.50 / $3.00
-  mistral: "mistral-medium-latest" // $0.40 / $2.00
-};
-const LUDICROUS_LLM_MODELS = {
-  mistral: "mistral-large-2512",      // $0.50 / $1.50
-  openai: "gpt-5.2",                  // $1.75 / $14.00
-  gemini: "gemini-3.1-pro-preview-customtools",  // $2.00 / $12.00
-  anthropic: "claude-opus-4-6"        // $5.00 / $25.00
-};
-
 const LLM_MODEL_COSTS = {
   // [inputPerM, outputPerM]
   "claude-haiku-4-5-20251001": [1.00, 5.00],
@@ -228,12 +215,6 @@ const WRITE_TOOL_NAMES = new Set([
   "cos_cron_update",
   "cos_cron_delete"
 ]);
-const LLM_API_ENDPOINTS = {
-  anthropic: "https://api.anthropic.com/v1/messages",
-  openai: "https://api.openai.com/v1/chat/completions",
-  gemini: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-  mistral: "https://api.mistral.ai/v1/chat/completions"
-};
 
 /**
  * Get the proxied URL for an LLM API endpoint.
@@ -319,6 +300,7 @@ let composioAutoConnectTimeoutId = null;
 let onboardingCheckTimeoutId = null;
 let settingsPanePollId = null;
 let settingsPanePollSafetyId = null;
+let aibomRefreshTimeoutId = null;
 let conversationPersistTimeoutId = null;
 let extensionBroadcastCleanups = [];
 const localMcpAutoConnectTimerIds = new Set();
@@ -3378,6 +3360,182 @@ async function updateChiefMemory({ page, action = "append", content, block_uid }
   return { success: true, action: "appended", page: pageTitle, uid };
 }
 
+function formatAibomList(items, formatter = (v) => String(v)) {
+  if (!Array.isArray(items) || items.length === 0) return "- (none)";
+  return items.map((item) => `- ${formatter(item)}`).join("\n");
+}
+
+function buildRuntimeAibomSnapshotText() {
+  const timestamp = new Date().toISOString();
+  const selectedProvider = getSettingString(extensionAPIRef, SETTINGS_KEYS.llmProvider, DEFAULT_LLM_PROVIDER);
+  const selectedModel = getModelForProvider(selectedProvider);
+  const toolRegistry = getExtensionToolsRegistry();
+  const extEntries = Object.entries(toolRegistry)
+    .filter(([, ext]) => ext && Array.isArray(ext.tools) && ext.tools.length > 0)
+    .map(([extKey, ext]) => {
+      const extName = String(ext.name || extKey || "").trim();
+      const names = ext.tools
+        .filter((t) => t?.name)
+        .map((t) => t.name)
+        .slice(0, 25);
+      return {
+        name: extName || extKey,
+        key: extKey,
+        toolCount: ext.tools.length,
+        toolPreview: names.join(", ") + (ext.tools.length > names.length ? ", ..." : "")
+      };
+    });
+
+  const toolkitRegistry = getToolkitSchemaRegistry();
+  const toolkitEntries = Object.entries(toolkitRegistry?.toolkits || {}).map(([toolkitKey, tk]) => ({
+    key: toolkitKey,
+    name: tk?.name || toolkitKey,
+    toolCount: Object.keys(tk?.tools || {}).length,
+    discoveredAt: tk?.discoveredAt || 0
+  }));
+
+  const toolsState = extensionAPIRef ? getToolsConfigState(extensionAPIRef) : { installedTools: [] };
+  const composioInstalled = toolsState.installedTools.filter((t) => t?.installState === "installed");
+  const composioPending = toolsState.installedTools.filter((t) => t?.installState === "pending_auth");
+
+  const localServerRows = [];
+  for (const [port, entry] of localMcpClients.entries()) {
+    const serverName = entry?.serverName || `Local MCP ${port}`;
+    const serverKey = `local:${port}`;
+    const direct = Boolean(entry?.tools?.[0]?._isDirect);
+    const toolCount = Array.isArray(entry?.tools) ? entry.tools.length : 0;
+    localServerRows.push({
+      serverKey,
+      serverName,
+      direct,
+      toolCount,
+      suspended: isServerSuspended(serverKey)
+    });
+  }
+
+  const suspendedRows = Array.from(suspendedMcpServers.entries()).map(([serverKey, details]) => ({
+    serverKey,
+    summary: details?.summary || "suspended",
+    serverName: details?.serverName || serverKey
+  }));
+
+  const providerLines = Object.entries(LLM_API_ENDPOINTS).map(([provider, endpoint]) => {
+    const isSelected = provider === selectedProvider ? " (selected)" : "";
+    return `${provider}: ${endpoint}${isSelected}`;
+  });
+
+  const modelLines = [
+    `default/${selectedProvider}: ${selectedModel}`,
+    ...Object.entries(DEFAULT_LLM_MODELS).map(([provider, model]) => `mini/${provider}: ${model}`),
+    ...Object.entries(POWER_LLM_MODELS).map(([provider, model]) => `power/${provider}: ${model}`),
+    ...Object.entries(LUDICROUS_LLM_MODELS).map(([provider, model]) => `ludicrous/${provider}: ${model}`)
+  ];
+
+  const extensionLines = formatAibomList(extEntries, (ext) =>
+    `**${escapeHtml(ext.name)}** (${escapeHtml(ext.key)}) — ${ext.toolCount} tool(s)` +
+    (ext.toolPreview ? `\n  tools: ${escapeHtml(ext.toolPreview)}` : "")
+  );
+
+  const toolkitLines = formatAibomList(toolkitEntries, (tk) => {
+    const discovered = tk.discoveredAt ? new Date(tk.discoveredAt).toISOString().split("T")[0] : "unknown";
+    return `${escapeHtml(tk.name)} (${escapeHtml(tk.key)}) — ${tk.toolCount} schema tool(s), discovered ${discovered}`;
+  });
+
+  const localServerLines = formatAibomList(localServerRows, (row) =>
+    `${escapeHtml(row.serverName)} (${row.serverKey}) — ${row.toolCount} tool(s), ${row.direct ? "direct" : "routed"}${row.suspended ? ", suspended" : ""}`
+  );
+
+  const suspendedLines = formatAibomList(suspendedRows, (row) =>
+    `${escapeHtml(row.serverName)} (${row.serverKey}) — ${escapeHtml(row.summary)}`
+  );
+
+  const installedLines = formatAibomList(composioInstalled, (tool) =>
+    `${escapeHtml(tool.label || tool.slug || "unknown")} (${escapeHtml(tool.slug || "unknown")})`
+  );
+  const pendingLines = formatAibomList(composioPending, (tool) =>
+    `${escapeHtml(tool.label || tool.slug || "unknown")} (${escapeHtml(tool.slug || "unknown")})`
+  );
+
+  const totals = [
+    `extension_tools=${extEntries.reduce((sum, ext) => sum + ext.toolCount, 0)}`,
+    `composio_installed=${composioInstalled.length}`,
+    `composio_pending_auth=${composioPending.length}`,
+    `toolkits_in_registry=${toolkitEntries.length}`,
+    `local_mcp_servers=${localServerRows.length}`,
+    `suspended_mcp_servers=${suspendedRows.length}`
+  ].join(", ");
+
+  return [
+    "AIBOM Snapshot::",
+    `Generated at: ${timestamp}`,
+    "Scope: Runtime dynamic inventory (user-specific).",
+    "Static baseline: See build artifact `artifacts/aibom-static.cdx.json`.",
+    "",
+    "## LLM Providers",
+    formatAibomList(providerLines),
+    "",
+    "## LLM Models",
+    formatAibomList(modelLines),
+    "",
+    "## Composio Installed Tools",
+    installedLines,
+    "",
+    "## Composio Pending Auth",
+    pendingLines,
+    "",
+    "## Composio Toolkit Schema Registry",
+    toolkitLines,
+    "",
+    "## Local MCP Servers",
+    localServerLines,
+    "",
+    "## Suspended MCP Servers",
+    suspendedLines,
+    "",
+    "## Extension Tools API Registrations",
+    extensionLines,
+    "",
+    `Totals: ${totals}`
+  ].join("\n");
+}
+
+async function updateRuntimeAibomSnapshot() {
+  try {
+    const pageTitle = "Chief of Staff/AIBOM";
+    const pageUid = await ensurePageUidByTitle(pageTitle);
+    if (!pageUid) return;
+
+    const blockText = buildRuntimeAibomSnapshotText();
+    const api = getRoamAlphaApi();
+    const existing = api.q(`
+      [:find ?uid
+       :where [?p :node/title "${pageTitle}"]
+              [?p :block/children ?b]
+              [?b :block/string ?str]
+              [?b :block/uid ?uid]
+              [(clojure.string/starts-with? ?str "AIBOM Snapshot::")]]
+    `);
+    if (existing && existing.length > 0) {
+      await api.updateBlock({ block: { uid: existing[0][0], string: blockText } });
+      debugLog("[AIBOM] Updated runtime snapshot.");
+    } else {
+      await createRoamBlock(pageUid, blockText, 0);
+      debugLog("[AIBOM] Created runtime snapshot.");
+    }
+  } catch (e) {
+    debugLog("[AIBOM] Runtime snapshot update failed:", e?.message);
+  }
+}
+
+function scheduleRuntimeAibomRefresh(delayMs = 900) {
+  if (aibomRefreshTimeoutId) clearTimeout(aibomRefreshTimeoutId);
+  aibomRefreshTimeoutId = window.setTimeout(() => {
+    aibomRefreshTimeoutId = null;
+    if (unloadInProgress || extensionAPIRef === null) return;
+    updateRuntimeAibomSnapshot();
+  }, delayMs);
+}
+
 // Feature 1: Update AI Bill of Materials page with MCP server inventory
 async function updateMcpBom(serverKey, serverName, serverDescription, tools, pinResult, flaggedTools) {
   try {
@@ -3429,6 +3587,8 @@ async function updateMcpBom(serverKey, serverName, serverDescription, tools, pin
     }
   } catch (e) {
     debugLog(`[MCP BOM] Failed to update BOM for ${serverName}:`, e?.message);
+  } finally {
+    scheduleRuntimeAibomRefresh();
   }
 }
 
@@ -3478,6 +3638,13 @@ async function bootstrapMemoryPages() {
       lines: [
         "Connected MCP servers and their tool inventories are logged here automatically.",
         "Each entry shows server name, tool count, trust status, and last connection date."
+      ]
+    },
+    {
+      title: "Chief of Staff/AIBOM",
+      lines: [
+        "Runtime AI Bill of Materials snapshot (user-specific connected components).",
+        "Generated automatically and includes providers, models, MCP servers, Composio, and extension tool registrations."
       ]
     }
   ];
@@ -9335,6 +9502,13 @@ function registerCommandPaletteCommands(extensionAPI) {
     }
   });
   extensionAPI.ui.commandPalette.addCommand({
+    label: "Chief of Staff: Refresh AIBOM Snapshot",
+    callback: () => {
+      scheduleRuntimeAibomRefresh(50);
+      showInfoToast("AIBOM", "Refreshing runtime AIBOM snapshot.");
+    }
+  });
+  extensionAPI.ui.commandPalette.addCommand({
     label: "Chief of Staff: Review MCP Schema Changes",
     callback: async () => {
       const suspended = getSuspendedServers();
@@ -10461,6 +10635,7 @@ function onload({ extensionAPI }) {
   primeInboxStaticUIDs();
   setupExtensionBroadcastListeners();
   startCronScheduler();
+  scheduleRuntimeAibomRefresh(1200);
   // Restore chat panel if it was open before reload.
   // Blueprint.js overlays (used by Roam Settings / Depot) enforce a
   // JavaScript focus trap — anything outside the overlay DOM is
@@ -10563,6 +10738,10 @@ function onunload() {
   clearAllAuthPolls();
   invalidateInstalledToolsFetchCache();
   clearInboxCatchupScanTimer();
+  if (aibomRefreshTimeoutId) {
+    clearTimeout(aibomRefreshTimeoutId);
+    aibomRefreshTimeoutId = null;
+  }
   if (settingsPanePollId) { clearInterval(settingsPanePollId); settingsPanePollId = null; }
   if (settingsPanePollSafetyId) { clearTimeout(settingsPanePollSafetyId); settingsPanePollSafetyId = null; }
   askChiefInFlight = false;

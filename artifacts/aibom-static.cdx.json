@@ -1,0 +1,3862 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:69e4a3ef-dc61-4af2-b2c6-59343627cb8e",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-03-01T04:46:20.351Z",
+    "tools": [
+      {
+        "vendor": "chief-of-staff",
+        "name": "generate-static-aibom",
+        "version": "1.0.0"
+      }
+    ],
+    "component": {
+      "type": "application",
+      "name": "chief-of-staff",
+      "version": "1.0.0"
+    },
+    "properties": [
+      {
+        "name": "chief:aibom:scope",
+        "value": "build-time-static"
+      },
+      {
+        "name": "chief:aibom:npm-component-count",
+        "value": "220"
+      },
+      {
+        "name": "chief:aibom:ai-component-count",
+        "value": "16"
+      }
+    ]
+  },
+  "components": [
+    {
+      "type": "library",
+      "name": "@discoveryjs/json-ext",
+      "version": "0.6.3",
+      "purl": "pkg:npm/discoveryjs/json-ext@0.6.3",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@hono/node-server",
+      "version": "1.19.9",
+      "purl": "pkg:npm/hono/node-server@1.19.9",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@jridgewell/gen-mapping",
+      "version": "0.3.13",
+      "purl": "pkg:npm/jridgewell/gen-mapping@0.3.13",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@jridgewell/resolve-uri",
+      "version": "3.1.2",
+      "purl": "pkg:npm/jridgewell/resolve-uri@3.1.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@jridgewell/source-map",
+      "version": "0.3.11",
+      "purl": "pkg:npm/jridgewell/source-map@0.3.11",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@jridgewell/sourcemap-codec",
+      "version": "1.5.5",
+      "purl": "pkg:npm/jridgewell/sourcemap-codec@1.5.5",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@jridgewell/trace-mapping",
+      "version": "0.3.31",
+      "purl": "pkg:npm/jridgewell/trace-mapping@0.3.31",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@modelcontextprotocol/sdk",
+      "version": "1.26.0",
+      "purl": "pkg:npm/modelcontextprotocol/sdk@1.26.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@modelcontextprotocol/sdk",
+      "version": "3.0.1",
+      "purl": "pkg:npm/modelcontextprotocol/sdk@3.0.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@types/eslint-scope",
+      "version": "3.7.7",
+      "purl": "pkg:npm/types/eslint-scope@3.7.7",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@types/eslint",
+      "version": "9.6.1",
+      "purl": "pkg:npm/types/eslint@9.6.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@types/estree",
+      "version": "1.0.8",
+      "purl": "pkg:npm/types/estree@1.0.8",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@types/json-schema",
+      "version": "7.0.15",
+      "purl": "pkg:npm/types/json-schema@7.0.15",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@types/node",
+      "version": "25.2.3",
+      "purl": "pkg:npm/types/node@25.2.3",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@webassemblyjs/ast",
+      "version": "1.14.1",
+      "purl": "pkg:npm/webassemblyjs/ast@1.14.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@webassemblyjs/floating-point-hex-parser",
+      "version": "1.13.2",
+      "purl": "pkg:npm/webassemblyjs/floating-point-hex-parser@1.13.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@webassemblyjs/helper-api-error",
+      "version": "1.13.2",
+      "purl": "pkg:npm/webassemblyjs/helper-api-error@1.13.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@webassemblyjs/helper-buffer",
+      "version": "1.14.1",
+      "purl": "pkg:npm/webassemblyjs/helper-buffer@1.14.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@webassemblyjs/helper-numbers",
+      "version": "1.13.2",
+      "purl": "pkg:npm/webassemblyjs/helper-numbers@1.13.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@webassemblyjs/helper-wasm-bytecode",
+      "version": "1.13.2",
+      "purl": "pkg:npm/webassemblyjs/helper-wasm-bytecode@1.13.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@webassemblyjs/helper-wasm-section",
+      "version": "1.14.1",
+      "purl": "pkg:npm/webassemblyjs/helper-wasm-section@1.14.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@webassemblyjs/ieee754",
+      "version": "1.13.2",
+      "purl": "pkg:npm/webassemblyjs/ieee754@1.13.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@webassemblyjs/leb128",
+      "version": "1.13.2",
+      "purl": "pkg:npm/webassemblyjs/leb128@1.13.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@webassemblyjs/utf8",
+      "version": "1.13.2",
+      "purl": "pkg:npm/webassemblyjs/utf8@1.13.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@webassemblyjs/wasm-edit",
+      "version": "1.14.1",
+      "purl": "pkg:npm/webassemblyjs/wasm-edit@1.14.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@webassemblyjs/wasm-gen",
+      "version": "1.14.1",
+      "purl": "pkg:npm/webassemblyjs/wasm-gen@1.14.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@webassemblyjs/wasm-opt",
+      "version": "1.14.1",
+      "purl": "pkg:npm/webassemblyjs/wasm-opt@1.14.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@webassemblyjs/wasm-parser",
+      "version": "1.14.1",
+      "purl": "pkg:npm/webassemblyjs/wasm-parser@1.14.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@webassemblyjs/wast-printer",
+      "version": "1.14.1",
+      "purl": "pkg:npm/webassemblyjs/wast-printer@1.14.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@webpack-cli/configtest",
+      "version": "3.0.1",
+      "purl": "pkg:npm/webpack-cli/configtest@3.0.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@webpack-cli/info",
+      "version": "3.0.1",
+      "purl": "pkg:npm/webpack-cli/info@3.0.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@webpack-cli/serve",
+      "version": "3.0.1",
+      "purl": "pkg:npm/webpack-cli/serve@3.0.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@xtuc/ieee754",
+      "version": "1.2.0",
+      "purl": "pkg:npm/xtuc/ieee754@1.2.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@xtuc/long",
+      "version": "4.2.2",
+      "purl": "pkg:npm/xtuc/long@4.2.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "accepts",
+      "version": "1.54.0",
+      "purl": "pkg:npm/accepts@1.54.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "accepts",
+      "version": "2.0.0",
+      "purl": "pkg:npm/accepts@2.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "accepts",
+      "version": "3.0.2",
+      "purl": "pkg:npm/accepts@3.0.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "acorn-import-phases",
+      "version": "1.0.4",
+      "purl": "pkg:npm/acorn-import-phases@1.0.4",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "acorn",
+      "version": "8.15.0",
+      "purl": "pkg:npm/acorn@8.15.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "ajv-formats",
+      "version": "2.1.1",
+      "purl": "pkg:npm/ajv-formats@2.1.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "ajv-keywords",
+      "version": "5.1.0",
+      "purl": "pkg:npm/ajv-keywords@5.1.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "ajv",
+      "version": "8.17.1",
+      "purl": "pkg:npm/ajv@8.17.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "base64-js",
+      "version": "1.5.1",
+      "purl": "pkg:npm/base64-js@1.5.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "baseline-browser-mapping",
+      "version": "2.9.19",
+      "purl": "pkg:npm/baseline-browser-mapping@2.9.19",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "body-parser",
+      "version": "2.2.2",
+      "purl": "pkg:npm/body-parser@2.2.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "browserify-zlib",
+      "version": "0.2.0",
+      "purl": "pkg:npm/browserify-zlib@0.2.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "browserslist",
+      "version": "4.28.1",
+      "purl": "pkg:npm/browserslist@4.28.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "buffer-from",
+      "version": "1.1.2",
+      "purl": "pkg:npm/buffer-from@1.1.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "buffer",
+      "version": "6.0.3",
+      "purl": "pkg:npm/buffer@6.0.3",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "builtin-status-codes",
+      "version": "3.0.0",
+      "purl": "pkg:npm/builtin-status-codes@3.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "bytes",
+      "version": "3.1.2",
+      "purl": "pkg:npm/bytes@3.1.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "call-bind-apply-helpers",
+      "version": "1.0.2",
+      "purl": "pkg:npm/call-bind-apply-helpers@1.0.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "call-bound",
+      "version": "1.0.4",
+      "purl": "pkg:npm/call-bound@1.0.4",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "caniuse-lite",
+      "version": "1.0.30001769",
+      "purl": "pkg:npm/caniuse-lite@1.0.30001769",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "chrome-trace-event",
+      "version": "1.0.4",
+      "purl": "pkg:npm/chrome-trace-event@1.0.4",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "clone-deep",
+      "version": "4.0.1",
+      "purl": "pkg:npm/clone-deep@4.0.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "colorette",
+      "version": "2.0.20",
+      "purl": "pkg:npm/colorette@2.0.20",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "commander",
+      "version": "2.20.3",
+      "purl": "pkg:npm/commander@2.20.3",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "content-disposition",
+      "version": "1.0.1",
+      "purl": "pkg:npm/content-disposition@1.0.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "content-type",
+      "version": "1.0.5",
+      "purl": "pkg:npm/content-type@1.0.5",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "cookie-signature",
+      "version": "1.2.2",
+      "purl": "pkg:npm/cookie-signature@1.2.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "cookie",
+      "version": "0.7.2",
+      "purl": "pkg:npm/cookie@0.7.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "cors",
+      "version": "2.8.6",
+      "purl": "pkg:npm/cors@2.8.6",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "croner",
+      "version": "9.1.0",
+      "purl": "pkg:npm/croner@9.1.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "cross-spawn",
+      "version": "7.0.6",
+      "purl": "pkg:npm/cross-spawn@7.0.6",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "debug",
+      "version": "4.4.3",
+      "purl": "pkg:npm/debug@4.4.3",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "depd",
+      "version": "2.0.0",
+      "purl": "pkg:npm/depd@2.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "dunder-proto",
+      "version": "1.0.1",
+      "purl": "pkg:npm/dunder-proto@1.0.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "ee-first",
+      "version": "1.1.1",
+      "purl": "pkg:npm/ee-first@1.1.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "electron-to-chromium",
+      "version": "1.5.286",
+      "purl": "pkg:npm/electron-to-chromium@1.5.286",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "encodeurl",
+      "version": "2.0.0",
+      "purl": "pkg:npm/encodeurl@2.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "enhanced-resolve",
+      "version": "5.19.0",
+      "purl": "pkg:npm/enhanced-resolve@5.19.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "envinfo",
+      "version": "7.21.0",
+      "purl": "pkg:npm/envinfo@7.21.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "es-define-property",
+      "version": "1.0.1",
+      "purl": "pkg:npm/es-define-property@1.0.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "es-errors",
+      "version": "1.3.0",
+      "purl": "pkg:npm/es-errors@1.3.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "es-module-lexer",
+      "version": "2.0.0",
+      "purl": "pkg:npm/es-module-lexer@2.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "es-object-atoms",
+      "version": "1.1.1",
+      "purl": "pkg:npm/es-object-atoms@1.1.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "escalade",
+      "version": "3.2.0",
+      "purl": "pkg:npm/escalade@3.2.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "escape-html",
+      "version": "1.0.3",
+      "purl": "pkg:npm/escape-html@1.0.3",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "eslint-scope",
+      "version": "5.1.1",
+      "purl": "pkg:npm/eslint-scope@5.1.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "esrecurse",
+      "version": "4.3.0",
+      "purl": "pkg:npm/esrecurse@4.3.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "esrecurse",
+      "version": "5.3.0",
+      "purl": "pkg:npm/esrecurse@5.3.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "estraverse",
+      "version": "4.3.0",
+      "purl": "pkg:npm/estraverse@4.3.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "etag",
+      "version": "1.8.1",
+      "purl": "pkg:npm/etag@1.8.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "events",
+      "version": "3.3.0",
+      "purl": "pkg:npm/events@3.3.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "eventsource-parser",
+      "version": "3.0.6",
+      "purl": "pkg:npm/eventsource-parser@3.0.6",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "eventsource",
+      "version": "3.0.7",
+      "purl": "pkg:npm/eventsource@3.0.7",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "express-rate-limit",
+      "version": "8.2.1",
+      "purl": "pkg:npm/express-rate-limit@8.2.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "express",
+      "version": "1.54.0",
+      "purl": "pkg:npm/express@1.54.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "express",
+      "version": "3.0.2",
+      "purl": "pkg:npm/express@3.0.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "express",
+      "version": "5.2.1",
+      "purl": "pkg:npm/express@5.2.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "fast-deep-equal",
+      "version": "3.1.3",
+      "purl": "pkg:npm/fast-deep-equal@3.1.3",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "fast-uri",
+      "version": "3.1.0",
+      "purl": "pkg:npm/fast-uri@3.1.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "fastest-levenshtein",
+      "version": "1.0.16",
+      "purl": "pkg:npm/fastest-levenshtein@1.0.16",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "finalhandler",
+      "version": "2.1.1",
+      "purl": "pkg:npm/finalhandler@2.1.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "find-up",
+      "version": "4.1.0",
+      "purl": "pkg:npm/find-up@4.1.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "flat",
+      "version": "5.0.2",
+      "purl": "pkg:npm/flat@5.0.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "forwarded",
+      "version": "0.2.0",
+      "purl": "pkg:npm/forwarded@0.2.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "fresh",
+      "version": "2.0.0",
+      "purl": "pkg:npm/fresh@2.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "function-bind",
+      "version": "1.1.2",
+      "purl": "pkg:npm/function-bind@1.1.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "get-intrinsic",
+      "version": "1.3.0",
+      "purl": "pkg:npm/get-intrinsic@1.3.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "get-proto",
+      "version": "1.0.1",
+      "purl": "pkg:npm/get-proto@1.0.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "glob-to-regexp",
+      "version": "0.4.1",
+      "purl": "pkg:npm/glob-to-regexp@0.4.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "gopd",
+      "version": "1.2.0",
+      "purl": "pkg:npm/gopd@1.2.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "graceful-fs",
+      "version": "4.2.11",
+      "purl": "pkg:npm/graceful-fs@4.2.11",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "has-flag",
+      "version": "4.0.0",
+      "purl": "pkg:npm/has-flag@4.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "has-symbols",
+      "version": "1.1.0",
+      "purl": "pkg:npm/has-symbols@1.1.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "hasown",
+      "version": "2.0.2",
+      "purl": "pkg:npm/hasown@2.0.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "hono",
+      "version": "4.11.9",
+      "purl": "pkg:npm/hono@4.11.9",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "http-errors",
+      "version": "2.0.1",
+      "purl": "pkg:npm/http-errors@2.0.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "https-browserify",
+      "version": "1.0.0",
+      "purl": "pkg:npm/https-browserify@1.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "iconv-lite",
+      "version": "0.7.2",
+      "purl": "pkg:npm/iconv-lite@0.7.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "ieee754",
+      "version": "1.2.1",
+      "purl": "pkg:npm/ieee754@1.2.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "import-local",
+      "version": "3.2.0",
+      "purl": "pkg:npm/import-local@3.2.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "inherits",
+      "version": "2.0.4",
+      "purl": "pkg:npm/inherits@2.0.4",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "interpret",
+      "version": "3.1.1",
+      "purl": "pkg:npm/interpret@3.1.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "ip-address",
+      "version": "10.0.1",
+      "purl": "pkg:npm/ip-address@10.0.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "ipaddr.js",
+      "version": "1.9.1",
+      "purl": "pkg:npm/ipaddr.js@1.9.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "is-core-module",
+      "version": "2.16.1",
+      "purl": "pkg:npm/is-core-module@2.16.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "is-plain-object",
+      "version": "2.0.4",
+      "purl": "pkg:npm/is-plain-object@2.0.4",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "is-promise",
+      "version": "4.0.0",
+      "purl": "pkg:npm/is-promise@4.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "isexe",
+      "version": "2.0.0",
+      "purl": "pkg:npm/isexe@2.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "isobject",
+      "version": "3.0.1",
+      "purl": "pkg:npm/isobject@3.0.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "izitoast",
+      "version": "1.4.0",
+      "purl": "pkg:npm/izitoast@1.4.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "jest-worker",
+      "version": "27.5.1",
+      "purl": "pkg:npm/jest-worker@27.5.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "jose",
+      "version": "6.1.3",
+      "purl": "pkg:npm/jose@6.1.3",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "json-parse-even-better-errors",
+      "version": "2.3.1",
+      "purl": "pkg:npm/json-parse-even-better-errors@2.3.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "json-schema-traverse",
+      "version": "1.0.0",
+      "purl": "pkg:npm/json-schema-traverse@1.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "json-schema-typed",
+      "version": "8.0.2",
+      "purl": "pkg:npm/json-schema-typed@8.0.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "kind-of",
+      "version": "6.0.3",
+      "purl": "pkg:npm/kind-of@6.0.3",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "loader-runner",
+      "version": "4.3.1",
+      "purl": "pkg:npm/loader-runner@4.3.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "locate-path",
+      "version": "5.0.0",
+      "purl": "pkg:npm/locate-path@5.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "math-intrinsics",
+      "version": "1.1.0",
+      "purl": "pkg:npm/math-intrinsics@1.1.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "media-typer",
+      "version": "1.1.0",
+      "purl": "pkg:npm/media-typer@1.1.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "merge-descriptors",
+      "version": "2.0.0",
+      "purl": "pkg:npm/merge-descriptors@2.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "merge-stream",
+      "version": "2.0.0",
+      "purl": "pkg:npm/merge-stream@2.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "mime-db",
+      "version": "1.52.0",
+      "purl": "pkg:npm/mime-db@1.52.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "mime-types",
+      "version": "2.1.35",
+      "purl": "pkg:npm/mime-types@2.1.35",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "ms",
+      "version": "2.1.3",
+      "purl": "pkg:npm/ms@2.1.3",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "negotiator",
+      "version": "1.0.0",
+      "purl": "pkg:npm/negotiator@1.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "neo-async",
+      "version": "2.6.2",
+      "purl": "pkg:npm/neo-async@2.6.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "node-releases",
+      "version": "2.0.27",
+      "purl": "pkg:npm/node-releases@2.0.27",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "object-assign",
+      "version": "4.1.1",
+      "purl": "pkg:npm/object-assign@4.1.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "object-inspect",
+      "version": "1.13.4",
+      "purl": "pkg:npm/object-inspect@1.13.4",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "on-finished",
+      "version": "2.4.1",
+      "purl": "pkg:npm/on-finished@2.4.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "once",
+      "version": "1.4.0",
+      "purl": "pkg:npm/once@1.4.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "p-limit",
+      "version": "2.3.0",
+      "purl": "pkg:npm/p-limit@2.3.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "p-locate",
+      "version": "4.1.0",
+      "purl": "pkg:npm/p-locate@4.1.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "p-try",
+      "version": "2.2.0",
+      "purl": "pkg:npm/p-try@2.2.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "pako",
+      "version": "1.0.11",
+      "purl": "pkg:npm/pako@1.0.11",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "parseurl",
+      "version": "1.3.3",
+      "purl": "pkg:npm/parseurl@1.3.3",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "path-exists",
+      "version": "4.0.0",
+      "purl": "pkg:npm/path-exists@4.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "path-key",
+      "version": "3.1.1",
+      "purl": "pkg:npm/path-key@3.1.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "path-parse",
+      "version": "1.0.7",
+      "purl": "pkg:npm/path-parse@1.0.7",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "path-to-regexp",
+      "version": "8.3.0",
+      "purl": "pkg:npm/path-to-regexp@8.3.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "picocolors",
+      "version": "1.1.1",
+      "purl": "pkg:npm/picocolors@1.1.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "pkce-challenge",
+      "version": "5.0.1",
+      "purl": "pkg:npm/pkce-challenge@5.0.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "pkg-dir",
+      "version": "4.2.0",
+      "purl": "pkg:npm/pkg-dir@4.2.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "proxy-addr",
+      "version": "2.0.7",
+      "purl": "pkg:npm/proxy-addr@2.0.7",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "punycode",
+      "version": "1.4.1",
+      "purl": "pkg:npm/punycode@1.4.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "qs",
+      "version": "6.14.1",
+      "purl": "pkg:npm/qs@6.14.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "randombytes",
+      "version": "2.1.0",
+      "purl": "pkg:npm/randombytes@2.1.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "range-parser",
+      "version": "1.2.1",
+      "purl": "pkg:npm/range-parser@1.2.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "raw-body",
+      "version": "3.0.2",
+      "purl": "pkg:npm/raw-body@3.0.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "readable-stream",
+      "version": "3.6.2",
+      "purl": "pkg:npm/readable-stream@3.6.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "rechoir",
+      "version": "0.8.0",
+      "purl": "pkg:npm/rechoir@0.8.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "require-from-string",
+      "version": "2.0.2",
+      "purl": "pkg:npm/require-from-string@2.0.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "resolve-cwd",
+      "version": "3.0.0",
+      "purl": "pkg:npm/resolve-cwd@3.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "resolve-from",
+      "version": "5.0.0",
+      "purl": "pkg:npm/resolve-from@5.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "resolve",
+      "version": "1.22.11",
+      "purl": "pkg:npm/resolve@1.22.11",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "router",
+      "version": "2.2.0",
+      "purl": "pkg:npm/router@2.2.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "safe-buffer",
+      "version": "5.2.1",
+      "purl": "pkg:npm/safe-buffer@5.2.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "safer-buffer",
+      "version": "2.1.2",
+      "purl": "pkg:npm/safer-buffer@2.1.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "schema-utils",
+      "version": "4.3.3",
+      "purl": "pkg:npm/schema-utils@4.3.3",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "send",
+      "version": "1.2.1",
+      "purl": "pkg:npm/send@1.2.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "send",
+      "version": "1.54.0",
+      "purl": "pkg:npm/send@1.54.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "send",
+      "version": "3.0.2",
+      "purl": "pkg:npm/send@3.0.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "serialize-javascript",
+      "version": "6.0.2",
+      "purl": "pkg:npm/serialize-javascript@6.0.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "serve-static",
+      "version": "2.2.1",
+      "purl": "pkg:npm/serve-static@2.2.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "setprototypeof",
+      "version": "1.2.0",
+      "purl": "pkg:npm/setprototypeof@1.2.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "shallow-clone",
+      "version": "3.0.1",
+      "purl": "pkg:npm/shallow-clone@3.0.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "shebang-command",
+      "version": "2.0.0",
+      "purl": "pkg:npm/shebang-command@2.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "shebang-regex",
+      "version": "3.0.0",
+      "purl": "pkg:npm/shebang-regex@3.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "side-channel-list",
+      "version": "1.0.0",
+      "purl": "pkg:npm/side-channel-list@1.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "side-channel-map",
+      "version": "1.0.1",
+      "purl": "pkg:npm/side-channel-map@1.0.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "side-channel-weakmap",
+      "version": "1.0.2",
+      "purl": "pkg:npm/side-channel-weakmap@1.0.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "side-channel",
+      "version": "1.1.0",
+      "purl": "pkg:npm/side-channel@1.1.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "source-map-support",
+      "version": "0.5.21",
+      "purl": "pkg:npm/source-map-support@0.5.21",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "source-map",
+      "version": "0.6.1",
+      "purl": "pkg:npm/source-map@0.6.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "statuses",
+      "version": "2.0.2",
+      "purl": "pkg:npm/statuses@2.0.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "stream-browserify",
+      "version": "3.0.0",
+      "purl": "pkg:npm/stream-browserify@3.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "stream-http",
+      "version": "3.2.0",
+      "purl": "pkg:npm/stream-http@3.2.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "string_decoder",
+      "version": "1.3.0",
+      "purl": "pkg:npm/string_decoder@1.3.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "supports-color",
+      "version": "8.1.1",
+      "purl": "pkg:npm/supports-color@8.1.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "supports-preserve-symlinks-flag",
+      "version": "1.0.0",
+      "purl": "pkg:npm/supports-preserve-symlinks-flag@1.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "tapable",
+      "version": "2.3.0",
+      "purl": "pkg:npm/tapable@2.3.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "terser-webpack-plugin",
+      "version": "5.3.16",
+      "purl": "pkg:npm/terser-webpack-plugin@5.3.16",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "terser",
+      "version": "5.46.0",
+      "purl": "pkg:npm/terser@5.46.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "toidentifier",
+      "version": "1.0.1",
+      "purl": "pkg:npm/toidentifier@1.0.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "type-is",
+      "version": "1.54.0",
+      "purl": "pkg:npm/type-is@1.54.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "type-is",
+      "version": "2.0.1",
+      "purl": "pkg:npm/type-is@2.0.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "type-is",
+      "version": "3.0.2",
+      "purl": "pkg:npm/type-is@3.0.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "undici-types",
+      "version": "7.16.0",
+      "purl": "pkg:npm/undici-types@7.16.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "unpipe",
+      "version": "1.0.0",
+      "purl": "pkg:npm/unpipe@1.0.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "update-browserslist-db",
+      "version": "1.2.3",
+      "purl": "pkg:npm/update-browserslist-db@1.2.3",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "url",
+      "version": "0.11.4",
+      "purl": "pkg:npm/url@0.11.4",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "util-deprecate",
+      "version": "1.0.2",
+      "purl": "pkg:npm/util-deprecate@1.0.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "vary",
+      "version": "1.1.2",
+      "purl": "pkg:npm/vary@1.1.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "watchpack",
+      "version": "2.5.1",
+      "purl": "pkg:npm/watchpack@2.5.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "webpack-cli",
+      "version": "12.1.0",
+      "purl": "pkg:npm/webpack-cli@12.1.0",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "webpack-cli",
+      "version": "6.0.1",
+      "purl": "pkg:npm/webpack-cli@6.0.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "webpack-merge",
+      "version": "6.0.1",
+      "purl": "pkg:npm/webpack-merge@6.0.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "webpack-sources",
+      "version": "3.3.3",
+      "purl": "pkg:npm/webpack-sources@3.3.3",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "webpack",
+      "version": "5.105.1",
+      "purl": "pkg:npm/webpack@5.105.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "which",
+      "version": "2.0.2",
+      "purl": "pkg:npm/which@2.0.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "wildcard",
+      "version": "2.0.1",
+      "purl": "pkg:npm/wildcard@2.0.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "wrappy",
+      "version": "1.0.2",
+      "purl": "pkg:npm/wrappy@1.0.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "xtend",
+      "version": "4.0.2",
+      "purl": "pkg:npm/xtend@4.0.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "zod-to-json-schema",
+      "version": "3.25.1",
+      "purl": "pkg:npm/zod-to-json-schema@3.25.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "zod",
+      "version": "4.3.6",
+      "purl": "pkg:npm/zod@4.3.6",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "chief:aibom:dev",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "service",
+      "name": "llm-endpoint/anthropic",
+      "version": "runtime-config",
+      "description": "https://api.anthropic.com/v1/messages",
+      "endpoints": [
+        "https://api.anthropic.com/v1/messages"
+      ],
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-endpoint"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "anthropic"
+        }
+      ]
+    },
+    {
+      "type": "service",
+      "name": "llm-endpoint/openai",
+      "version": "runtime-config",
+      "description": "https://api.openai.com/v1/chat/completions",
+      "endpoints": [
+        "https://api.openai.com/v1/chat/completions"
+      ],
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-endpoint"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "openai"
+        }
+      ]
+    },
+    {
+      "type": "service",
+      "name": "llm-endpoint/gemini",
+      "version": "runtime-config",
+      "description": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+      "endpoints": [
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+      ],
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-endpoint"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "gemini"
+        }
+      ]
+    },
+    {
+      "type": "service",
+      "name": "llm-endpoint/mistral",
+      "version": "runtime-config",
+      "description": "https://api.mistral.ai/v1/chat/completions",
+      "endpoints": [
+        "https://api.mistral.ai/v1/chat/completions"
+      ],
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-endpoint"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "mistral"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/anthropic/mini",
+      "version": "claude-haiku-4-5-20251001",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "anthropic"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "mini"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/openai/mini",
+      "version": "gpt-5-mini",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "openai"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "mini"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/gemini/mini",
+      "version": "gemini-2.5-flash",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "gemini"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "mini"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/mistral/mini",
+      "version": "mistral-small-latest",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "mistral"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "mini"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/anthropic/power",
+      "version": "claude-sonnet-4-6",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "anthropic"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "power"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/openai/power",
+      "version": "gpt-4.1",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "openai"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "power"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/gemini/power",
+      "version": "gemini-3-flash-preview",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "gemini"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "power"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/mistral/power",
+      "version": "mistral-medium-latest",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "mistral"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "power"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/mistral/ludicrous",
+      "version": "mistral-large-2512",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "mistral"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "ludicrous"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/openai/ludicrous",
+      "version": "gpt-5.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "openai"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "ludicrous"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/gemini/ludicrous",
+      "version": "gemini-3.1-pro-preview-customtools",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "gemini"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "ludicrous"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/anthropic/ludicrous",
+      "version": "claude-opus-4-6",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "anthropic"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "ludicrous"
+        }
+      ]
+    }
+  ],
+  "dependencies": []
+}

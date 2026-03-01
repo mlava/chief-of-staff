@@ -6,7 +6,7 @@ on:
 
 jobs:
   build-secure:
-    name: Security Tests + Build
+    name: Security Tests + Build + AIBOM
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -23,5 +23,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run security tests and build
+      - name: Run secure CI pipeline
         run: npm run build:secure
+
+      - name: Upload static AIBOM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: aibom-static
+          path: |
+            artifacts/aibom-static.cdx.json
+            artifacts/aibom-static.baseline.json
