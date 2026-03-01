@@ -17,9 +17,9 @@ Seven key frameworks and resources specifically addressing AI agent security for
 | # | Framework | Source | Agent Dev Focus | URL |
 |---|-----------|--------|-----------------|-----|
 | 1 | **OWASP Top 10 for Agentic Applications (2026)** | OWASP | 10 highest-impact risks for autonomous agents with actionable mitigations | [Link](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) |
-| 2 | **OWASP Agentic AI Threats & Mitigations (v1.1)** | OWASP | Foundational taxonomy of agent threats; baseline definitions and detailed treatment | [Link](https://genai.owasp.org/) |
-| 3 | **OWASP Securing Agentic Applications Guide** | OWASP | Architecture, design, development, and deployment security patterns | [Link](https://genai.owasp.org/) |
-| 4 | **OWASP Agentic Threat Modelling Guide** | OWASP | Structured threat modelling methodology for agentic systems | [Link](https://genai.owasp.org/) |
+| 2 | **OWASP Agentic AI Threats & Mitigations (v1.1)** | OWASP | Foundational taxonomy of agent threats; baseline definitions and detailed treatment | [Link](https://genai.owasp.org/resource/agentic-ai-threats-and-mitigations/) |
+| 3 | **OWASP Securing Agentic Applications Guide** | OWASP | Architecture, design, development, and deployment security patterns | [Link](https://genai.owasp.org/resource/securing-agentic-applications-guide-1-0/) |
+| 4 | **OWASP Agentic Threat Modelling Guide** | OWASP | Structured threat modelling methodology for agentic systems | [Link](https://genai.owasp.org/resource/multi-agentic-system-threat-modeling-guide-v1-0/) |
 | 5 | **Google Secure AI Agents Whitepaper** | Google | Hybrid defense-in-depth: runtime policy engines + reasoning-based defenses | [Link](https://storage.googleapis.com/gweb-research2023-media/pubtools/1018686.pdf) |
 | 6 | **NIST AI Agent Standards Initiative** | NIST | Agent standards, protocol development, security & identity research | [Link](https://www.nist.gov/news-events/news/2026/02/announcing-ai-agent-standards-initiative-interoperable-and-secure) |
 | 7 | **MITRE ATLAS Agentic Techniques** | MITRE | 14 new adversarial techniques for AI agents (Oct 2025 update) | [Link](https://atlas.mitre.org/) |
@@ -136,3 +136,47 @@ Synthesised from all seven frameworks above. Organised by development phase. Use
 | **ASI08** | Cascading Failures | Plan for cascading failure, Replay agent sessions |
 | **ASI09** | Human-Agent Trust Exploitation | Design for human oversight, Test trust exploitation scenarios |
 | **ASI10** | Rogue Agents | Behavioural monitoring, Configure kill switches, Regression tests |
+
+---
+
+## Part 3: Source Documents & Downloads
+
+Direct links to primary source documents referenced throughout this guide. Organised by publisher.
+
+### OWASP
+
+| Document | Format | URL |
+|----------|--------|-----|
+| Top 10 for Agentic Applications (2026) | Web | [genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) |
+| Agentic AI Threats & Mitigations (v1.1) | Web | [genai.owasp.org/resource/agentic-ai-threats-and-mitigations/](https://genai.owasp.org/resource/agentic-ai-threats-and-mitigations/) |
+| Agentic AI Threats & Mitigations (v1.0.1) | PDF | [hal.science/hal-04985337v1/file/Agentic-AI-Threats-and-Mitigations_v1.0.1.pdf](https://hal.science/hal-04985337v1/file/Agentic-AI-Threats-and-Mitigations_v1.0.1.pdf) |
+| Securing Agentic Applications Guide (1.0) | Web | [genai.owasp.org/resource/securing-agentic-applications-guide-1-0/](https://genai.owasp.org/resource/securing-agentic-applications-guide-1-0/) |
+| Agentic Threat Modelling Guide (1.0) | Web | [genai.owasp.org/resource/multi-agentic-system-threat-modeling-guide-v1-0/](https://genai.owasp.org/resource/multi-agentic-system-threat-modeling-guide-v1-0/) |
+| Top 10 for LLM Applications (2025) | PDF | [owasp.org/.../OWASP-Top-10-for-LLMs-v2025.pdf](https://owasp.org/www-project-top-10-for-large-language-model-applications/assets/PDF/OWASP-Top-10-for-LLMs-v2025.pdf) |
+| OWASP GenAI Hub | Web | [genai.owasp.org](https://genai.owasp.org/) |
+
+### Google
+
+| Document | Format | URL |
+|----------|--------|-----|
+| Secure AI Agents Whitepaper (May 2025) | PDF | [storage.googleapis.com/.../pubtools/1018686.pdf](https://storage.googleapis.com/gweb-research2023-media/pubtools/1018686.pdf) |
+| Secure AI Agents — Research summary | Web | [research.google/pubs/an-introduction-to-googles-approach-for-secure-ai-agents/](https://research.google/pubs/an-introduction-to-googles-approach-for-secure-ai-agents/) |
+| Secure AI Framework (SAIF) hub | Web | [saif.google](https://saif.google/) |
+| SAIF Cloud Implementation Guide | PDF | [services.google.com/.../ociso_2025_saif_cloud_paper.pdf](https://services.google.com/fh/files/misc/ociso_2025_saif_cloud_paper.pdf) |
+
+### NIST
+
+| Document | Format | URL |
+|----------|--------|-----|
+| AI Agent Standards Initiative announcement | Web | [nist.gov/.../announcing-ai-agent-standards-initiative...](https://www.nist.gov/news-events/news/2026/02/announcing-ai-agent-standards-initiative-interoperable-and-secure) |
+| CAISI AI Agent Standards Initiative | Web | [nist.gov/caisi/ai-agent-standards-initiative](https://www.nist.gov/caisi/ai-agent-standards-initiative) |
+| AI Risk Management Framework 1.0 (AI 100-1) | PDF | [nvlpubs.nist.gov/.../nist.ai.100-1.pdf](https://nvlpubs.nist.gov/nistpubs/ai/nist.ai.100-1.pdf) |
+| Generative AI Profile (AI 600-1) | PDF | [nvlpubs.nist.gov/.../NIST.AI.600-1.pdf](https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.600-1.pdf) |
+
+### MITRE
+
+| Document | Format | URL |
+|----------|--------|-----|
+| ATLAS Knowledge Base | Web | [atlas.mitre.org](https://atlas.mitre.org/) |
+| ATLAS Fact Sheet | PDF | [atlas.mitre.org/pdf-files/MITRE_ATLAS_Fact_Sheet.pdf](https://atlas.mitre.org/pdf-files/MITRE_ATLAS_Fact_Sheet.pdf) |
+| ATLAS Overview (NIST presentation, Sep 2025) | PDF | [csrc.nist.gov/.../MITRE ATLAS Overview Sept 2025.pdf](https://csrc.nist.gov/csrc/media/Presentations/2025/mitre-atlas/TuePM2.1-MITRE%20ATLAS%20Overview%20Sept%202025.pdf) |
