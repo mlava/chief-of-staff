@@ -77,6 +77,15 @@ import {
   extractComposioSessionIdFromToolResult,
   withComposioSessionArgs
 } from "./tool-execution.js";
+import {
+  sanitiseUserContentForPrompt as sanitiseUserContentForPromptCore,
+  sanitiseMarkdownHref as sanitiseMarkdownHrefCore,
+  detectSystemPromptLeakage as detectSystemPromptLeakageCore,
+  detectClaimedActionWithoutToolCall as detectClaimedActionWithoutToolCallCore,
+  guardMemoryWriteCore,
+  scanToolDescriptionsCore,
+  checkSchemaPinCore
+} from "./security-core.js";
 
 const DEFAULT_COMPOSIO_MCP_URL = "enter your composio mcp url here";
 const DEFAULT_COMPOSIO_API_KEY = "enter your composio api key here";
@@ -1090,24 +1099,11 @@ function detectMemoryInjection(text) {
 }
 
 function guardMemoryWrite(content, page, action) {
-  const result = detectMemoryInjection(content);
-  if (!result.flagged) return { allowed: true };
-
-  debugLog(
-    `[Chief security] DD-1 memory injection guard blocked write to "${page}" (${action}):`,
-    result.allPatterns.join(", "),
-    "| content preview:", String(content).slice(0, 200)
-  );
-  recordUsageStat("memoryWriteBlocks");
-
-  return {
-    allowed: false,
-    reason: `Memory write blocked — content contains patterns that resemble prompt injection or persistent behaviour manipulation (${result.allPatterns.join(", ")}). ` +
-      `Memory content is loaded into every system prompt, so malicious content here would permanently alter agent behaviour. ` +
-      `Please reformulate the content as plain factual information without directive language (avoid "always", "never", "skip approval", "when you see X do Y", etc.). ` +
-      `If the user explicitly asked for this exact wording, explain why it was flagged and ask them to rephrase.`,
-    matchedPatterns: result.allPatterns
-  };
+  return guardMemoryWriteCore(content, page, action, {
+    detectMemoryInjectionFn: detectMemoryInjection,
+    debugLog,
+    recordUsageStat
+  });
 }
 
 // Enhanced wrapUntrusted: detects injection patterns and prepends a warning
@@ -1131,67 +1127,11 @@ function wrapUntrustedWithInjectionScan(source, content) {
 // ─── MCP Supply Chain Hardening ───────────────────────────────────────────────
 // Feature 3: Scan MCP tool descriptions for injection patterns at connection time
 function scanToolDescriptions(tools, serverName) {
-  const flagged = [];
-
-  // Recursively extract all scannable text from a JSON Schema node
-  function extractSchemaText(schema, path) {
-    if (!schema || typeof schema !== "object") return;
-    // Direct text fields
-    const textParts = [
-      schema.description,
-      schema.title,
-      ...(Array.isArray(schema.enum) ? schema.enum.filter(v => typeof v === "string") : []),
-      ...(Array.isArray(schema.examples) ? schema.examples.filter(v => typeof v === "string") : []),
-      typeof schema.default === "string" ? schema.default : null,
-      typeof schema.const === "string" ? schema.const : null
-    ].filter(Boolean);
-    if (textParts.length > 0) {
-      const combinedText = textParts.join(" ");
-      const result = detectInjectionPatterns(combinedText);
-      if (result.flagged) {
-        flagged.push({ name: path, patterns: result.patterns });
-      }
-    }
-    // Recurse into properties
-    if (schema.properties) {
-      for (const [key, prop] of Object.entries(schema.properties)) {
-        extractSchemaText(prop, `${path}.${key}`);
-      }
-    }
-    // Recurse into items (array schemas)
-    if (schema.items) {
-      extractSchemaText(schema.items, `${path}[items]`);
-    }
-    // Recurse into oneOf/anyOf/allOf variants
-    for (const combiner of ["oneOf", "anyOf", "allOf"]) {
-      if (Array.isArray(schema[combiner])) {
-        schema[combiner].forEach((variant, i) => {
-          extractSchemaText(variant, `${path}.${combiner}[${i}]`);
-        });
-      }
-    }
-    // Recurse into additionalProperties if it's a schema
-    if (schema.additionalProperties && typeof schema.additionalProperties === "object") {
-      extractSchemaText(schema.additionalProperties, `${path}[additionalProperties]`);
-    }
-  }
-
-  for (const tool of tools) {
-    // Scan top-level tool description
-    const descResult = detectInjectionPatterns(tool.description || "");
-    if (descResult.flagged) {
-      flagged.push({ name: tool.name, patterns: descResult.patterns });
-    }
-    // Deep-scan the full input schema tree
-    const schema = tool.input_schema || tool.inputSchema || {};
-    extractSchemaText(schema, tool.name);
-  }
-  if (flagged.length > 0) {
-    const names = [...new Set(flagged.map(f => f.name.split(".")[0]))].join(", ");
-    showErrorToast("MCP injection risk", `${serverName}: suspicious patterns in ${names}`);
-    debugLog(`[MCP Security] Injection patterns in ${serverName}:`, flagged);
-  }
-  return flagged;
+  return scanToolDescriptionsCore(tools, serverName, {
+    detectInjectionPatternsFn: detectInjectionPatterns,
+    showErrorToast,
+    debugLog
+  });
 }
 
 // Feature 2: Hash tool schemas for drift detection across connections
@@ -1244,81 +1184,22 @@ async function computeSchemaHash(tools) {
 }
 
 async function checkSchemaPin(serverKey, tools, serverName) {
-  const newHash = await computeSchemaHash(tools);
-  const stored = extensionAPIRef.settings.get(SETTINGS_KEYS.mcpSchemaHashes) || {};
-  const oldHash = stored[serverKey];
-
-  // Build per-tool fingerprints for granular diff detection
-  const newToolFingerprints = {};
-  for (const t of tools) {
-    const schema = t.input_schema || t.inputSchema || {};
-    const paramKeys = Object.keys(schema.properties || {}).sort().join(",");
-    const paramTypes = Object.entries(schema.properties || {}).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}:${v.type || "any"}`).join(",");
-    const descSnippet = (t.description || "").slice(0, 200);
-    newToolFingerprints[t.name] = { paramKeys, paramTypes, descSnippet };
-  }
-
-  if (!oldHash) {
-    // First connection — pin the schema
-    stored[serverKey] = newHash;
-    stored[`${serverKey}_tools`] = tools.map(t => t.name);
-    stored[`${serverKey}_fingerprints`] = newToolFingerprints;
-    extensionAPIRef.settings.set(SETTINGS_KEYS.mcpSchemaHashes, stored);
-    debugLog(`[MCP Security] Schema pinned for ${serverName}: ${newHash.slice(0, 12)}…`);
-    return { status: "pinned", hash: newHash };
-  }
-
-  if (oldHash === newHash) {
-    debugLog(`[MCP Security] Schema unchanged for ${serverName}`);
-    return { status: "unchanged", hash: newHash };
-  }
-
-  // Schema changed — compute granular diff
-  const oldToolNames = stored[`${serverKey}_tools`] || [];
-  const oldFingerprints = stored[`${serverKey}_fingerprints`] || {};
-  const newToolNames = tools.map(t => t.name);
-  const added = newToolNames.filter(n => !oldToolNames.includes(n));
-  const removed = oldToolNames.filter(n => !newToolNames.includes(n));
-
-  // Detect modifications to existing tools (description rewrites, param changes)
-  const modified = [];
-  for (const name of newToolNames) {
-    if (added.includes(name)) continue; // new tool, not a modification
-    const oldFp = oldFingerprints[name];
-    const newFp = newToolFingerprints[name];
-    if (!oldFp || !newFp) continue;
-    const changes = [];
-    if (oldFp.descSnippet !== newFp.descSnippet) changes.push("description");
-    if (oldFp.paramKeys !== newFp.paramKeys) changes.push("parameters");
-    if (oldFp.paramTypes !== newFp.paramTypes) changes.push("param types");
-    if (changes.length > 0) modified.push({ name, changes });
-  }
-
-  const parts = [];
-  if (added.length) parts.push(`+${added.length} new`);
-  if (removed.length) parts.push(`-${removed.length} removed`);
-  if (modified.length) parts.push(`~${modified.length} modified`);
-  const summary = parts.join(", ") || "unknown change";
-
-  debugLog(`[MCP Security] Schema drift for ${serverName}:`, { added, removed, modified, oldHash: oldHash.slice(0, 12), newHash: newHash.slice(0, 12) });
-
-  // Suspend the server — do NOT update pin until user accepts
-  suspendMcpServer(serverKey, {
-    newHash,
-    newToolNames,
-    newFingerprints: newToolFingerprints,
-    added,
-    removed,
-    modified,
-    summary,
-    serverName,
+  const result = await checkSchemaPinCore(serverKey, tools, serverName, {
+    computeSchemaHash: (inputTools) => computeSchemaHash(inputTools),
+    settingsGet: (key) => extensionAPIRef.settings.get(key),
+    settingsSet: (key, value) => extensionAPIRef.settings.set(key, value),
+    settingsKey: SETTINGS_KEYS.mcpSchemaHashes,
+    debugLog,
+    suspendMcpServer
   });
+
+  if (result.status !== "changed") return result;
 
   // Show persistent toast with Accept / Reject actions
   const diffLines = [];
-  if (added.length) diffLines.push(`<b>Added:</b> ${added.map(n => escapeHtml(n)).join(", ")}`);
-  if (removed.length) diffLines.push(`<b>Removed:</b> ${removed.map(n => escapeHtml(n)).join(", ")}`);
-  if (modified.length) diffLines.push(`<b>Modified:</b> ${modified.map(m => `${escapeHtml(m.name)} (${m.changes.join(", ")})`).join("; ")}`);
+  if (result.added.length) diffLines.push(`<b>Added:</b> ${result.added.map(n => escapeHtml(n)).join(", ")}`);
+  if (result.removed.length) diffLines.push(`<b>Removed:</b> ${result.removed.map(n => escapeHtml(n)).join(", ")}`);
+  if (result.modified.length) diffLines.push(`<b>Modified:</b> ${result.modified.map(m => `${escapeHtml(m.name)} (${m.changes.join(", ")})`).join("; ")}`);
   const diffHtml = diffLines.join("<br>") || "Schema hash changed";
 
   iziToast.show({
@@ -1351,7 +1232,7 @@ async function checkSchemaPin(serverKey, tools, serverName) {
     ]
   });
 
-  return { status: "changed", hash: newHash, added, removed, modified, suspended: true };
+  return result;
 }
 
 // ─── DD-2: LLM Control-String Blocklist ───────────────────────────────────────
@@ -1413,24 +1294,11 @@ function detectPlatform() {
 const PROMPT_BOUNDARY_TAG_RE = /<\s*\/?\s*(system|human|assistant|user|tool_use|tool_result|function_call|function_response|instructions|prompt|messages?|anthropic|openai|im_start|im_end|endoftext)\b[^>]*>/gi;
 
 function sanitiseUserContentForPrompt(text) {
-  if (!text) return "";
-  return String(text).replace(PROMPT_BOUNDARY_TAG_RE, (match) =>
-    match.replace(/</g, "\uFF1C").replace(/>/g, "\uFF1E")
-  );
+  return sanitiseUserContentForPromptCore(text);
 }
 
 function sanitiseMarkdownHref(href) {
-  const value = String(href || "").trim();
-  if (!value) return "#";
-  // Decode first to catch encoded bypass attempts (e.g. java%73cript:)
-  let decoded;
-  try { decoded = decodeURIComponent(value); } catch { decoded = value; }
-  const lower = decoded.toLowerCase().trim();
-  if (lower.startsWith("javascript:") || lower.startsWith("data:") || lower.startsWith("vbscript:")) return "#";
-  if (lower.startsWith("http://") || lower.startsWith("https://") || lower.startsWith("mailto:")) {
-    return escapeHtml(value);
-  }
-  return "#";
+  return sanitiseMarkdownHrefCore(href);
 }
 
 function renderInlineMarkdown(text) {
@@ -5016,19 +4884,7 @@ const SYSTEM_PROMPT_FINGERPRINTS = [
 const LEAKAGE_DETECTION_THRESHOLD = 3;
 
 function detectSystemPromptLeakage(text) {
-  if (!text || typeof text !== "string") return { leaked: false, matchCount: 0, matches: [] };
-  const lower = text.toLowerCase();
-  const matches = [];
-  for (const fp of SYSTEM_PROMPT_FINGERPRINTS) {
-    if (lower.includes(fp.toLowerCase())) {
-      matches.push(fp);
-    }
-  }
-  return {
-    leaked: matches.length >= LEAKAGE_DETECTION_THRESHOLD,
-    matchCount: matches.length,
-    matches
-  };
+  return detectSystemPromptLeakageCore(text);
 }
 
 /**
@@ -5366,54 +5222,7 @@ class EmptyResponseEscalationError extends Error {
  * natural-language equivalents. Returns { detected: boolean, matchedToolHint: string }.
  */
 function detectClaimedActionWithoutToolCall(text, registeredTools) {
-  if (!text || typeof text !== "string") return { detected: false, matchedToolHint: "" };
-
-  // Static action-claim patterns (existing guard)
-  // Note: Done[!.] catches "Done!" / "Done." but misses "Done —" / "Done," / "Done:" etc.
-  // The broader Done\s*[—–\-,;:!.] pattern catches all punctuation variants.
-
-  // First check for undo/redo specific claims so we can provide a targeted tool hint
-  const undoRedoClaimPattern = /\b(undone|redone|undo.{0,20}(done|complete|success|perform)|redo.{0,20}(done|complete|success|perform))\b/i;
-  if (undoRedoClaimPattern.test(text)) {
-    const isRedo = /\bredo|redone\b/i.test(text);
-    return { detected: true, matchedToolHint: isRedo ? "roam_redo" : "roam_undo" };
-  }
-
-  const actionClaimPattern = /\b(Done\s*[—–\-,;:!.]|I've\s+(added|removed|changed|created|updated|deleted|set|applied|configured|enabled|disabled|turned|executed|moved|copied|sent|posted|modified|installed|fixed|written|toggled|checked|scanned|fetched|retrieved|looked\s+up|searched|read|opened|closed|activated|deactivated)|has been\s+(added|removed|changed|created|updated|deleted|applied|configured|enabled|disabled|written|toggled|activated|deactivated))/i;
-  if (actionClaimPattern.test(text)) return { detected: true, matchedToolHint: "" };
-
-  // Dynamic: check if the model claims a result that would require a specific tool
-  // e.g. "Focus Mode is now inactive" without fm_toggle, "The text in the image reads" without io_get_text
-  const toolClaimPatterns = [
-    { pattern: /\bfocus\s*mode\s+is\s+now\s+(active|inactive|on|off|enabled|disabled)\b/i, tool: "fm_toggle" },
-    { pattern: /\b(?:the\s+)?(?:text|content)\s+(?:in|from|of)\s+(?:the\s+)?(?:image|block|picture)\s+(?:reads?|says?|shows?|contains?|is)\b/i, tool: "io_get_text" },
-    { pattern: /\b(?:OCR|optical\s+character)\s+(?:result|output|shows?|returned?)\b/i, tool: "io_get_text" },
-    { pattern: /\b(?:the\s+)?definition\s+(?:of|for)\s+.+?\s+is\b/i, tool: "def_lookup" },
-    { pattern: /\b(?:last\s+)?action\s+(?:has\s+been\s+)?(?:undone|redone)\b/i, tool: "roam_undo" },
-    { pattern: /\b(?:undo|redo)\s+(?:was\s+)?(?:successful|completed?|done|performed|executed)\b/i, tool: "roam_undo" },
-  ];
-
-  // Also build patterns from registered extension tools that have action-like names
-  if (Array.isArray(registeredTools)) {
-    for (const tool of registeredTools) {
-      const name = String(tool?.name || "");
-      // Skip tools that are read-only — claiming a read result is less suspicious
-      if (tool?.isMutating === false) continue;
-      // Match patterns like "I've used [tool_name]" or "I called [tool_name]"
-      const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/_/g, "[_ ]");
-      if (escapedName && new RegExp(`\\b(?:I've\\s+(?:used|called|run|executed)|I\\s+(?:used|called|ran|executed))\\s+${escapedName}\\b`, "i").test(text)) {
-        return { detected: true, matchedToolHint: name };
-      }
-    }
-  }
-
-  for (const { pattern, tool } of toolClaimPatterns) {
-    if (pattern.test(text)) {
-      return { detected: true, matchedToolHint: tool };
-    }
-  }
-
-  return { detected: false, matchedToolHint: "" };
+  return detectClaimedActionWithoutToolCallCore(text, registeredTools);
 }
 
 async function runAgentLoop(userMessage, options = {}) {
