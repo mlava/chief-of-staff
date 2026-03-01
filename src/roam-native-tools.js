@@ -69,7 +69,7 @@ export function getRoamNativeTools() {
         if (filtered.length > limit) {
           capped.push({ _note: `Showing ${limit} of ${filtered.length} matches. Increase max_results (up to 500) to see more.` });
         } else if (capped.length === 0) {
-          capped.push({ _note: `No matches found for "${String(args.query || "").slice(0, 80)}". Try a different or broader query.` });
+          capped.push({ _note: `No matches found for "${String(query || "").slice(0, 80)}". Try a different or broader query.` });
         }
         return capped;
       }

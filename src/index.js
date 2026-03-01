@@ -606,6 +606,7 @@ function recordUsageStat(stat, detail) {
 }
 
 async function persistUsageStatsPage() {
+  if (unloadInProgress) return;
   try {
     const key = todayDateKey();
     const day = usageStats.days[key];
@@ -9031,6 +9032,8 @@ async function askChiefOfStaff(userMessage, options = {}) {
   askChiefInFlight = true;
   try {
 
+  if (unloadInProgress) { askChiefInFlight = false; return; }
+
   // Detect /power and /ludicrous flags — can appear at start or end of message
   const ludicrousFlag = /(?:^|\s)\/ludicrous(?:\s|$)/i.test(rawPrompt);
   const powerFlag = /(?:^|\s)\/power(?:\s|$)/i.test(rawPrompt);
@@ -10736,6 +10739,7 @@ function onunload() {
   clearStartupAuthPollTimers();
   clearComposioAutoConnectTimer();
   clearAllAuthPolls();
+  reconcileInFlightPromise = null;
   invalidateInstalledToolsFetchCache();
   clearInboxCatchupScanTimer();
   if (aibomRefreshTimeoutId) {
@@ -10769,6 +10773,7 @@ function onunload() {
       if (!unloadInProgress) return;
       disconnectComposio({ suppressDisconnectedToast: true });
     });
+    connectInFlightPromise = null;
   } else {
     disconnectComposio({ suppressDisconnectedToast: true });
   }

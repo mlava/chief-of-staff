@@ -128,7 +128,6 @@ function saveToolkitSchemaRegistry(extensionAPI = deps.getExtensionAPIRef(), reg
     entries.sort((a, b) => (b[1].discoveredAt || 0) - (a[1].discoveredAt || 0));
     reg.toolkits = Object.fromEntries(entries.slice(0, TOOLKIT_SCHEMA_MAX_TOOLKITS));
   }
-  deps.setToolkitSchemaRegistryCache(reg);
   // Strip transient _responseShape entries before persisting to avoid unbounded settings growth.
   // Quick check: skip the deep clone if no _responseShape entries exist.
   const regToolkits = Object.entries(reg.toolkits || {});
@@ -152,6 +151,8 @@ function saveToolkitSchemaRegistry(extensionAPI = deps.getExtensionAPIRef(), reg
   } else {
     extensionAPI?.settings?.set?.(deps.SETTINGS_KEYS.toolkitSchemaRegistry, reg);
   }
+  // Update memory cache after successful persist to keep cache and settings in sync
+  deps.setToolkitSchemaRegistryCache(reg);
 }
 
 export function getToolkitEntry(toolkitName) {
