@@ -715,8 +715,13 @@ let toolkitSchemaRegistryCache = null; // loaded lazily from settings
 // --- Extension Tools API discovery ---
 const getExtensionToolsRegistry = () =>
   (typeof window !== "undefined" && window.RoamExtensionTools) || {};
-const getBetterTasksExtension = () =>
-  getExtensionToolsRegistry()["better-tasks"] || null;
+const getBetterTasksExtension = () => {
+  const ext = getExtensionToolsRegistry()["better-tasks"] || null;
+  if (!ext) return null;
+  // Respect extension allowlist toggle for Better Tasks as well.
+  if (isExtensionEnabled(extensionAPIRef, "better-tasks") === false) return null;
+  return ext;
+};
 const getBetterTasksTool = (toolName) => {
   const ext = getBetterTasksExtension();
   if (!ext || !Array.isArray(ext.tools)) return null;
@@ -3369,9 +3374,11 @@ function formatAibomList(items, formatter = (v) => String(v)) {
 function buildRuntimeAibomSnapshotText() {
   const timestamp = new Date().toISOString();
   const selectedProvider = getSettingString(extensionAPIRef, SETTINGS_KEYS.llmProvider, DEFAULT_LLM_PROVIDER);
-  const selectedModel = getModelForProvider(selectedProvider);
+  const selectedModel = getLlmModel(extensionAPIRef, selectedProvider);
   const toolRegistry = getExtensionToolsRegistry();
+  const extToolsConfigAibom = getExtToolsConfig();
   const extEntries = Object.entries(toolRegistry)
+    .filter(([extKey]) => !!extToolsConfigAibom[extKey]?.enabled)
     .filter(([, ext]) => ext && Array.isArray(ext.tools) && ext.tools.length > 0)
     .map(([extKey, ext]) => {
       const extName = String(ext.name || extKey || "").trim();
@@ -3398,6 +3405,15 @@ function buildRuntimeAibomSnapshotText() {
   const toolsState = extensionAPIRef ? getToolsConfigState(extensionAPIRef) : { installedTools: [] };
   const composioInstalled = toolsState.installedTools.filter((t) => t?.installState === "installed");
   const composioPending = toolsState.installedTools.filter((t) => t?.installState === "pending_auth");
+  const activeToolkitKeys = new Set(
+    [...composioInstalled, ...composioPending]
+      .map((tool) => inferToolkitFromSlug(tool?.slug || ""))
+      .filter(Boolean)
+      .map((key) => String(key).toUpperCase())
+  );
+  const activeToolkitEntries = toolkitEntries.filter((tk) =>
+    activeToolkitKeys.has(String(tk.key || "").toUpperCase())
+  );
 
   const localServerRows = [];
   for (const [port, entry] of localMcpClients.entries()) {
@@ -3437,7 +3453,7 @@ function buildRuntimeAibomSnapshotText() {
     (ext.toolPreview ? `\n  tools: ${escapeHtml(ext.toolPreview)}` : "")
   );
 
-  const toolkitLines = formatAibomList(toolkitEntries, (tk) => {
+  const toolkitLines = formatAibomList(activeToolkitEntries, (tk) => {
     const discovered = tk.discoveredAt ? new Date(tk.discoveredAt).toISOString().split("T")[0] : "unknown";
     return `${escapeHtml(tk.name)} (${escapeHtml(tk.key)}) — ${tk.toolCount} schema tool(s), discovered ${discovered}`;
   });
@@ -3461,7 +3477,8 @@ function buildRuntimeAibomSnapshotText() {
     `extension_tools=${extEntries.reduce((sum, ext) => sum + ext.toolCount, 0)}`,
     `composio_installed=${composioInstalled.length}`,
     `composio_pending_auth=${composioPending.length}`,
-    `toolkits_in_registry=${toolkitEntries.length}`,
+    `toolkits_in_registry_active=${activeToolkitEntries.length}`,
+    `toolkits_in_registry_cached=${toolkitEntries.length}`,
     `local_mcp_servers=${localServerRows.length}`,
     `suspended_mcp_servers=${suspendedRows.length}`
   ].join(", ");
@@ -3793,7 +3810,9 @@ function getCosIntegrationTools() {
         const extensionTools = {};
         try {
           const registry = getExtensionToolsRegistry();
+          const extToolsConfig = getExtToolsConfig();
           for (const [extKey, ext] of Object.entries(registry)) {
+            if (!extToolsConfig[extKey]?.enabled) continue;
             if (!ext || !Array.isArray(ext.tools) || !ext.tools.length) continue;
             const label = String(ext.name || extKey).trim();
             const validTools = ext.tools.filter(t => t?.name && typeof t.execute === "function");
@@ -6551,6 +6570,13 @@ function ensureSettingBool(extensionAPI, key, fallback) {
   return fallback;
 }
 
+function normaliseSwitchValue(evt, fallback) {
+  if (typeof evt === "boolean") return evt;
+  if (typeof evt?.target?.checked === "boolean") return evt.target.checked;
+  if (typeof evt?.checked === "boolean") return evt.checked;
+  return fallback;
+}
+
 function rebuildSettingsPanel(extensionAPI) {
   setTimeout(() => {
     extensionAPI.settings.panel.create(buildSettingsConfig(extensionAPI));
@@ -6721,11 +6747,13 @@ function buildSettingsConfig(extensionAPI) {
           action: {
             type: "switch",
             value: isEnabled,
-            onChange: () => {
+            onChange: (evt) => {
+              const nextEnabled = normaliseSwitchValue(evt, !isEnabled);
               const cfg = getExtToolsConfig(extensionAPI);
-              cfg[extKey] = { enabled: !isEnabled };
+              cfg[extKey] = { enabled: nextEnabled };
               setExtToolsConfig(extensionAPI, cfg);
               externalExtensionToolsCache = null; // force re-discovery
+              scheduleRuntimeAibomRefresh(120);
               rebuildSettingsPanel(extensionAPI);
             }
           }
@@ -8096,8 +8124,10 @@ async function buildHelpSummary() {
   // ── Extension tools ──
   try {
     const registry = getExtensionToolsRegistry();
+    const extToolsConfig = getExtToolsConfig();
     const extNames = [];
     for (const [extKey, ext] of Object.entries(registry)) {
+      if (!extToolsConfig[extKey]?.enabled) continue;
       if (!ext || !Array.isArray(ext.tools) || !ext.tools.length) continue;
       const label = String(ext.name || extKey).trim();
       const count = ext.tools.filter(t => t?.name && typeof t.execute === "function").length;
@@ -8766,7 +8796,9 @@ async function tryRunDeterministicAskIntent(prompt, context = {}) {
       // 2. Check extension tools by extension name/key
       try {
         const registry = getExtensionToolsRegistry();
+        const extToolsConfig = getExtToolsConfig();
         for (const [extKey, ext] of Object.entries(registry)) {
+          if (!extToolsConfig[extKey]?.enabled) continue;
           if (!ext || !Array.isArray(ext.tools) || !ext.tools.length) continue;
           const label = String(ext.name || extKey || "").toLowerCase();
           const key = String(extKey).toLowerCase();
@@ -8832,7 +8864,9 @@ async function tryRunDeterministicAskIntent(prompt, context = {}) {
     // Extension tools
     try {
       const registry = getExtensionToolsRegistry();
+      const extToolsConfig = getExtToolsConfig();
       for (const [extKey, ext] of Object.entries(registry)) {
+        if (!extToolsConfig[extKey]?.enabled) continue;
         if (!ext || !Array.isArray(ext.tools) || !ext.tools.length) continue;
         const label = String(ext.name || extKey).trim();
         const validTools = ext.tools.filter(t => t?.name && typeof t.execute === "function");
