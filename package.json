@@ -7,10 +7,10 @@
   "main": "index.js",
   "scripts": {
     "build": "webpack",
-    "test": "node --test tests/**/*.test.mjs",
+    "test": "node --test tests/",
     "test:security": "node --test tests/security-core.test.mjs",
     "aibom:generate": "node scripts/generate-static-aibom.mjs",
-    "build:secure": "npm run test:security && npm run build && npm run aibom:generate",
+    "build:secure": "npm test && npm run build && npm run aibom:generate",
     "ci": "npm run build:secure"
   },
   "devDependencies": {

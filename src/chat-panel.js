@@ -360,6 +360,7 @@ export function showConnectedToast() {
   if (!iziToast?.success) return;
   const assistantName = deps.escapeHtml(deps.getAssistantDisplayName());
   iziToast.success({
+    class: "cos-toast",
     title: "Connected",
     message: assistantName + " connected to Composio.",
     position: "topRight",
@@ -372,6 +373,7 @@ export function showDisconnectedToast() {
   if (!iziToast?.success) return;
   const assistantName = deps.escapeHtml(deps.getAssistantDisplayName());
   iziToast.success({
+    class: "cos-toast",
     title: "Disconnected",
     message: assistantName + " disconnected from Composio.",
     position: "topRight",
@@ -384,6 +386,7 @@ export function showReconnectedToast() {
   if (!iziToast?.success) return;
   const assistantName = deps.escapeHtml(deps.getAssistantDisplayName());
   iziToast.success({
+    class: "cos-toast",
     title: "Reconnected",
     message: assistantName + " reconnected to Composio.",
     position: "topRight",
@@ -395,6 +398,7 @@ export function showReconnectedToast() {
 export function showInfoToast(title, message) {
   if (!iziToast?.info) return;
   iziToast.info({
+    class: "cos-toast",
     title: deps.escapeHtml(title),
     message: deps.escapeHtml(message),
     position: "topRight",
@@ -406,6 +410,7 @@ export function showInfoToast(title, message) {
 export function showErrorToast(title, message) {
   if (!iziToast?.error) return;
   iziToast.error({
+    class: "cos-toast",
     title: deps.escapeHtml(title),
     message: deps.escapeHtml(message),
     position: "topRight",
@@ -417,6 +422,7 @@ export function showErrorToast(title, message) {
 export function showReminderToast(title, message) {
   if (!iziToast?.show) return;
   iziToast.show({
+    class: "cos-toast",
     title: deps.escapeHtml(title),
     message: deps.escapeHtml(message),
     position: "topRight",
@@ -1268,14 +1274,28 @@ function switchTab(target, els) {
 
 function parseAuditLogEntry(text) {
   // Format: [[Date]] **model** (N iter, Xs, T tok, $X.XXXX) — outcome
-  const m = text.match(
+  // The block text may contain embedded \n for Prompt/Tools lines, so we
+  // extract the first line only for header parsing.
+  const firstLine = text.split("\n")[0];
+  const m = firstLine.match(
     /^\[\[([^\]]+)\]\]\s+\*\*([^*]+)\*\*\s+\((\d+)\s+iter,\s+([\d.?]+)s,\s+(\d+)\s+tok(?:,\s+([^)]+))?\)\s+\u2014\s+(.+)$/
   );
   if (!m) return null;
+
+  // Extract Prompt/Tools from remaining lines in the same block text
+  const lines = text.split("\n");
+  let prompt = "";
+  let tools = "";
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].startsWith("Prompt:")) prompt = lines[i];
+    else if (lines[i].startsWith("Tools:")) tools = lines[i];
+  }
+
   return {
     date: m[1], model: m[2], iterations: parseInt(m[3], 10),
     duration: m[4], tokens: parseInt(m[5], 10),
-    cost: m[6] || "", outcome: m[7].trim()
+    cost: m[6] || "", outcome: m[7].trim(),
+    prompt, tools
   };
 }
 
@@ -1331,15 +1351,23 @@ function renderActivityCard(block) {
   dateLine.textContent = parsed.date;
   card.appendChild(dateLine);
 
-  // Child blocks: prompt and tools
-  for (const child of (block.children || [])) {
-    const childText = child.string || child.text || "";
-    if (childText.startsWith("Prompt:") || childText.startsWith("Tools:")) {
-      const detail = document.createElement("div");
-      detail.classList.add("chief-activity-detail");
-      detail.textContent = childText;
-      card.appendChild(detail);
+  // Prompt and Tools: prefer inline (embedded \n in block text), fall back to children
+  const detailTexts = [];
+  if (parsed.prompt) detailTexts.push(parsed.prompt);
+  if (parsed.tools) detailTexts.push(parsed.tools);
+  if (detailTexts.length === 0) {
+    for (const child of (block.children || [])) {
+      const childText = child.string || child.text || "";
+      if (childText.startsWith("Prompt:") || childText.startsWith("Tools:")) {
+        detailTexts.push(childText);
+      }
     }
+  }
+  for (const dt of detailTexts) {
+    const detail = document.createElement("div");
+    detail.classList.add("chief-activity-detail");
+    detail.textContent = dt;
+    card.appendChild(detail);
   }
   return card;
 }
@@ -1352,7 +1380,13 @@ async function loadActivityLog(container) {
   container.appendChild(loadingMsg);
 
   try {
-    const tree = await deps.getPageTreeByTitleAsync("Chief of Staff/Audit Log");
+    let tree = await deps.getPageTreeByTitleAsync("Chief of Staff/Audit Log");
+    // Roam's async pull can return stale/empty results right after writes —
+    // retry once after a brief delay if the page exists but children are empty.
+    if (tree && tree.uid && (!tree.children || tree.children.length === 0)) {
+      await new Promise(r => setTimeout(r, 500));
+      tree = await deps.getPageTreeByTitleAsync("Chief of Staff/Audit Log");
+    }
     if (!tree || !tree.children || tree.children.length === 0) {
       while (container.firstChild) container.firstChild.remove();
       const emptyMsg = document.createElement("div");
@@ -1679,6 +1713,8 @@ export function setChatPanelOpen(nextOpen) {
     if (chatPanelMessages && !chatPanelMessages.hasChildNodes()) {
       renderEmptyStateHint(chatPanelMessages, deps.getAssistantDisplayName());
     }
+    // Scroll to bottom so the most recent messages are visible on re-open
+    if (chatPanelMessages) chatPanelMessages.scrollTop = chatPanelMessages.scrollHeight;
   }
   chatPanelIsOpen = nextOpen;
   if (nextOpen && chatPanelInput) chatPanelInput.focus();
@@ -1802,16 +1838,24 @@ function normaliseToastContext(firstArg, secondArg) {
   return { instance, toast };
 }
 
+// ── Prompt dialog idempotency guard ────────────────────────────────
+// Prevents stacking multiple prompt dialogs when user double-taps
+// the hotkey or triggers the same command palette entry twice.
+let promptDialogOpen = false;
+
 export function promptToolSlugWithToast(defaultSlug = "") {
   return new Promise((resolve) => {
+    if (promptDialogOpen) { resolve(null); return; }
     if (!iziToast?.show) {
       resolve(null);
       return;
     }
+    promptDialogOpen = true;
     let resolved = false;
     const finish = (value) => {
       if (resolved) return;
       resolved = true;
+      promptDialogOpen = false;
       resolve(value);
     };
 
@@ -1846,6 +1890,7 @@ export function promptToolSlugWithToast(defaultSlug = "") {
       }
     });
     iziToast.show({
+      class: "cos-toast",
       theme: getToastTheme(),
       title: "Install Composio Tool",
       message: '<input data-chief-tool-input type="text" value="' + escapedValue + '" placeholder="GOOGLECALENDAR" />',
@@ -1899,14 +1944,17 @@ export function promptTextWithToast({
   initialValue = ""
 } = {}) {
   return new Promise((resolve) => {
+    if (promptDialogOpen) { resolve(null); return; }
     if (!iziToast?.show) {
       resolve(null);
       return;
     }
+    promptDialogOpen = true;
     let resolved = false;
     const finish = (value) => {
       if (resolved) return;
       resolved = true;
+      promptDialogOpen = false;
       resolve(value);
     };
 
@@ -1939,6 +1987,7 @@ export function promptTextWithToast({
     });
 
     iziToast.show({
+      class: "cos-toast",
       theme: getToastTheme(),
       title: deps.escapeHtml(title),
       message: '<input data-chief-input type="text" value="' + escapedValue + '" placeholder="' + escapedPlaceholder + '" />',
@@ -1983,14 +2032,17 @@ export function promptTextareaWithToast({
   rows = 10
 } = {}) {
   return new Promise((resolve) => {
+    if (promptDialogOpen) { resolve(null); return; }
     if (!iziToast?.show) {
       resolve(null);
       return;
     }
+    promptDialogOpen = true;
     let resolved = false;
     const finish = (value) => {
       if (resolved) return;
       resolved = true;
+      promptDialogOpen = false;
       resolve(value);
     };
 
@@ -2021,6 +2073,7 @@ export function promptTextareaWithToast({
     });
 
     iziToast.show({
+      class: "cos-toast",
       theme: getToastTheme(),
       title: "",
       message: '<div style="font-size:14px;font-weight:600;margin-bottom:10px;">' + deps.escapeHtml(title) + '</div>'
@@ -2120,6 +2173,7 @@ export function promptInstalledToolSlugWithToast(
     });
 
     iziToast.show({
+      class: "cos-toast",
       theme: getToastTheme(),
       title: deps.escapeHtml(title),
       message: '<select data-chief-tool-select>' + optionsHtml + '</select>',
@@ -2196,6 +2250,7 @@ export function promptToolExecutionApproval(toolName, args) {
     });
 
     iziToast.show({
+      class: "cos-toast",
       theme: getToastTheme(),
       title: "Approve tool action",
       message: '<div><strong>' + escapedToolName + '</strong></div><pre class="chief-tool-preview">' + escapedArgsPreview + '</pre>',
@@ -2267,6 +2322,7 @@ export function promptWriteToDailyPage() {
     });
 
     iziToast.show({
+      class: "cos-toast",
       theme: getToastTheme(),
       title: "Write to Daily Page?",
       message: "Save this response under today's daily page?",

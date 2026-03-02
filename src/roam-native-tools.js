@@ -185,7 +185,7 @@ export function getRoamNativeTools() {
     },
     {
       name: "roam_open_page",
-      isMutating: false,
+      isMutating: false, // page creation on nav is standard Roam behaviour (same as clicking a [[link]])
       description: "Open a page in Roam's main window by title or UID. Use this when the user asks to navigate to, open, or go to a page.",
       input_schema: {
         type: "object",
@@ -204,11 +204,9 @@ export function getRoamNativeTools() {
           await api.ui.mainWindow.openPage({ page: { uid: pageUid } });
           return { success: true, opened: pageUid };
         }
-        // Resolve title to UID
-        const rows = await deps.queryRoamDatalog(`[:find ?uid :where [?p :node/title "${deps.escapeForDatalog(pageTitle)}"] [?p :block/uid ?uid]]`) || [];
-        if (!rows.length) throw new Error(`Page not found: "${pageTitle}"`);
-        const resolvedUid = String(rows[0]?.[0] || "").trim();
-        if (!resolvedUid) throw new Error(`Could not resolve UID for "${pageTitle}"`);
+        // Resolve title to UID — create the page if it doesn't exist yet
+        const resolvedUid = await deps.ensurePageUidByTitle(pageTitle);
+        if (!resolvedUid) throw new Error(`Could not resolve or create page: "${pageTitle}"`);
         await api.ui.mainWindow.openPage({ page: { uid: resolvedUid } });
         return { success: true, opened: pageTitle, uid: resolvedUid };
       }

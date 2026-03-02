@@ -115,12 +115,45 @@ Wrangler will print your worker URL (e.g. `https://roam-mcp-proxy.<you>.workers.
 
 ### 3. Connect local MCP servers (optional)
 
-Local MCP servers let the assistant interact with tools running on your machine — for example, a Zotero research library, a local GitHub MCP server, or custom tools.
+Local MCP servers let the assistant interact with tools running on your machine — for example, a Zotero research library, a local GitHub MCP server, or custom tools. Most MCP servers communicate via stdio, but browser extensions can only use HTTP. Chief of Staff bridges this gap automatically using [supergateway](https://github.com/nicobailey/supergateway), which wraps any stdio MCP server as an SSE endpoint.
 
-1. Run an MCP server locally that exposes an SSE endpoint (e.g. via [supergateway](https://github.com/nicobailey/supergateway)).
-2. In **Settings > Chief of Staff**, under **Local MCP**, add the port number and optionally a display name for each server. Up to four servers can be configured.
-3. The extension auto-connects on load. Servers with ≤15 tools are registered directly (one-step calls). Servers with >15 tools use two-stage routing (`LOCAL_MCP_ROUTE` to discover, `LOCAL_MCP_EXECUTE` to call) to keep per-request token costs low.
-4. Connection status is logged to the browser console on startup. Failed connections retry automatically.
+#### One-command setup
+
+1. Open the command palette and run **Chief of Staff: Generate Supergateway Script**.
+2. Paste your `mcpServers` JSON configuration — the same format used by Claude Desktop, Cursor, Cline, or any MCP client. For example:
+   ```json
+   {
+     "zotero": {
+       "command": "npx",
+       "args": ["-y", "zotero-mcp"]
+     },
+     "github": {
+       "command": "npx",
+       "args": ["-y", "@modelcontextprotocol/server-github"],
+       "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_..." }
+     }
+   }
+   ```
+3. The extension parses your config, auto-assigns ports (starting from 8100), and generates a platform-specific install script:
+   - **macOS** — creates `launchd` plists in `~/Library/LaunchAgents/` that auto-start on boot and restart on failure
+   - **Linux** — creates `systemd` user services that persist across reboots via `loginctl enable-linger`
+   - **Windows** — creates Scheduled Tasks in a `\COS\` folder that run at login with auto-restart on failure
+4. Click **Download Script** — this also saves the port assignments into your extension settings automatically, so there is nothing to configure manually.
+5. Run the downloaded script in your terminal (macOS/Linux: `chmod +x` then execute; Windows: right-click the `.ps1` and "Run with PowerShell").
+6. Back in Roam, click the **Connect** button in the setup modal, or run **Chief of Staff: Refresh Local MCP Servers** from the command palette.
+
+That's it. On every subsequent Roam load, the extension auto-connects to your configured ports with exponential-backoff retry (up to 5 attempts per port). Your MCP servers are now available as tools in every agent run.
+
+#### How it works under the hood
+
+- The extension connects to each `localhost:{port}/sse` endpoint using native browser `EventSource` (not the MCP SDK's transport, which fails with local SSE).
+- Tools are discovered once at connection time via `listTools()` and cached for the session.
+- Servers with **15 or fewer tools** are registered directly — the LLM calls them by name in a single step.
+- Servers with **more than 15 tools** use two-stage routing: `LOCAL_MCP_ROUTE` discovers available tools, then `LOCAL_MCP_EXECUTE` calls the chosen tool. This keeps the system prompt compact and per-request token costs low.
+- When your prompt mentions a connected server by name (e.g. "search Zotero for..." or "GitHub issues on..."), the request is automatically escalated to the power tier for better tool-use reasoning.
+- On first connection, the tool schema is pinned (SHA-256 hash). On subsequent connections, any schema drift (added, removed, or modified tools) is flagged. Tool descriptions are scanned for injection patterns before tools are made available. Connection details are logged to `[[Chief of Staff/MCP Servers]]` in your graph — see [MCP supply chain security](#mcp-supply-chain-security) for details.
+
+A detailed operational guide for manual supergateway setup, LaunchAgent configuration, and troubleshooting is available in [`docs/mcp-supergateway-playbook.md`](docs/mcp-supergateway-playbook.md).
 
 ---
 
@@ -146,6 +179,8 @@ Local MCP servers let the assistant interact with tools running on your machine 
 | **Chief of Staff: Discover Toolkit Schemas** | Discovers and caches schemas for all connected Composio toolkits. |
 | **Chief of Staff: Show Schema Registry** | Logs the discovered toolkit schema registry to the browser console. |
 | **Chief of Staff: Clear Conversation Context** | Resets conversation memory and chat history. |
+| **Chief of Staff: Generate Supergateway Script** | Paste your `mcpServers` JSON and get a platform-specific install script (macOS launchd / Linux systemd / Windows Task Scheduler) with auto-assigned ports. |
+| **Chief of Staff: Refresh Local MCP Servers** | Disconnects and reconnects all configured local MCP servers. |
 | **Chief of Staff: Show Stored Tool Config** | Logs the current tool configuration to the browser console. |
 | **Chief of Staff: Show Last Run Trace** | Logs the most recent agent run (iterations, tool calls, timing) to the browser console. |
 | **Chief of Staff: Debug Runtime Stats** | Logs current runtime state (cache sizes, connection status, conversation turns) to the browser console. |

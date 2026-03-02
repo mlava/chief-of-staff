@@ -203,12 +203,14 @@ export function isPotentiallyMutatingTool(toolName, args, toolObj) {
     return !readOnlyTokenPattern.test(innerName);
   }
 
-  // Priority 3: heuristic fallback for tools with isMutating undefined
-  // (external extension tools that haven't opted in, unannotated local MCP tools).
+  // Priority 3: heuristic fallback for tools with isMutating undefined.
+  // External extension tools now default to isMutating: true at source
+  // (getExternalExtensionTools), so Priority 1 handles them. This block
+  // is defence-in-depth for edge cases where resolveToolByName misses.
 
   const externalTools = deps.getExternalExtensionTools();
   if (externalTools.some(t => t.name.toUpperCase() === name)) {
-    return !readOnlyTokenPatternShort.test(name);
+    return true; // fail-closed: no metadata → require approval
   }
 
   const localTools = deps.getLocalMcpToolsCache() || [];
