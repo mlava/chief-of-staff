@@ -90,6 +90,7 @@ const ONBOARDING_STEPS = [
           onClick: () => {
             extensionAPI.settings.set(deps.SETTINGS_KEYS.onboardingComplete, true);
             deps.iziToast.info({
+              class: "cos-toast",
               title: "No worries",
               message: "Open Settings \u2192 Chief of Staff whenever you\u2019re ready.",
               timeout: 5000,
@@ -150,6 +151,7 @@ const ONBOARDING_STEPS = [
             const cosName = cosNameField.input.value.trim() || "Chief of Staff";
             extensionAPI.settings.set(deps.SETTINGS_KEYS.assistantName, cosName);
             deps.iziToast.success({
+              class: "cos-toast",
               title: "Hello",
               message: `Nice to meet you, ${deps.escapeHtml(userName)}. I\u2019m ${deps.escapeHtml(cosName)}.`,
               timeout: 4000,
@@ -284,6 +286,7 @@ const ONBOARDING_STEPS = [
             extensionAPI.settings.set(deps.SETTINGS_KEYS.llmProvider, provider);
             const providerLabels = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Gemini", mistral: "Mistral" };
             deps.iziToast.success({
+              class: "cos-toast",
               title: `${providerLabels[provider]} key saved`,
               message: "I\u2019m ready to think.",
               timeout: 4000,
@@ -319,6 +322,7 @@ const ONBOARDING_STEPS = [
           onClick: () => {
             sessionState.betterTasksEnabled = true;
             deps.iziToast.success({
+              class: "cos-toast",
               title: "Better Tasks",
               message: "Excellent. I\u2019ll use Better Tasks for all task operations.",
               timeout: 4000,
@@ -333,6 +337,7 @@ const ONBOARDING_STEPS = [
           onClick: () => {
             sessionState.betterTasksEnabled = false;
             deps.iziToast.info({
+              class: "cos-toast",
               title: "Standard TODOs",
               message: "No problem. I\u2019ll work with standard TODO/DONE blocks. If you install Better Tasks later, I\u2019ll detect it automatically.",
               timeout: 5000,
@@ -389,6 +394,7 @@ const ONBOARDING_STEPS = [
             } catch (e) {
               const errMsg = deps.escapeHtml(e?.message || "Unknown error");
               deps.iziToast.error({
+                class: "cos-toast",
                 title: "Memory pages failed",
                 message: `${errMsg}. You can try again later via the command palette: <strong>Chief of Staff: Bootstrap Memory Pages</strong>.`,
                 timeout: 8000,
@@ -403,6 +409,7 @@ const ONBOARDING_STEPS = [
           primary: false,
           onClick: () => {
             deps.iziToast.info({
+              class: "cos-toast",
               title: "No worries",
               message: "You can create them later via the command palette: Chief of Staff: Bootstrap Memory Pages.",
               timeout: 5000,
@@ -445,6 +452,7 @@ const ONBOARDING_STEPS = [
               });
             } catch { /* ignore if API unavailable */ }
             deps.iziToast.info({
+              class: "cos-toast",
               title: "Memory page opened",
               message: "Fill in what you can \u2014 even a few answers help.",
               timeout: 4000,
@@ -458,6 +466,7 @@ const ONBOARDING_STEPS = [
           primary: false,
           onClick: () => {
             deps.iziToast.info({
+              class: "cos-toast",
               title: "Memory",
               message: "No rush. You can open [[Chief of Staff/Memory]] any time to fill in your context \u2014 even a few answers make a difference.",
               timeout: 5000,
@@ -503,6 +512,7 @@ const ONBOARDING_STEPS = [
               const paletteOpen = !!document.querySelector(".rm-command-palette, .bp3-omnibar");
               if (paletteOpen) {
                 deps.iziToast.info({
+                  class: "cos-toast",
                   title: "Hotkey setup",
                   message: "Search for <strong>Edit Hotkey: Chief of Staff: Ask</strong> and choose your preferred shortcut.",
                   timeout: 8000,
@@ -510,6 +520,7 @@ const ONBOARDING_STEPS = [
                 });
               } else {
                 deps.iziToast.info({
+                  class: "cos-toast",
                   title: "Hotkey setup",
                   message: "Open the command palette (<strong>Cmd+P</strong> or <strong>Ctrl+P</strong>), then search for <strong>Edit Hotkey: Chief of Staff: Ask</strong>.",
                   timeout: 8000,
@@ -552,6 +563,7 @@ const ONBOARDING_STEPS = [
           onClick: () => {
             if (!deps.chatPanelIsOpen()) deps.toggleChatPanel();
             deps.iziToast.success({
+              class: "cos-toast",
               title: "Chat panel",
               message: "There I am. Try typing something!",
               timeout: 4000,
@@ -618,16 +630,17 @@ const ONBOARDING_STEPS = [
 
               let toastMsg;
               if (hasBT && hasComposio) {
-                toastMsg = "16 skills installed \u2713 \u2014 you\u2019re fully loaded. Every skill will work at full capability.";
+                toastMsg = "6 skills installed \u2713 \u2014 you\u2019re fully loaded. Every skill will work at full capability.";
               } else if (hasBT) {
-                toastMsg = "16 skills installed \u2713 \u2014 most work beautifully with your graph and Better Tasks. Skills like Daily Briefing and Weekly Review will be even more powerful once you connect external tools.";
+                toastMsg = "6 skills installed \u2713 \u2014 most work beautifully with your graph and Better Tasks. Skills like Daily Briefing and Weekly Review will be even more powerful once you connect external tools.";
               } else if (hasComposio) {
-                toastMsg = "16 skills installed \u2713 \u2014 all will work using your connected tools and Roam\u2019s built-in TODO system. Install Better Tasks any time for richer task management.";
+                toastMsg = "6 skills installed \u2713 \u2014 all will work using your connected tools and Roam\u2019s built-in TODO system. Install Better Tasks any time for richer task management.";
               } else {
-                toastMsg = "16 skills installed \u2713 \u2014 several work right away (Brain Dump, Resume Context, Intention Clarifier, and more). Others will unlock their full potential as you add Better Tasks or connect external tools.";
+                toastMsg = "6 skills installed \u2713 \u2014 several work right away (Brain Dump, Resume Context, Suggest Workflows, and more). Others will unlock their full potential as you add Better Tasks or connect external tools.";
               }
 
               deps.iziToast.success({
+                class: "cos-toast",
                 title: "Skills installed",
                 message: toastMsg,
                 timeout: 6000,
@@ -636,6 +649,7 @@ const ONBOARDING_STEPS = [
             } catch (e) {
               const errMsg = deps.escapeHtml(e?.message || "Unknown error");
               deps.iziToast.error({
+                class: "cos-toast",
                 title: "Skills install failed",
                 message: `${errMsg}. You can try again later via the command palette: <strong>Chief of Staff: Bootstrap Skills Page</strong>.`,
                 timeout: 8000,
@@ -651,6 +665,7 @@ const ONBOARDING_STEPS = [
           primary: false,
           onClick: () => {
             deps.iziToast.info({
+              class: "cos-toast",
               title: "Skills",
               message: "You can install them any time via the command palette: Chief of Staff: Bootstrap Skills Page.",
               timeout: 5000,
@@ -802,6 +817,7 @@ const ONBOARDING_STEPS = [
               }
               if (connected > 0) {
                 deps.iziToast.success({
+                  class: "cos-toast",
                   title: "Local MCP",
                   message: `Connected to ${connected} server${connected > 1 ? "s" : ""}.`,
                   timeout: 4000,
@@ -926,6 +942,7 @@ const ONBOARDING_STEPS = [
               }, 400);
             } else {
               deps.iziToast.success({
+                class: "cos-toast",
                 title: "All set",
                 message: "Open the command palette and run Chief of Staff: Ask whenever you need me.",
                 timeout: 5000,

@@ -225,6 +225,7 @@ export function launchOnboarding(extensionAPI, deps) {
       );
       if (hasKey) {
         deps.iziToast.info({
+          class: "cos-toast",
           title: "No worries",
           message: "You can finish setting up any time via the command palette: Chief of Staff: Run Onboarding.",
           timeout: 5000,
@@ -232,6 +233,7 @@ export function launchOnboarding(extensionAPI, deps) {
         });
       } else {
         deps.iziToast.info({
+          class: "cos-toast",
           title: "No worries",
           message: "Without an API key I can\u2019t do much yet. You can add one in Settings \u2192 Chief of Staff.",
           timeout: 5000,

@@ -1,3 +1,4 @@
+import { extractBalancedJsonObjects, extractMcpKeyReference } from "./parse-utils.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import iziToast from "izitoast";
@@ -126,7 +127,8 @@ const SETTINGS_KEYS = {
   usageStats: "usage-stats",
   mcpSchemaHashes: "mcp-schema-hashes",
   dailySpendingCap: "daily-spending-cap",
-  extensionToolsConfig: "extension-tools-config"
+  extensionToolsConfig: "extension-tools-config",
+  auditLogRetentionDays: "audit-log-retention-days"
 };
 const TOOLS_SCHEMA_VERSION = 3;
 const AUTH_POLL_INTERVAL_MS = 9000;
@@ -542,8 +544,70 @@ async function persistAuditLogEntry(trace, userPrompt) {
 
     await createRoamBlock(pageUid, block, "first");
     debugLog("[Chief flow] Audit log entry persisted");
+
+    // Non-blocking trim of old entries (runs in background)
+    trimAuditLog().catch(() => {});
   } catch (err) {
     debugLog("[Chief flow] Audit log write failed (non-fatal):", err?.message || err);
+  }
+}
+
+/**
+ * Trims audit log entries older than the configured retention period.
+ * Parses the Roam date reference at the start of each block (e.g. [[March 1st, 2026]])
+ * and deletes blocks whose date is older than `retentionDays` from today.
+ * Non-fatal — errors are swallowed so trimming never breaks the agent flow.
+ */
+let auditTrimInFlight = false;
+async function trimAuditLog() {
+  if (auditTrimInFlight) return;
+  try {
+    const retentionStr = getSettingString(extensionAPIRef, SETTINGS_KEYS.auditLogRetentionDays, "");
+    const retentionDays = parseInt(retentionStr, 10);
+    if (!retentionDays || retentionDays <= 0) return; // disabled or invalid
+
+    auditTrimInFlight = true;
+    const pageTitle = "Chief of Staff/Audit Log";
+    const api = getRoamAlphaApi();
+    const allBlocks = api.q(`
+      [:find ?uid ?str
+       :where [?p :node/title "${pageTitle}"]
+              [?p :block/children ?b]
+              [?b :block/string ?str]
+              [?b :block/uid ?uid]]
+    `);
+    if (!allBlocks || allBlocks.length === 0) return;
+
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - retentionDays);
+    cutoff.setHours(0, 0, 0, 0);
+
+    // Parse "[[Month Dayth, Year]]" from the start of block text
+    const MONTHS = {
+      january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
+      july: 6, august: 7, september: 8, october: 9, november: 10, december: 11
+    };
+    const dateRefRe = /^\[\[(\w+)\s+(\d+)\w{0,2},\s*(\d{4})\]\]/;
+
+    let deleted = 0;
+    for (const [uid, str] of allBlocks) {
+      const m = String(str).match(dateRefRe);
+      if (!m) continue;
+      const monthIdx = MONTHS[m[1].toLowerCase()];
+      if (monthIdx === undefined) continue;
+      const blockDate = new Date(parseInt(m[3], 10), monthIdx, parseInt(m[2], 10));
+      if (blockDate < cutoff) {
+        await api.deleteBlock({ block: { uid } });
+        deleted++;
+      }
+    }
+    if (deleted > 0) {
+      debugLog(`[Audit Log] Trimmed ${deleted} entries older than ${retentionDays} days`);
+    }
+  } catch (err) {
+    debugLog("[Audit Log] Trim failed (non-fatal):", err?.message || err);
+  } finally {
+    auditTrimInFlight = false;
   }
 }
 
@@ -794,10 +858,11 @@ function getExternalExtensionTools() {
       const desc = extLabel ? `[${extLabel}] ${rawDesc}` : rawDesc;
       // Derive isMutating from explicit readOnly hint (preferred) or legacy isMutating flag.
       // readOnly: true → isMutating: false; readOnly: false → isMutating: true.
-      // Falls back to isMutating if provided directly, otherwise undefined (heuristic).
+      // Fail-closed: no metadata → assume mutating (requires approval).
+      // Extension authors can add readOnly: true to opt out.
       const derivedMutating = typeof t.readOnly === "boolean" ? !t.readOnly
         : typeof t.isMutating === "boolean" ? t.isMutating
-        : undefined;
+        : true;
       tools.push({
         name: t.name,
         isMutating: derivedMutating,
@@ -1191,6 +1256,7 @@ async function checkSchemaPin(serverKey, tools, serverName) {
   const diffHtml = diffLines.join("<br>") || "Schema hash changed";
 
   iziToast.show({
+    class: "cos-toast",
     theme: getToastTheme(),
     title: `⚠ MCP schema changed: ${escapeHtml(serverName)}`,
     message: `<div style="margin:6px 0;font-size:12px;max-height:120px;overflow-y:auto;">${diffHtml}</div><div style="font-size:11px;color:#888;">Tools from this server are suspended until you review.</div>`,
@@ -1831,46 +1897,7 @@ function safeJsonStringify(value, maxChars = MAX_TOOL_RESULT_CHARS) {
   }
 }
 
-/**
- * Extract all top-level balanced JSON objects from a string.
- * Used to detect Gemini concatenating multiple tool calls' arguments into one slot.
- * Returns array of { parsed, start, end } for each valid JSON object found.
- */
-function extractBalancedJsonObjects(raw) {
-  if (!raw || typeof raw !== "string") return [];
-  const trimmed = raw.trim();
-  const results = [];
-  let pos = 0;
-  while (pos < trimmed.length) {
-    // Skip to next '{'
-    while (pos < trimmed.length && trimmed[pos] !== "{") pos++;
-    if (pos >= trimmed.length) break;
-    let depth = 0, inString = false, escape = false;
-    let foundEnd = false;
-    for (let i = pos; i < trimmed.length; i++) {
-      const ch = trimmed[i];
-      if (escape) { escape = false; continue; }
-      if (ch === "\\") { escape = true; continue; }
-      if (ch === '"') { inString = !inString; continue; }
-      if (inString) continue;
-      if (ch === "{") depth++;
-      if (ch === "}") {
-        depth--;
-        if (depth === 0) {
-          try {
-            const parsed = JSON.parse(trimmed.slice(pos, i + 1));
-            results.push({ parsed, start: pos, end: i + 1 });
-          } catch { /* skip malformed */ }
-          pos = i + 1;
-          foundEnd = true;
-          break;
-        }
-      }
-    }
-    if (!foundEnd) break; // unbalanced, stop
-  }
-  return results;
-}
+// extractBalancedJsonObjects — imported from ./parse-utils.js
 
 /**
  * Attempt to recover valid JSON from a malformed tool-argument string.
@@ -2149,47 +2176,7 @@ function getConversationMessages() {
   return messages;
 }
 
-/**
- * Extract a compact key reference from MCP tool result texts.
- * Scans for "Name (Key: XYZ)" or "Key: XYZ" patterns and builds a
- * compact lookup table that gets appended to the conversation turn.
- */
-function extractMcpKeyReference(mcpResultTexts) {
-  if (!Array.isArray(mcpResultTexts) || mcpResultTexts.length === 0) return "";
-  const entries = [];
-  const seen = new Set();
-  for (const text of mcpResultTexts) {
-    if (!text) continue;
-    // Match patterns like: **Name** (Key: ABC123) or (Key: ABC123) or Key: ABC123
-    const keyPattern = /\*{0,2}([^*\n(]+?)\*{0,2}\s*\(Key:\s*([A-Za-z0-9]+)\)/g;
-    let match;
-    while ((match = keyPattern.exec(text)) !== null) {
-      const name = match[1].trim().replace(/^[-*\s]+/, "");
-      const key = match[2];
-      const id = `${name}::${key}`;
-      if (!seen.has(id) && name && key) {
-        seen.add(id);
-        entries.push(`${name} → ${key}`);
-      }
-    }
-    // Also match "Item Key: XYZ" with nearby title (cap name to 200 chars to limit backtracking)
-    const itemKeyPattern = /\*\*(?:Title|Name):\*\*\s*(.{1,200}?)[\n\r].*?\*\*(?:Item Key|Key):\*\*\s*`?([A-Za-z0-9]+)`?/g;
-    while ((match = itemKeyPattern.exec(text)) !== null) {
-      const name = match[1].trim();
-      const key = match[2];
-      const id = `${name}::${key}`;
-      if (!seen.has(id) && name && key) {
-        seen.add(id);
-        entries.push(`${name} → ${key}`);
-      }
-    }
-  }
-  if (entries.length === 0) return "";
-  // Cap at 50 entries — raised from 30 to preserve subcollection keys
-  // for libraries like Zotero with 80+ collections
-  const capped = entries.slice(0, 50);
-  return `[Key reference: ${capped.join("; ")}]`;
-}
+// extractMcpKeyReference — imported from ./parse-utils.js
 
 /**
  * Extract a compact index of numbered workflow suggestions from an LLM response.
@@ -3711,20 +3698,41 @@ function getBetterTasksTools() {
 
   const mapped = ext.tools
     .filter(t => t?.name && nameMap[t.name])
-    .map(t => ({
-      name: nameMap[t.name],
-      isMutating: BT_MUTATING_TOOLS.has(nameMap[t.name]),
-      description: t.description || "",
-      input_schema: t.parameters || { type: "object", properties: {} },
-      execute: async (args = {}) => {
-        try {
-          const result = await t.execute(args);
-          return result && typeof result === "object" ? result : { result };
-        } catch (e) {
-          return { error: e?.message || `Failed: ${t.name}` };
+    .map(t => {
+      const mappedName = nameMap[t.name];
+      const base = {
+        name: mappedName,
+        isMutating: BT_MUTATING_TOOLS.has(mappedName),
+        description: t.description || "",
+        input_schema: t.parameters || { type: "object", properties: {} },
+        execute: async (args = {}) => {
+          try {
+            const result = await t.execute(args);
+            return result && typeof result === "object" ? result : { result };
+          } catch (e) {
+            return { error: e?.message || `Failed: ${t.name}` };
+          }
         }
+      };
+
+      // Post-create check: warn when no BT attributes are set
+      if (mappedName === "roam_bt_create_task") {
+        const origExecute = base.execute;
+        base.execute = async (args = {}) => {
+          const result = await origExecute(args);
+          if (!result?.error) {
+            const attrs = args.attributes;
+            const hasAttrs = attrs && typeof attrs === "object" && Object.keys(attrs).length > 0;
+            if (!hasAttrs) {
+              showInfoToast("TODO created", "Add a due date, project, or other attribute to track it in Better Tasks.");
+            }
+          }
+          return result;
+        };
       }
-    }));
+
+      return base;
+    });
 
   // Composite glue tool: create a task from an existing block
   const btCreateTool = ext.tools.find(t => t?.name === "bt_create");
@@ -3757,8 +3765,12 @@ function getBetterTasksTools() {
         if (!text) throw new Error(`Block ${blockUid} has no text content`);
 
         const createArgs = { text, status, parent_uid: blockUid };
-        if (attributes && typeof attributes === "object") createArgs.attributes = attributes;
+        const hasAttrs = attributes && typeof attributes === "object" && Object.keys(attributes).length > 0;
+        if (hasAttrs) createArgs.attributes = attributes;
         const result = await btCreateTool.execute(createArgs);
+        if (!result?.error && !hasAttrs) {
+          showInfoToast("TODO created", "Add a due date, project, or other attribute to track it in Better Tasks.");
+        }
         return result && typeof result === "object"
           ? { ...result, source_block_uid: blockUid }
           : { result, source_block_uid: blockUid };
@@ -4082,7 +4094,9 @@ Available tools:
 ${toolList}
 
 CRITICAL: When modifying a task, ALWAYS use the exact uid from the most recent search result. Never reuse UIDs from earlier turns — always re-search first.
-Use roam_bt_get_attributes to discover available attribute names if needed.`;
+Use roam_bt_get_attributes to discover available attribute names if needed.
+
+IMPORTANT: A task needs at least one attribute (due, project, priority, context, energy, etc.) to appear in the Better Tasks dashboard and widgets. When creating tasks, always try to set at least one attribute — infer a due date, project, or priority from context when possible. If the user provides no attributes and none can be reasonably inferred, create the task anyway but note that it won't appear in Better Tasks views until an attribute is added.`;
     }
   }
 
@@ -4514,9 +4528,17 @@ function parseComposioInstallIntent(userMessage) {
   if (!/(install|add|connect|enable|set\s*up)\b/i.test(lowered)) return null;
   // Exclude deregister-style phrases
   if (/(deregister|uninstall|remove|disconnect)\b/i.test(lowered)) return null;
-  // Must mention composio/tool/integration context or be a clear "install X" pattern
-  if (!/(composio|tool|integration|service)\b/i.test(lowered) &&
-    !/\b(?:install|add|connect|enable|set\s*up)\s+[a-z]/i.test(lowered)) return null;
+
+  const hasComposioContext = /(composio|tool|integration|service)\b/i.test(lowered);
+  // "add" is far too ambiguous on its own — it matches "add a task", "add event to calendar", etc.
+  // Only treat "add" as a Composio install intent when it has explicit tool/integration context.
+  // The other verbs (install, connect, enable, set up) are unambiguous enough to stand alone.
+  const verb = lowered.match(/\b(install|add|connect|enable|set\s*up)\b/i)?.[1]?.toLowerCase() || "";
+  const isAmbiguousVerb = verb === "add";
+  if (!hasComposioContext && isAmbiguousVerb) return null;
+  // For non-ambiguous verbs, still require the verb + word pattern
+  if (!hasComposioContext && !isAmbiguousVerb &&
+    !/\b(?:install|connect|enable|set\s*up)\s+[a-z]/i.test(lowered)) return null;
 
   // Try quoted slug first
   const quotedMatch = text.match(/"([^"]+)"/);
@@ -4532,9 +4554,12 @@ function parseComposioInstallIntent(userMessage) {
   // Real tool slugs are 1–3 words max (e.g. "gmail", "google calendar", "semantic scholar")
   const slugWords = rawSlug.split(/\s+/).filter(Boolean);
   if (slugWords.length > 3) return null;
-  // Reject if any word is a common English word — real Composio slugs are product/service names
-  const slugStopWords = /^(a|an|the|my|some|any|this|that|it|its|from|to|in|on|for|with|about|at|by|of|random|please|just|here|there|all|every|each|no|not|but|or|and|so|yet)$/i;
-  if (slugWords.some(w => slugStopWords.test(w))) return null;
+  // Reject if any word is a common English word or a common noun that clashes with natural prompts.
+  // Real Composio slugs are product/service names (gmail, todoist, notion, google calendar).
+  const slugStopWords = /^(a|an|the|my|some|any|this|that|it|its|from|to|in|on|for|with|about|at|by|of|random|please|just|here|there|all|every|each|no|not|but|or|and|so|yet|new|event|events?|task|tasks?|meeting|meetings?|note|notes?|reminder|reminders?|item|items?|entry|entries|block|blocks?|page|pages?|calendar|email|message|contact|file|link|date|time|appointment)$/i;
+  // Reject only if ALL words are stopwords. Multi-word product names like
+  // "google calendar" should pass because "google" is not a stopword.
+  if (slugWords.every(w => slugStopWords.test(w))) return null;
   const slug = normaliseToolSlugToken(rawSlug.replace(/\s+/g, ""));
   if (!slug) return null;
   return { toolSlug: slug };
@@ -5583,6 +5608,7 @@ async function runAgentLoop(userMessage, options = {}) {
       const assistName = getAssistantDisplayName();
       if (newExts.length === 1) {
         iziToast.show({
+          class: "cos-toast",
           theme: getToastTheme(),
           title: "New extension found",
           message: `<b>${escapeHtml(newExts[0].label)}</b> has tools available. Review in ${escapeHtml(assistName)} settings to enable.`,
@@ -5590,6 +5616,7 @@ async function runAgentLoop(userMessage, options = {}) {
         });
       } else {
         iziToast.show({
+          class: "cos-toast",
           theme: getToastTheme(),
           title: "Extensions found",
           message: `Found <b>${newExts.length}</b> Roam extensions with available tools. Review in ${escapeHtml(assistName)} settings to enable.`,
@@ -6821,6 +6848,16 @@ function buildSettingsConfig(extensionAPI) {
           value: getSettingString(extensionAPI, SETTINGS_KEYS.dailySpendingCap, ""),
           placeholder: "e.g. 1.00"
         }
+      },
+      {
+        id: SETTINGS_KEYS.auditLogRetentionDays,
+        name: "Audit Log Retention (days)",
+        description: "Automatically trim audit log entries older than this many days. Runs after each agent interaction. Leave blank or 0 to keep all entries indefinitely.",
+        action: {
+          type: "input",
+          value: getSettingString(extensionAPI, SETTINGS_KEYS.auditLogRetentionDays, ""),
+          placeholder: "e.g. 14"
+        }
       }
     );
   }
@@ -7831,6 +7868,49 @@ async function deregisterComposioTool(extensionAPI, requestedSlug) {
     installedTools: nextInstalledTools
   });
   await reconcileInstalledToolsWithComposio(extensionAPI);
+
+  // Clean up entry on [[Chief of Staff/MCP Servers]] written by discoverToolkitSchema()
+  // via updateMcpBom() with serverKey = "composio:<SLUG>"
+  try {
+    const mcpPageTitle = "Chief of Staff/MCP Servers";
+    const composioServerKey = `composio:${String(toolSlug).replace(/[\\"]/g, "")}`;
+    const api = getRoamAlphaApi();
+    const staleEntries = api.q(`
+      [:find ?uid
+       :where [?p :node/title "${mcpPageTitle}"]
+              [?p :block/children ?b]
+              [?b :block/string ?str]
+              [?b :block/uid ?uid]
+              [(clojure.string/includes? ?str "${composioServerKey}")]]
+    `);
+    if (staleEntries && staleEntries.length > 0) {
+      for (const [uid] of staleEntries) {
+        await api.deleteBlock({ block: { uid } });
+        debugLog(`[MCP BOM] Removed MCP Servers entry for deregistered Composio tool ${toolSlug} (uid: ${uid})`);
+      }
+    }
+  } catch (e) {
+    debugLog(`[MCP BOM] Cleanup after deregister failed for ${toolSlug}:`, e?.message);
+  }
+
+  // Clean up schema pin for this Composio tool
+  try {
+    const pinKey = `composio:${toolSlug}`;
+    const stored = extensionAPIRef.settings.get(SETTINGS_KEYS.mcpSchemaHashes) || {};
+    if (stored[pinKey] || stored[`${pinKey}_tools`] || stored[`${pinKey}_fingerprints`]) {
+      delete stored[pinKey];
+      delete stored[`${pinKey}_tools`];
+      delete stored[`${pinKey}_fingerprints`];
+      extensionAPIRef.settings.set(SETTINGS_KEYS.mcpSchemaHashes, stored);
+      debugLog(`[MCP Security] Removed schema pin for deregistered Composio tool ${toolSlug}`);
+    }
+  } catch (e) {
+    debugLog(`[MCP Security] Schema pin cleanup failed for ${toolSlug}:`, e?.message);
+  }
+
+  // Refresh AIBOM so the deregistered tool is removed from the snapshot
+  scheduleRuntimeAibomRefresh(200);
+
   showInfoToast("Tool deregistered", `${toolSlug} has been deregistered.`);
 }
 
@@ -8429,7 +8509,10 @@ async function tryRunDeterministicAskIntent(prompt, context = {}) {
 
   // ── Today's page content ───────────────────────────────────────
   // "what's on today's page", "show today's page content", "today's notes", "what did I write today"
-  const todayContentMatch = /^(?:what(?:'s| is| did I write)\s+on\s+(?:today(?:'s)?(?:\s+(?:daily\s*)?(?:page|note))?|the daily page)|show\s+(?:me\s+)?today(?:'s)?\s+(?:page\s+)?(?:content|notes?)|today(?:'s)?\s+(?:page\s+)?(?:content|notes?))\s*[?.!]*$/i.test(prompt);
+  // NOTE: "what's on today?" must NOT match — that's a calendar/schedule question.
+  // We require explicit mention of "page", "note", "daily page", or "did I write" so that
+  // bare "what's on today" falls through to the agent loop.
+  const todayContentMatch = /^(?:what(?:'s| is)\s+on\s+(?:today(?:'s)?\s+(?:daily\s*)?(?:page|notes?)|(?:my\s+)?(?:the\s+)?daily\s*(?:page|note))|what\s+did\s+I\s+write\s+(?:on\s+)?today|show\s+(?:me\s+)?today(?:'s)?\s+(?:page\s+)?(?:content|notes?)|today(?:'s)?\s+(?:page\s+)?(?:content|notes?))\s*[?.!]*$/i.test(prompt);
   if (todayContentMatch) {
     debugLog("[Chief flow] Deterministic route matched: today_content");
     const roamTools = getRoamNativeTools() || [];
@@ -8452,9 +8535,8 @@ async function tryRunDeterministicAskIntent(prompt, context = {}) {
   // ── Add to today's page ────────────────────────────────────────
   // "add X to today's page", "add X to today", "add X to the daily page", "note X"
   // This is a WRITE operation — uses roam_create_block (isMutating: true).
-  // The deterministic router bypasses tool-execution.js approval gating, so we
-  // do NOT prompt for confirmation here — this is intentional for single-line
-  // quick-capture use cases like "note buy milk" or "add meeting at 3pm to today".
+  // Approval gating is enforced here to match the published security contract
+  // ("every mutating operation requires explicit approval").
   const addTodayMatch = prompt.match(/^(?:add|put|write|note|log|jot(?:\s+down)?|capture)\s+(?:(?:"|')(.+?)(?:"|')|(.+?))\s+(?:to|on|in)\s+(?:my\s+)?(?:today(?:'s)?(?:\s+(?:daily\s*)?(?:page|note))?|the\s+daily\s*(?:page|note)?|DNP)\s*[.!?]*$/i)
     || prompt.match(/^(?:note|log|jot(?:\s+down)?|capture)\s+(?:(?:"|')(.+?)(?:"|')|(.+?))\s*[.!?]*$/i);
   if (addTodayMatch) {
@@ -8470,7 +8552,12 @@ async function tryRunDeterministicAskIntent(prompt, context = {}) {
           if (!pageUid) {
             return publishAskResponse(prompt, `Could not find today's page (**${todayTitle}**). Navigate to it first so Roam creates it.`, assistantName, suppressToasts);
           }
-          const result = await createTool.execute({ parent_uid: pageUid, text: blockText, order: "last" });
+          const writeArgs = { parent_uid: pageUid, text: blockText, order: "last" };
+          const approved = await promptToolExecutionApproval("roam_create_block", writeArgs);
+          if (!approved) {
+            return publishAskResponse(prompt, "Cancelled — block was not added.", assistantName, suppressToasts);
+          }
+          const result = await createTool.execute(writeArgs);
           return publishAskResponse(prompt, `Added to **[[${todayTitle}]]**: "${blockText}"`, assistantName, suppressToasts);
         } catch (e) {
           return publishAskResponse(prompt, `Could not add to today's page: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
@@ -9561,6 +9648,7 @@ function registerCommandPaletteCommands(extensionAPI) {
         const diffHtml = diffLines.join("<br>") || "Schema hash changed";
         const sinceMin = Math.round((Date.now() - s.suspendedAt) / 60000);
         iziToast.show({
+          class: "cos-toast",
           theme: getToastTheme(),
           title: `⚠ Schema drift: ${escapeHtml(s.serverName || s.serverKey)}`,
           message: `<div style="margin:6px 0;font-size:12px;max-height:150px;overflow-y:auto;">${diffHtml}</div><div style="font-size:11px;color:#888;">Suspended ${sinceMin}m ago. Tools blocked until reviewed.</div>`,
@@ -9685,6 +9773,7 @@ function registerCommandPaletteCommands(extensionAPI) {
         + '<p style="margin:8px 0 0;font-size:12px;color:var(--cos-text-secondary,#666);">Platform: <strong>' + platform + '</strong> · Ports: <strong>' + escapeHtml(portsList) + '</strong></p>';
 
       iziToast.show({
+        class: "cos-toast",
         theme: getToastTheme(),
         title: "Supergateway Script",
         message: resultHtml,
@@ -9745,6 +9834,7 @@ function registerCommandPaletteCommands(extensionAPI) {
                   + runSteps
                   + '</div>';
                 iziToast.show({
+                  class: "cos-toast",
                   theme: getToastTheme(),
                   title: "Run the Script",
                   message: guidanceHtml,
