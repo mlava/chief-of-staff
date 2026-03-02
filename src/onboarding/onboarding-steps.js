@@ -778,11 +778,11 @@ const ONBOARDING_STEPS = [
 
       // Check current state
       const configuredPorts = deps.getLocalMcpPorts(extensionAPI);
-      const connectedCount = Array.from(deps.localMcpClients.values()).filter(e => e?.client).length;
+      const connectedCount = Array.from(deps.getLocalMcpClients().values()).filter(e => e?.client).length;
 
       if (connectedCount > 0) {
         const serverNames = [];
-        for (const [, entry] of deps.localMcpClients) {
+        for (const [, entry] of deps.getLocalMcpClients()) {
           if (entry?.client && entry.serverName) serverNames.push(deps.escapeHtml(entry.serverName));
         }
         frag.appendChild(createInfoText(
@@ -914,7 +914,7 @@ const ONBOARDING_STEPS = [
       ));
 
       // Local MCP
-      const localConnected = Array.from(deps.localMcpClients.values()).filter(e => e?.client).length;
+      const localConnected = Array.from(deps.getLocalMcpClients().values()).filter(e => e?.client).length;
       summaryContainer.appendChild(createSummaryItem(
         `Local MCP: ${localConnected > 0 ? localConnected + " server" + (localConnected > 1 ? "s" : "") + " connected" : "Not configured"}`,
         localConnected > 0

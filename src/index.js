@@ -172,6 +172,44 @@ import {
   rebuildSettingsPanel,
   normaliseSwitchValue,
 } from "./settings-config.js";
+import {
+  initUsageTracking,
+  getSessionTokenUsage,
+  accumulateSessionTokens,
+  resetSessionTokenUsage,
+  todayDateKey,
+  loadCostHistory,
+  loadUsageStats,
+  recordCostEntry,
+  isDailyCapExceeded,
+  persistAuditLogEntry,
+  recordUsageStat,
+  persistUsageStatsPage,
+  getCostHistorySummary,
+  flushUsageTracking,
+} from "./usage-tracking.js";
+import {
+  initLocalMcp,
+  suspendMcpServer,
+  unsuspendMcpServer,
+  isServerSuspended,
+  getServerKeyForTool,
+  getSuspendedServers,
+  getLocalMcpTools,
+  buildLocalMcpMetaTool,
+  formatToolListByServer,
+  formatServerToolList,
+  buildLocalMcpRouteTool,
+  NativeSSETransport,
+  connectLocalMcp,
+  disconnectLocalMcp,
+  disconnectAllLocalMcp,
+  scheduleLocalMcpAutoConnect,
+  getLocalMcpClients,
+  getLocalMcpToolsCache,
+  invalidateLocalMcpToolsCache,
+  cleanupLocalMcp,
+} from "./local-mcp.js";
 
 const DEFAULT_COMPOSIO_MCP_URL = "enter your composio mcp url here";
 const DEFAULT_COMPOSIO_API_KEY = "enter your composio api key here";
@@ -348,12 +386,7 @@ const COMPOSIO_AUTO_CONNECT_DELAY_MS = 1200;
 const COMPOSIO_AUTH_POLL_REMOTE_CACHE_TTL_MS = 10000;
 const COMPOSIO_MCP_CONNECT_TIMEOUT_MS = 30000; // 30 seconds
 const COMPOSIO_CONNECT_BACKOFF_MS = 30000; // 30s cooldown after a failed connection
-const LOCAL_MCP_CONNECT_TIMEOUT_MS = 10_000;  // 10s — local servers should be fast
-const LOCAL_MCP_INITIAL_BACKOFF_MS = 2_000;   // 2s initial backoff after first failure
-const LOCAL_MCP_MAX_BACKOFF_MS = 60_000;      // 60s cap on exponential backoff
-const LOCAL_MCP_AUTO_CONNECT_MAX_RETRIES = 5; // max startup retries per port (covers ~62s)
-const LOCAL_MCP_DIRECT_TOOL_THRESHOLD = 15;   // servers with ≤15 tools register directly; >15 use meta-tool
-const LOCAL_MCP_LIST_TOOLS_TIMEOUT_MS = 5_000; // 5s timeout for listTools call
+// LOCAL_MCP constants — moved to local-mcp.js
 const MAX_ROAM_BLOCK_CHARS = 20000; // Practical limit — avoids Roam UI rendering slowdowns
 const MAX_CREATE_BLOCKS_TOTAL = 50; // Hard cap on total blocks created in one roam_create_blocks call
 const INBOX_MAX_ITEMS_PER_SCAN = 8; // Prevent large inbox bursts from flooding the queue
@@ -384,7 +417,7 @@ let settingsPanePollId = null;
 let settingsPanePollSafetyId = null;
 let aibomRefreshTimeoutId = null;
 let extensionBroadcastCleanups = [];
-const localMcpAutoConnectTimerIds = new Set();
+// localMcpAutoConnectTimerIds — moved to local-mcp.js
 let externalExtensionToolsCache = null; // populated per agent loop run, cleared in finally
 const activePullWatches = []; // { name, cleanup } for onunload
 let pullWatchDebounceTimers = {}; // keyed by cache type
@@ -396,71 +429,9 @@ let inboxCatchupScanTimeoutId = null; // deferred full scan once queue drains
 let inboxLastFullScanAt = 0; // timestamp of last full q-based inbox scan
 let inboxLastFullScanUidSignature = ""; // signature of top-level inbox UIDs at last full scan
 let inboxStaticUIDs = null; // lazily populated — instruction block UIDs to skip
-// --- Local MCP server state ---
-const localMcpClients = new Map(); // port → { client, transport, lastFailureAt, connectPromise }
-let localMcpToolsCache = null; // derived from localMcpClients Map; invalidated on connect/disconnect
-// --- MCP supply-chain suspension state ---
-// serverKey → { newHash, newToolNames, newFingerprints, added, removed, modified, summary, serverName, suspendedAt }
-const suspendedMcpServers = new Map();
+// localMcpClients, localMcpToolsCache, suspendedMcpServers — moved to local-mcp.js
 
-function suspendMcpServer(serverKey, details) {
-  suspendedMcpServers.set(serverKey, { ...details, suspendedAt: Date.now() });
-  debugLog(`[MCP Security] Server suspended: ${serverKey}`, details.summary);
-}
-
-function unsuspendMcpServer(serverKey, acceptNewPin) {
-  const suspension = suspendedMcpServers.get(serverKey);
-  if (!suspension) return false;
-  if (acceptNewPin) {
-    // Accept the new schema — update the stored pin
-    const stored = extensionAPIRef.settings.get(SETTINGS_KEYS.mcpSchemaHashes) || {};
-    stored[serverKey] = suspension.newHash;
-    stored[`${serverKey}_tools`] = suspension.newToolNames;
-    stored[`${serverKey}_fingerprints`] = suspension.newFingerprints;
-    extensionAPIRef.settings.set(SETTINGS_KEYS.mcpSchemaHashes, stored);
-    debugLog(`[MCP Security] Schema pin updated for ${serverKey}: ${suspension.newHash.slice(0, 12)}…`);
-  }
-  suspendedMcpServers.delete(serverKey);
-  debugLog(`[MCP Security] Server unsuspended: ${serverKey} (accepted: ${acceptNewPin})`);
-  return true;
-}
-
-function isServerSuspended(serverKey) {
-  return suspendedMcpServers.has(serverKey);
-}
-
-/** Resolve a tool invocation to its MCP server key (local:PORT or composio:TOOLKIT). Returns null for non-MCP tools. */
-function getServerKeyForTool(toolName, toolObj, args) {
-  // Direct local MCP tool (≤15 tools from that server)
-  if (toolObj && toolObj._port) return `local:${toolObj._port}`;
-  // LOCAL_MCP_EXECUTE meta-tool (>15 tools, routed)
-  if (toolName === "LOCAL_MCP_EXECUTE" && args?.server_name) {
-    // Find the port by server name
-    for (const [port, entry] of localMcpClients.entries()) {
-      if (entry.serverName === args.server_name) return `local:${port}`;
-    }
-  }
-  // LOCAL_MCP_ROUTE meta-tool
-  if (toolName === "LOCAL_MCP_ROUTE") return null; // routing tool, not executing — allow
-  // Composio tools — extract toolkit key from slug prefix
-  if (toolName === "COMPOSIO_MULTI_EXECUTE_TOOL") {
-    const slugs = (Array.isArray(args?.tools) ? args.tools : []).map(t => t?.tool_slug).filter(Boolean);
-    // All slugs in one call share a toolkit — check the first
-    if (slugs.length > 0) {
-      const slug = slugs[0];
-      const prefix = slug.split("_").slice(0, -1).join("_"); // e.g. GMAIL_FETCH_EMAILS → GMAIL_FETCH? No — toolkit keys like "GMAIL"
-      // Match against known suspended keys
-      for (const key of suspendedMcpServers.keys()) {
-        if (key.startsWith("composio:") && slug.startsWith(key.replace("composio:", "") + "_")) return key;
-      }
-    }
-  }
-  return null;
-}
-
-function getSuspendedServers() {
-  return Array.from(suspendedMcpServers.entries()).map(([key, details]) => ({ serverKey: key, ...details }));
-}
+// suspendMcpServer, unsuspendMcpServer, isServerSuspended, getServerKeyForTool, getSuspendedServers — moved to local-mcp.js
 let btProjectsCache = null; // { result, timestamp } — cached for session, cleared on unload
 // Explicit allowlist of tools permitted in inbox read-only mode.
 // Safer than a blocklist — any new tool is blocked by default until explicitly allowlisted.
@@ -494,342 +465,7 @@ const INBOX_READ_ONLY_TOOL_ALLOWLIST = new Set([
   // Local MCP discovery (read-only)
   "LOCAL_MCP_ROUTE"
 ]);
-// Note: totalCostUsd accumulates via floating-point addition, so after many API calls
-// it may drift by fractions of a cent. This is acceptable for a session-scoped UI indicator
-// that displays at most 2 decimal places and resets on reload.
-const sessionTokenUsage = {
-  totalInputTokens: 0,
-  totalOutputTokens: 0,
-  totalRequests: 0,
-  totalCostUsd: 0
-};
-
-// ── Persistent cost history ─────────────────────────────────────────
-// Daily cost records persisted to IndexedDB. Each entry tracks one day's
-// accumulated usage, broken down by model.
-// Shape: { days: { "2026-02-27": { cost, input, output, requests, models: { "model-id": { cost, input, output, requests } } } } }
-let costHistory = { days: {} };
-let costHistoryPersistTimeoutId = null;
-const COST_HISTORY_MAX_DAYS = 90; // Prune entries older than 90 days
-
-function todayDateKey() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
-function loadCostHistory(extensionAPI) {
-  const raw = extensionAPI?.settings?.get?.(SETTINGS_KEYS.costHistory);
-  if (raw && typeof raw === "object" && raw.days) {
-    costHistory = raw;
-  } else {
-    costHistory = { days: {} };
-  }
-}
-
-function persistCostHistory(extensionAPI = extensionAPIRef) {
-  if (costHistoryPersistTimeoutId) {
-    window.clearTimeout(costHistoryPersistTimeoutId);
-  }
-  costHistoryPersistTimeoutId = window.setTimeout(() => {
-    costHistoryPersistTimeoutId = null;
-    pruneCostHistory();
-    extensionAPI?.settings?.set?.(SETTINGS_KEYS.costHistory, costHistory);
-  }, 3000); // 3s debounce
-}
-
-function pruneCostHistory() {
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - COST_HISTORY_MAX_DAYS);
-  const cutoffKey = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, "0")}-${String(cutoff.getDate()).padStart(2, "0")}`;
-  for (const key of Object.keys(costHistory.days)) {
-    if (key < cutoffKey) delete costHistory.days[key];
-  }
-}
-
-function recordCostEntry(model, inputTokens, outputTokens, callCost) {
-  const key = todayDateKey();
-  if (!costHistory.days[key]) {
-    costHistory.days[key] = { cost: 0, input: 0, output: 0, requests: 0, models: {} };
-  }
-  const day = costHistory.days[key];
-  day.cost += callCost;
-  day.input += inputTokens;
-  day.output += outputTokens;
-  day.requests += 1;
-  if (!day.models[model]) {
-    day.models[model] = { cost: 0, input: 0, output: 0, requests: 0 };
-  }
-  const m = day.models[model];
-  m.cost += callCost;
-  m.input += inputTokens;
-  m.output += outputTokens;
-  m.requests += 1;
-  persistCostHistory();
-}
-
-/**
- * Checks whether the daily spending cap (if configured) has been exceeded.
- * Returns { exceeded: boolean, cap: number|null, spent: number }.
- */
-function isDailyCapExceeded() {
-  const capStr = getSettingString(extensionAPIRef, SETTINGS_KEYS.dailySpendingCap, "");
-  if (!capStr) return { exceeded: false, cap: null, spent: 0 };
-  const cap = parseFloat(capStr);
-  if (isNaN(cap) || cap <= 0) return { exceeded: false, cap: null, spent: 0 };
-  const today = todayDateKey();
-  const spent = costHistory.days[today]?.cost || 0;
-  return { exceeded: spent >= cap, cap, spent };
-}
-
-/**
- * Persists a compact audit log entry for the completed agent run.
- * Writes to "Chief of Staff/Audit Log" with newest entries first.
- * Non-fatal — errors are swallowed so audit logging never breaks the agent flow.
- */
-async function persistAuditLogEntry(trace, userPrompt) {
-  try {
-    if (!trace || !trace.startedAt) return;
-    const pageTitle = "Chief of Staff/Audit Log";
-    const pageUid = await ensurePageUidByTitle(pageTitle);
-    if (!pageUid) return;
-
-    const dateStr = formatRoamDate(new Date(trace.startedAt));
-    const durationSec = trace.finishedAt
-      ? ((trace.finishedAt - trace.startedAt) / 1000).toFixed(1)
-      : "?";
-    const toolCalls = trace.toolCalls || [];
-    const toolSummary = toolCalls.length > 0
-      ? toolCalls.map(tc => {
-          const dur = tc.durationMs ? ` (${(tc.durationMs / 1000).toFixed(1)}s)` : "";
-          const err = tc.error ? " ❌" : "";
-          return `${tc.name}${dur}${err}`;
-        }).join(", ")
-      : "none";
-    const tokens = (trace.totalInputTokens || 0) + (trace.totalOutputTokens || 0);
-    const cost = typeof trace.cost === "number" ? `$${trace.cost.toFixed(4)}` : "";
-    const outcome = trace.capExceeded ? "cap-exceeded"
-      : trace.error ? `error: ${String(trace.error).slice(0, 80)}`
-      : "success";
-    const prompt = String(userPrompt || trace.promptPreview || "").slice(0, 120);
-
-    const block = `[[${dateStr}]] **${trace.model || "unknown"}** `
-      + `(${trace.iterations || 0} iter, ${durationSec}s, ${tokens} tok${cost ? ", " + cost : ""}) `
-      + `— ${outcome}`
-      + `\nPrompt: ${prompt}`
-      + `\nTools: ${toolSummary}`;
-
-    await createRoamBlock(pageUid, block, "first");
-    debugLog("[Chief flow] Audit log entry persisted");
-
-    // Non-blocking trim of old entries (runs in background)
-    trimAuditLog().catch(() => {});
-  } catch (err) {
-    debugLog("[Chief flow] Audit log write failed (non-fatal):", err?.message || err);
-  }
-}
-
-/**
- * Trims audit log entries older than the configured retention period.
- * Parses the Roam date reference at the start of each block (e.g. [[March 1st, 2026]])
- * and deletes blocks whose date is older than `retentionDays` from today.
- * Non-fatal — errors are swallowed so trimming never breaks the agent flow.
- */
-let auditTrimInFlight = false;
-async function trimAuditLog() {
-  if (auditTrimInFlight) return;
-  try {
-    const retentionStr = getSettingString(extensionAPIRef, SETTINGS_KEYS.auditLogRetentionDays, "");
-    const retentionDays = parseInt(retentionStr, 10);
-    if (!retentionDays || retentionDays <= 0) return; // disabled or invalid
-
-    auditTrimInFlight = true;
-    const pageTitle = "Chief of Staff/Audit Log";
-    const api = getRoamAlphaApi();
-    const allBlocks = api.q(`
-      [:find ?uid ?str
-       :where [?p :node/title "${pageTitle}"]
-              [?p :block/children ?b]
-              [?b :block/string ?str]
-              [?b :block/uid ?uid]]
-    `);
-    if (!allBlocks || allBlocks.length === 0) return;
-
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - retentionDays);
-    cutoff.setHours(0, 0, 0, 0);
-
-    // Parse "[[Month Dayth, Year]]" from the start of block text
-    const MONTHS = {
-      january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
-      july: 6, august: 7, september: 8, october: 9, november: 10, december: 11
-    };
-    const dateRefRe = /^\[\[(\w+)\s+(\d+)\w{0,2},\s*(\d{4})\]\]/;
-
-    let deleted = 0;
-    for (const [uid, str] of allBlocks) {
-      const m = String(str).match(dateRefRe);
-      if (!m) continue;
-      const monthIdx = MONTHS[m[1].toLowerCase()];
-      if (monthIdx === undefined) continue;
-      const blockDate = new Date(parseInt(m[3], 10), monthIdx, parseInt(m[2], 10));
-      if (blockDate < cutoff) {
-        await api.deleteBlock({ block: { uid } });
-        deleted++;
-      }
-    }
-    if (deleted > 0) {
-      debugLog(`[Audit Log] Trimmed ${deleted} entries older than ${retentionDays} days`);
-    }
-  } catch (err) {
-    debugLog("[Audit Log] Trim failed (non-fatal):", err?.message || err);
-  } finally {
-    auditTrimInFlight = false;
-  }
-}
-
-// ── Usage Stats Accumulator (2.7 Behavioural Monitoring) ─────────────────────
-// Per-day counters for tool calls, approvals, injection warnings, escalations.
-// Persisted to IndexedDB settings and written to a Roam page for human review.
-
-let usageStats = { days: {} };
-let usageStatsPersistTimeoutId = null;
-const USAGE_STATS_MAX_DAYS = 90;
-
-function loadUsageStats(extensionAPI) {
-  const raw = extensionAPI?.settings?.get?.(SETTINGS_KEYS.usageStats);
-  if (raw && typeof raw === "object" && raw.days) {
-    usageStats = raw;
-  } else {
-    usageStats = { days: {} };
-  }
-}
-
-function pruneUsageStats() {
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - USAGE_STATS_MAX_DAYS);
-  const cutoffKey = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, "0")}-${String(cutoff.getDate()).padStart(2, "0")}`;
-  for (const key of Object.keys(usageStats.days)) {
-    if (key < cutoffKey) delete usageStats.days[key];
-  }
-}
-
-function persistUsageStatsSettings(extensionAPI = extensionAPIRef) {
-  if (usageStatsPersistTimeoutId) {
-    window.clearTimeout(usageStatsPersistTimeoutId);
-  }
-  usageStatsPersistTimeoutId = window.setTimeout(() => {
-    usageStatsPersistTimeoutId = null;
-    pruneUsageStats();
-    extensionAPI?.settings?.set?.(SETTINGS_KEYS.usageStats, usageStats);
-  }, 3000);
-}
-
-function ensureTodayUsageStats() {
-  const key = todayDateKey();
-  if (!usageStats.days[key]) {
-    usageStats.days[key] = {
-      agentRuns: 0, toolCalls: {}, approvalsGranted: 0, approvalsDenied: 0,
-      injectionWarnings: 0, claimedActionFires: 0, tierEscalations: 0, memoryWriteBlocks: 0
-    };
-  }
-  return usageStats.days[key];
-}
-
-function recordUsageStat(stat, detail) {
-  const day = ensureTodayUsageStats();
-  if (stat === "toolCall" && detail) {
-    day.toolCalls[detail] = (day.toolCalls[detail] || 0) + 1;
-  } else if (stat in day && typeof day[stat] === "number") {
-    day[stat] += 1;
-  }
-  persistUsageStatsSettings();
-}
-
-async function persistUsageStatsPage() {
-  if (unloadInProgress) return;
-  try {
-    const key = todayDateKey();
-    const day = usageStats.days[key];
-    if (!day || !day.agentRuns) return;
-
-    const pageTitle = "Chief of Staff/Usage Stats";
-    const pageUid = await ensurePageUidByTitle(pageTitle);
-    if (!pageUid) return;
-
-    const dateStr = formatRoamDate(new Date());
-    const totalToolCalls = Object.values(day.toolCalls).reduce((s, c) => s + c, 0);
-    const topTools = Object.entries(day.toolCalls)
-      .sort(([, a], [, b]) => b - a)
-      .slice(0, 10)
-      .map(([name, count]) => `${name} (${count})`)
-      .join(", ");
-    const totalApprovals = day.approvalsGranted + day.approvalsDenied;
-    const approvalStr = totalApprovals > 0
-      ? `${day.approvalsGranted}/${totalApprovals}`
-      : "0";
-
-    const block = `[[${dateStr}]] — ${day.agentRuns} runs | ${totalToolCalls} tool calls`
-      + ` | approvals ${approvalStr}`
-      + ` | ${day.injectionWarnings} injection warn`
-      + ` | ${day.claimedActionFires} claimed-action`
-      + ` | ${day.tierEscalations} escalations`
-      + ` | ${day.memoryWriteBlocks} mem blocks`
-      + (topTools ? ` | Top: ${topTools}` : "");
-
-    // Find existing block for today — update in place to avoid duplicates
-    const safeDateRef = escapeForDatalog(`[[${dateStr}]]`);
-    const existingUid = await queryRoamDatalog(
-      `[:find ?uid . :where [?p :node/title "${escapeForDatalog(pageTitle)}"] [?b :block/page ?p] [?b :block/string ?s] [(clojure.string/includes? ?s "${safeDateRef}")] [?b :block/uid ?uid]]`
-    );
-    const api = getRoamAlphaApi();
-    if (existingUid) {
-      await api.updateBlock({ block: { uid: existingUid, string: block } });
-    } else {
-      await createRoamBlock(pageUid, block, "first");
-    }
-    debugLog("[Chief flow] Usage stats page updated");
-  } catch (err) {
-    debugLog("[Chief flow] Usage stats page write failed (non-fatal):", err?.message || err);
-  }
-}
-
-function getCostHistorySummary() {
-  const today = todayDateKey();
-  const todayData = costHistory.days[today] || { cost: 0, input: 0, output: 0, requests: 0, models: {} };
-
-  // Last 7 days
-  let week = { cost: 0, input: 0, output: 0, requests: 0 };
-  const now = new Date();
-  for (let i = 0; i < 7; i++) {
-    const d = new Date(now);
-    d.setDate(d.getDate() - i);
-    const k = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-    const entry = costHistory.days[k];
-    if (entry) {
-      week.cost += entry.cost;
-      week.input += entry.input;
-      week.output += entry.output;
-      week.requests += entry.requests;
-    }
-  }
-
-  // Last 30 days
-  let month = { cost: 0, input: 0, output: 0, requests: 0 };
-  for (let i = 0; i < 30; i++) {
-    const d = new Date(now);
-    d.setDate(d.getDate() - i);
-    const k = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-    const entry = costHistory.days[k];
-    if (entry) {
-      month.cost += entry.cost;
-      month.input += entry.input;
-      month.output += entry.output;
-      month.requests += entry.requests;
-    }
-  }
-
-  return { today: todayData, week, month };
-}
+// ── Usage Tracking (stub) ── Extracted to src/usage-tracking.js ──────
 
 let installedToolsFetchCache = {
   expiresAt: 0,
@@ -960,139 +596,7 @@ function getExternalExtensionTools() {
   return tools;
 }
 
-// --- Local MCP tool discovery (reads from localMcpClients Map — tools listed at connect time) ---
-function getLocalMcpTools() {
-  if (localMcpToolsCache) return localMcpToolsCache;
-
-  const allTools = [];
-  const seenNames = new Set();
-  for (const [, entry] of localMcpClients) {
-    if (!entry?.client || !Array.isArray(entry.tools)) continue;
-    for (const tool of entry.tools) {
-      if (seenNames.has(tool.name)) continue;
-      seenNames.add(tool.name);
-      allTools.push(tool);
-    }
-  }
-  localMcpToolsCache = allTools;
-  return localMcpToolsCache;
-}
-
-/**
- * Build the LOCAL_MCP_EXECUTE meta-tool for large MCP servers.
- * The LLM references tool names from the system prompt and dispatches
- * through this single tool, keeping the registered tool count low.
- */
-function buildLocalMcpMetaTool() {
-  return {
-    name: "LOCAL_MCP_EXECUTE",
-    description: "Execute a tool discovered via LOCAL_MCP_ROUTE. Provide the exact tool_name and its arguments. IMPORTANT: key/ID parameters (e.g. collection_key, item_key) take a single alphanumeric identifier like \"NADHRMVD\" — never a path like \"parent/child\" or a display name.",
-    input_schema: {
-      type: "object",
-      properties: {
-        tool_name: { type: "string", description: "Exact tool name returned by LOCAL_MCP_ROUTE" },
-        arguments: { type: "object", description: "Arguments for the tool" }
-      },
-      required: ["tool_name"]
-    },
-    execute: async (args) => {
-      const innerName = args?.tool_name;
-      if (!innerName) return { error: "tool_name is required" };
-      const tool = (localMcpToolsCache || []).find(t => t.name === innerName);
-      if (!tool) return { error: `Tool "${innerName}" not found in local MCP servers` };
-      return tool.execute(args.arguments || {});
-    }
-  };
-}
-
-// Compact tool listing for deterministic "what X tools" responses.
-// Groups by server, descriptions only (no schemas) to stay concise.
-function formatToolListByServer(tools) {
-  const byServer = new Map();
-  for (const t of tools) {
-    const sn = t._serverName || "unknown";
-    if (!byServer.has(sn)) byServer.set(sn, []);
-    byServer.get(sn).push(t);
-  }
-  const sections = [];
-  for (const [serverName, serverTools] of byServer) {
-    const toolLines = serverTools.map(t => `- **${t.name}**: ${t.description || "(no description)"}`);
-    sections.push(`### ${serverName} (${serverTools.length} tools)\n${toolLines.join("\n")}`);
-  }
-  const totalCount = tools.length;
-  const serverCount = byServer.size;
-  const header = serverCount === 1
-    ? `## ${[...byServer.keys()][0]} — ${totalCount} tools available`
-    : `## ${totalCount} tools across ${serverCount} servers`;
-  return `${header}\n\n${sections.join("\n\n")}`;
-}
-
-// Full tool listing with schemas for LLM tool discovery (LOCAL_MCP_ROUTE).
-function formatServerToolList(tools, serverName) {
-  const lines = tools.map(t => {
-    const schema = t.input_schema && Object.keys(t.input_schema.properties || {}).length > 0
-      ? `\n  Input: ${JSON.stringify(t.input_schema)}`
-      : "";
-    return `- **${t.name}**: ${t.description || "(no description)"}${schema}`;
-  });
-  return {
-    text: `## ${serverName} — ${tools.length} tools available\n\nCall these via LOCAL_MCP_EXECUTE({ "tool_name": "...", "arguments": {...} }).\n\n${lines.join("\n\n")}`
-  };
-}
-
-function buildLocalMcpRouteTool() {
-  // Inject available server names into the tool schema so the LLM doesn't have to
-  // cross-reference the system prompt to find valid server_name values.
-  const cache = localMcpToolsCache || [];
-  const routedServers = [...new Set(cache.filter(t => !t._isDirect).map(t => t._serverName))];
-  const serverNameDesc = routedServers.length > 0
-    ? `Server name. Available servers: ${routedServers.join(", ")}`
-    : "Server name from the system prompt";
-
-  return {
-    name: "LOCAL_MCP_ROUTE",
-    isMutating: false,
-    description: "Discover available tools on a local MCP server. Call this FIRST for routed servers to see their tool names, descriptions, and input schemas. Then call LOCAL_MCP_EXECUTE with the specific tool.",
-    input_schema: {
-      type: "object",
-      properties: {
-        server_name: { type: "string", description: serverNameDesc },
-        task_description: { type: "string", description: "Optional: brief description of what you want to accomplish" }
-      },
-      required: ["server_name"]
-    },
-    execute: async (args) => {
-      const serverName = args?.server_name;
-      if (!serverName) return { error: "server_name is required" };
-
-      const cache = localMcpToolsCache || [];
-      let serverTools = cache.filter(t => t._serverName === serverName && !t._isDirect);
-
-      // Case-insensitive fallback
-      if (serverTools.length === 0) {
-        const lowerName = serverName.toLowerCase();
-        serverTools = cache.filter(t => (t._serverName || "").toLowerCase() === lowerName && !t._isDirect);
-      }
-
-      if (serverTools.length === 0) {
-        // Check if the server_name matches a DIRECT tool name or server — guide the LLM to call it directly
-        const lowerName2 = (serverName || "").toLowerCase();
-        const directMatch = cache.find(t => t._isDirect && (
-          t.name.toLowerCase() === lowerName2 ||
-          (t._serverName || "").toLowerCase() === lowerName2 ||
-          (t._serverName || "").toLowerCase().includes(lowerName2)
-        ));
-        if (directMatch) {
-          return { error: `"${serverName}" is a DIRECT tool, not a routed server. Do NOT use LOCAL_MCP_ROUTE for it. Instead, call the tool "${directMatch.name}" directly with its arguments — it is already registered as a callable tool.` };
-        }
-        const available = [...new Set(cache.filter(t => !t._isDirect).map(t => t._serverName))];
-        return { error: `Server "${serverName}" not found. Available routed servers: ${available.join(", ") || "(none)"}` };
-      }
-
-      return formatServerToolList(serverTools, serverTools[0]._serverName);
-    }
-  };
-}
+// getLocalMcpTools, buildLocalMcpMetaTool, formatToolListByServer, formatServerToolList, buildLocalMcpRouteTool — moved to local-mcp.js
 
 // --- Generic extension broadcast event bridge ---
 function setupExtensionBroadcastListeners() {
@@ -2794,7 +2298,7 @@ function buildRuntimeAibomSnapshotText() {
   );
 
   const localServerRows = [];
-  for (const [port, entry] of localMcpClients.entries()) {
+  for (const [port, entry] of getLocalMcpClients().entries()) {
     const serverName = entry?.serverName || `Local MCP ${port}`;
     const serverKey = `local:${port}`;
     const direct = Boolean(entry?.tools?.[0]?._isDirect);
@@ -2808,7 +2312,7 @@ function buildRuntimeAibomSnapshotText() {
     });
   }
 
-  const suspendedRows = Array.from(suspendedMcpServers.entries()).map(([serverKey, details]) => ({
+  const suspendedRows = Array.from(getSuspendedServers().entries()).map(([serverKey, details]) => ({
     serverKey,
     summary: details?.summary || "suspended",
     serverName: details?.serverName || serverKey
@@ -4199,21 +3703,19 @@ async function runAgentLoop(userMessage, options = {}) {
           const outputTokens = usage.completion_tokens || 0;
           trace.totalInputTokens = (trace.totalInputTokens || 0) + inputTokens;
           trace.totalOutputTokens = (trace.totalOutputTokens || 0) + outputTokens;
-          sessionTokenUsage.totalInputTokens += inputTokens;
-          sessionTokenUsage.totalOutputTokens += outputTokens;
-          sessionTokenUsage.totalRequests += 1;
           const callCost = (inputTokens / 1_000_000 * getModelCostRates(model).inputPerM) + (outputTokens / 1_000_000 * getModelCostRates(model).outputPerM);
-          sessionTokenUsage.totalCostUsd += callCost;
+          accumulateSessionTokens(inputTokens, outputTokens, callCost);
           recordCostEntry(model, inputTokens, outputTokens, callCost);
           trace.cost = (trace.cost || 0) + callCost;
+          const _stu = getSessionTokenUsage();
           debugLog("[Chief flow] API usage (stream):", {
             inputTokens, outputTokens,
             callCostCents: (callCost * 100).toFixed(3),
             sessionTotals: {
-              input: sessionTokenUsage.totalInputTokens,
-              output: sessionTokenUsage.totalOutputTokens,
-              requests: sessionTokenUsage.totalRequests,
-              costCents: (sessionTokenUsage.totalCostUsd * 100).toFixed(2)
+              input: _stu.totalInputTokens,
+              output: _stu.totalOutputTokens,
+              requests: _stu.totalRequests,
+              costCents: (_stu.totalCostUsd * 100).toFixed(2)
             }
           });
           // Post-call cap proximity check
@@ -4254,22 +3756,20 @@ async function runAgentLoop(userMessage, options = {}) {
           const outputTokens = usage.completion_tokens || usage.output_tokens || 0;
           trace.totalInputTokens = (trace.totalInputTokens || 0) + inputTokens;
           trace.totalOutputTokens = (trace.totalOutputTokens || 0) + outputTokens;
-          sessionTokenUsage.totalInputTokens += inputTokens;
-          sessionTokenUsage.totalOutputTokens += outputTokens;
-          sessionTokenUsage.totalRequests += 1;
           const { inputPerM: costPerMInput, outputPerM: costPerMOutput } = getModelCostRates(model);
           const callCost = (inputTokens / 1_000_000 * costPerMInput) + (outputTokens / 1_000_000 * costPerMOutput);
-          sessionTokenUsage.totalCostUsd += callCost;
+          accumulateSessionTokens(inputTokens, outputTokens, callCost);
           recordCostEntry(model, inputTokens, outputTokens, callCost);
           trace.cost = (trace.cost || 0) + callCost;
+          const _stu2 = getSessionTokenUsage();
           debugLog("[Chief flow] API usage:", {
             inputTokens, outputTokens,
             callCostCents: (callCost * 100).toFixed(3),
             sessionTotals: {
-              input: sessionTokenUsage.totalInputTokens,
-              output: sessionTokenUsage.totalOutputTokens,
-              requests: sessionTokenUsage.totalRequests,
-              costCents: (sessionTokenUsage.totalCostUsd * 100).toFixed(2)
+              input: _stu2.totalInputTokens,
+              output: _stu2.totalOutputTokens,
+              requests: _stu2.totalRequests,
+              costCents: (_stu2.totalCostUsd * 100).toFixed(2)
             }
           });
           // Post-call cap proximity check
@@ -5324,386 +4824,8 @@ async function reconnectComposio(extensionAPI) {
 }
 
 // --- Local MCP server connection management ---
-
-/**
- * Lightweight MCP SSE transport using the browser's native EventSource API.
- * Replaces the SDK's SSEClientTransport (which uses the fetch-based eventsource
- * v3 package and fails with supergateway's local SSE endpoints).
- */
-class NativeSSETransport {
-  constructor(url) {
-    this._url = url;
-    this._eventSource = null;
-    this._endpoint = null;
-    this._protocolVersion = null;
-    this._retryTimer = null;
-    this.onclose = null;
-    this.onerror = null;
-    this.onmessage = null;
-  }
-
-  setProtocolVersion(version) {
-    this._protocolVersion = version;
-  }
-
-  start() {
-    const MAX_START_ATTEMPTS = 4;
-    const START_RETRY_DELAY_MS = 1500;
-
-    return new Promise((resolve, reject) => {
-      let resolved = false;
-      let attempt = 0;
-
-      const tryConnect = () => {
-        attempt++;
-        // Clean up previous failed EventSource
-        if (this._eventSource) {
-          this._eventSource.close();
-          this._eventSource = null;
-        }
-
-        const es = new EventSource(this._url.toString());
-        this._eventSource = es;
-
-        es.addEventListener("endpoint", (e) => {
-          try {
-            this._endpoint = new URL(e.data, this._url);
-          } catch {
-            this._endpoint = new URL(e.data);
-          }
-          if (!resolved) {
-            resolved = true;
-            resolve();
-          }
-        });
-
-        es.addEventListener("message", (e) => {
-          try {
-            const msg = JSON.parse(e.data);
-            this.onmessage?.(msg);
-          } catch (err) {
-            this.onerror?.(new Error(`Failed to parse SSE message: ${err.message}`));
-          }
-        });
-
-        es.onerror = () => {
-          if (!resolved) {
-            es.close();
-            this._eventSource = null;
-            if (attempt < MAX_START_ATTEMPTS) {
-              this._retryTimer = setTimeout(tryConnect, START_RETRY_DELAY_MS);
-            } else {
-              reject(new Error("SSE connection failed to " + this._url));
-            }
-          } else {
-            // Post-connect error: close immediately to prevent zombie EventSource
-            // auto-reconnects flooding the console. Our caller's backoff logic
-            // handles reconnection on the next getLocalMcpTools() cycle.
-            es.close();
-            this._eventSource = null;
-            this.onclose?.();
-          }
-        };
-      };
-
-      tryConnect();
-    });
-  }
-
-  async close() {
-    if (this._retryTimer) {
-      clearTimeout(this._retryTimer);
-      this._retryTimer = null;
-    }
-    if (this._eventSource) {
-      this._eventSource.close();
-      this._eventSource = null;
-    }
-    this._endpoint = null;
-    this.onclose?.();
-  }
-
-  async send(message) {
-    if (!this._endpoint) throw new Error("Not connected");
-    const headers = { "Content-Type": "application/json" };
-    if (this._protocolVersion) {
-      headers["mcp-protocol-version"] = this._protocolVersion;
-    }
-    const resp = await fetch(this._endpoint.toString(), {
-      method: "POST",
-      headers,
-      body: JSON.stringify(message),
-    });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      throw new Error(`POST ${resp.status}: ${text}`);
-    }
-  }
-}
-
-async function connectLocalMcp(port) {
-  const existing = localMcpClients.get(port);
-
-  // Already connected — return cached client
-  if (existing?.client) return existing.client;
-
-  // Exponential backoff after recent failure: 2s, 4s, 8s, 16s, 32s, 60s (capped)
-  if (existing?.lastFailureAt && existing.failureCount > 0) {
-    const backoffMs = Math.min(LOCAL_MCP_INITIAL_BACKOFF_MS * Math.pow(2, existing.failureCount - 1), LOCAL_MCP_MAX_BACKOFF_MS);
-    if ((Date.now() - existing.lastFailureAt) < backoffMs) {
-      debugLog(`[Local MCP] Port ${port} skipped (backoff ${Math.round(backoffMs / 1000)}s after ${existing.failureCount} failure(s))`);
-      return null;
-    }
-  }
-
-  // Dedup in-flight connect
-  if (existing?.connectPromise) {
-    debugLog(`[Local MCP] Port ${port} connection already in progress`);
-    return existing.connectPromise;
-  }
-
-  const promise = (async () => {
-    let transport = null;
-    try {
-      const url = new URL(`http://localhost:${port}/sse`);
-      transport = new NativeSSETransport(url);
-      const client = new Client({ name: `roam-local-mcp-${port}`, version: "0.1.0" });
-
-      let timeoutId = null;
-      const connectPromise = client.connect(transport);
-      const timeoutPromise = new Promise((_, reject) => {
-        timeoutId = setTimeout(() => {
-          timeoutId = null;
-          reject(new Error(`Local MCP connection timeout on port ${port}`));
-        }, LOCAL_MCP_CONNECT_TIMEOUT_MS);
-      });
-
-      try {
-        await Promise.race([connectPromise, timeoutPromise]);
-      } finally {
-        if (timeoutId) { clearTimeout(timeoutId); timeoutId = null; }
-      }
-
-      // Capture server metadata from MCP handshake
-      const serverVersion = client.getServerVersion?.() || {};
-      const serverName = serverVersion.name || `mcp-${port}`;
-      const serverDescription = serverVersion.description || client.getInstructions?.() || "";
-
-      // List tools at connection time (cached until reconnect/refresh — no per-loop calls)
-      let tools = [];
-      try {
-        const listPromise = client.listTools();
-        let listTimeoutId;
-        const timeoutPromise = new Promise((_, reject) => {
-          listTimeoutId = setTimeout(() => reject(new Error(`listTools timeout on port ${port}`)), LOCAL_MCP_LIST_TOOLS_TIMEOUT_MS);
-        });
-        let result;
-        try {
-          result = await Promise.race([listPromise, timeoutPromise]);
-        } finally {
-          clearTimeout(listTimeoutId);
-        }
-        const serverTools = result?.tools || [];
-        const isDirect = serverTools.length <= LOCAL_MCP_DIRECT_TOOL_THRESHOLD;
-
-        for (const t of serverTools) {
-          if (!t?.name) continue;
-          const boundClient = client;
-          const toolName = t.name;
-          // Derive isMutating from MCP ToolAnnotations (readOnlyHint, destructiveHint).
-          // undefined = no annotation → heuristic fallback in isPotentiallyMutatingTool.
-          const annotations = t.annotations || null;
-          if (annotations) debugLog(`[Local MCP] Tool ${toolName} annotations:`, annotations);
-          let isMutating;
-          if (annotations?.readOnlyHint === true) {
-            isMutating = false;
-          } else if (annotations?.destructiveHint === true || annotations?.readOnlyHint === false) {
-            isMutating = true;
-          } else {
-            isMutating = undefined;
-          }
-          tools.push({
-            name: toolName,
-            isMutating,
-            description: t.description || "",
-            input_schema: t.inputSchema || { type: "object", properties: {} },
-            _annotations: annotations,
-            _serverName: serverName,
-            _serverDescription: serverDescription,
-            _port: port,
-            _isDirect: isDirect,
-            execute: async (args = {}) => {
-              // Calendar auto-inject: for event-query tools, if calendarId is missing or invalid,
-              // auto-discover all calendars and inject their IDs BEFORE making the call.
-              // This prevents LLM failures from bad/missing calendarId on weaker models.
-              const CALENDAR_EVENT_TOOLS = ["list-events", "search-events", "get-freebusy"];
-              const isCalendarEventTool = CALENDAR_EVENT_TOOLS.includes(toolName);
-              if (isCalendarEventTool && !args.calendarId) {
-                try {
-                  debugLog(`[Local MCP] Calendar auto-inject: ${toolName} called without calendarId, discovering calendars...`);
-                  const calResult = await boundClient.callTool({ name: "list-calendars", arguments: {} });
-                  const calText = calResult?.content?.[0]?.text;
-                  let calendars;
-                  if (typeof calText === "string") { try { calendars = JSON.parse(calText); } catch { /* ignore */ } }
-                  const ids = (calendars?.calendars || []).map(c => c.id).filter(Boolean);
-                  if (ids.length > 0) {
-                    debugLog(`[Local MCP] Calendar auto-inject: adding ${ids.length} calendar IDs to ${toolName}`);
-                    args = { ...args, calendarId: ids };
-                  }
-                } catch (injectErr) {
-                  debugLog(`[Local MCP] Calendar auto-inject failed:`, injectErr?.message);
-                }
-              }
-              try {
-                const result = await boundClient.callTool({ name: toolName, arguments: args });
-                const text = result?.content?.[0]?.text;
-                if (typeof text === "string") {
-                  // If the result is a calendar error about bad IDs, retry with discovered IDs
-                  if (isCalendarEventTool && /MCP error|calendar\(s\)\s*not\s*found/i.test(text)) {
-                    try {
-                      debugLog(`[Local MCP] Calendar retry: ${toolName} returned error, re-discovering calendars...`);
-                      const calResult = await boundClient.callTool({ name: "list-calendars", arguments: {} });
-                      const calText = calResult?.content?.[0]?.text;
-                      let calendars;
-                      if (typeof calText === "string") { try { calendars = JSON.parse(calText); } catch { /* ignore */ } }
-                      const ids = (calendars?.calendars || []).map(c => c.id).filter(Boolean);
-                      if (ids.length > 0) {
-                        debugLog(`[Local MCP] Calendar retry: retrying ${toolName} with ${ids.length} fresh calendar IDs`);
-                        const retryResult = await boundClient.callTool({ name: toolName, arguments: { ...args, calendarId: ids } });
-                        const retryText = retryResult?.content?.[0]?.text;
-                        if (typeof retryText === "string") {
-                          try { return JSON.parse(retryText); } catch { return { text: retryText }; }
-                        }
-                        return retryResult;
-                      }
-                    } catch (retryErr) {
-                      debugLog(`[Local MCP] Calendar retry failed:`, retryErr?.message);
-                    }
-                  }
-                  try { return JSON.parse(text); } catch { return { text }; }
-                }
-                return result;
-              } catch (e) {
-                const errMsg = e?.message || `Failed: ${toolName}`;
-                return { error: errMsg };
-              }
-            }
-          });
-        }
-        debugLog(`[Local MCP] Discovered ${serverTools.length} tools from port ${port} (server: ${serverName})`);
-      } catch (e) {
-        console.warn(`[Local MCP] listTools failed at connect for port ${port}:`, e?.message);
-      }
-
-      // ─── MCP Supply Chain Hardening (scan → pin → BOM) ───
-      const flaggedTools = scanToolDescriptions(tools, serverName);
-      let pinResult = { status: "skipped" };
-      try {
-        pinResult = await checkSchemaPin(`local:${port}`, tools, serverName);
-      } catch (e) {
-        debugLog(`[MCP Security] Schema pin failed for port ${port}:`, e?.message);
-      }
-      try {
-        await updateMcpBom(`local:${port}`, serverName, serverDescription, tools, pinResult, flaggedTools);
-      } catch (e) {
-        debugLog(`[MCP BOM] BOM update failed for port ${port}:`, e?.message);
-      }
-      // ─── End MCP Supply Chain Hardening ───
-
-      // Pre-compute server name fragments and regex patterns for fast prompt matching (L7).
-      // These patterns are stable for the lifetime of the connection.
-      const _nameFragments = serverName
-        ? serverName.toLowerCase().split(/[-_]/).filter(p => p.length > 3).map(part => {
-          const escaped = part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-          try { return new RegExp(`\\b${escaped}\\b`); } catch { return null; }
-        }).filter(Boolean)
-        : [];
-      localMcpClients.set(port, { client, transport, lastFailureAt: 0, failureCount: 0, connectPromise: null, serverName, serverDescription, tools, _nameFragments });
-      localMcpToolsCache = null; // invalidate so getLocalMcpTools() rebuilds from Map
-      debugLog(`[Local MCP] Connected to port ${port} — server: ${serverName}`);
-      showInfoToast("Local MCP connected", `${serverName} (port ${port}) — ${tools.length} tool${tools.length !== 1 ? "s" : ""} available.`);
-      return client;
-    } catch (error) {
-      // Close client and transport to prevent orphaned state and EventSource zombie connections
-      if (client) try { await client.close(); } catch { }
-      if (transport) try { await transport.close(); } catch { }
-      const prevCount = localMcpClients.get(port)?.failureCount || 0;
-      console.warn(`[Local MCP] Failed to connect to port ${port} (attempt ${prevCount + 1}):`, error?.message);
-      localMcpClients.set(port, { client: null, transport: null, lastFailureAt: Date.now(), failureCount: prevCount + 1, connectPromise: null, serverName: null, serverDescription: "" });
-      return null;
-    } finally {
-      const entry = localMcpClients.get(port);
-      if (entry) entry.connectPromise = null;
-    }
-  })();
-
-  // Store in-flight promise immediately for deduplication
-  const entry = localMcpClients.get(port) || { client: null, transport: null, lastFailureAt: 0, failureCount: 0, connectPromise: null };
-  entry.connectPromise = promise;
-  localMcpClients.set(port, entry);
-
-  return promise;
-}
-
-async function disconnectLocalMcp(port) {
-  const entry = localMcpClients.get(port);
-  if (!entry) { localMcpClients.delete(port); return; }
-  try {
-    if (entry.client) await entry.client.close();
-    // Safety net: close transport directly in case client.close() didn't
-    if (entry.transport) await entry.transport.close().catch(() => { });
-    debugLog(`[Local MCP] Disconnected from port ${port}`);
-  } catch (error) {
-    console.warn(`[Local MCP] Error disconnecting port ${port}:`, error?.message);
-  } finally {
-    localMcpClients.delete(port);
-    localMcpToolsCache = null; // invalidate so getLocalMcpTools() rebuilds from Map
-  }
-}
-
-async function disconnectAllLocalMcp() {
-  const ports = [...localMcpClients.keys()];
-  await Promise.allSettled(ports.map(port => disconnectLocalMcp(port)));
-  localMcpToolsCache = null;
-}
-
-function scheduleLocalMcpAutoConnect() {
-  const ports = getLocalMcpPorts();
-  if (!ports.length) return;
-
-  const connectWithRetry = (port, attempt) => {
-    if (unloadInProgress || extensionAPIRef === null) return;
-    if (attempt > LOCAL_MCP_AUTO_CONNECT_MAX_RETRIES) {
-      debugLog(`[Local MCP] Auto-connect gave up on port ${port} after ${LOCAL_MCP_AUTO_CONNECT_MAX_RETRIES} retries`);
-      showErrorToast("Local MCP failed", `Could not connect to MCP server on port ${port} after ${LOCAL_MCP_AUTO_CONNECT_MAX_RETRIES} retries. Check that the server is running, then use "Refresh Local MCP Servers" to retry.`);
-      return;
-    }
-
-    // Clear stale failure state so connectLocalMcp doesn't skip via backoff
-    const stale = localMcpClients.get(port);
-    if (stale && !stale.client) localMcpClients.delete(port);
-
-    connectLocalMcp(port).then(client => {
-      if (client) return; // success
-      const delay = Math.min(LOCAL_MCP_INITIAL_BACKOFF_MS * Math.pow(2, attempt - 1), LOCAL_MCP_MAX_BACKOFF_MS);
-      debugLog(`[Local MCP] Auto-connect retry for port ${port} in ${Math.round(delay / 1000)}s (attempt ${attempt + 1}/${LOCAL_MCP_AUTO_CONNECT_MAX_RETRIES})`);
-      const tid = window.setTimeout(() => { localMcpAutoConnectTimerIds.delete(tid); connectWithRetry(port, attempt + 1); }, delay);
-      localMcpAutoConnectTimerIds.add(tid);
-    }).catch(e => {
-      debugLog(`[Local MCP] Auto-connect failed for port ${port}:`, e?.message);
-      const delay = Math.min(LOCAL_MCP_INITIAL_BACKOFF_MS * Math.pow(2, attempt - 1), LOCAL_MCP_MAX_BACKOFF_MS);
-      const tid = window.setTimeout(() => { localMcpAutoConnectTimerIds.delete(tid); connectWithRetry(port, attempt + 1); }, delay);
-      localMcpAutoConnectTimerIds.add(tid);
-    });
-  };
-
-  const initialTid = window.setTimeout(() => {
-    localMcpAutoConnectTimerIds.delete(initialTid);
-    if (unloadInProgress || extensionAPIRef === null) return;
-    ports.forEach(port => connectWithRetry(port, 1));
-  }, COMPOSIO_AUTO_CONNECT_DELAY_MS + 500);
-  localMcpAutoConnectTimerIds.add(initialTid);
-}
+// NativeSSETransport, connectLocalMcp, disconnectLocalMcp, disconnectAllLocalMcp,
+// scheduleLocalMcpAutoConnect — moved to local-mcp.js
 
 function upsertInstalledTool(extensionAPI, toolRecord) {
   const normalised = normaliseInstalledToolRecord(toolRecord);
@@ -7435,11 +6557,11 @@ async function askChiefOfStaff(userMessage, options = {}) {
   // Check all MCP servers for name mentions. Prefer routed (>15 tools) matches over
   // direct ones — a routed match triggers hard escalation because mini-tier models
   // struggle with the two-step LOCAL_MCP_ROUTE → LOCAL_MCP_EXECUTE pattern.
-  const mcpServerMatch = effectiveTier === "mini" && localMcpClients.size > 0 && (() => {
+  const mcpServerMatch = effectiveTier === "mini" && getLocalMcpClients().size > 0 && (() => {
     const lower = prompt.toLowerCase();
     let matchedDirect = false;
     let matchedRouted = false;
-    for (const [, entry] of localMcpClients) {
+    for (const [, entry] of getLocalMcpClients()) {
       if (!entry?.serverName) continue;
       const sn = entry.serverName.toLowerCase();
       let matches = lower.includes(sn);
@@ -7616,7 +6738,7 @@ function buildOnboardingDeps(extensionAPI) {
     getLocalMcpPorts,
     connectLocalMcp,
     getLocalMcpTools,
-    localMcpClients,
+    getLocalMcpClients,
   };
 }
 
@@ -7823,7 +6945,7 @@ function registerCommandPaletteCommands(extensionAPI) {
       }
       showInfoToast("Refreshing…", `Reconnecting to ${ports.length} local MCP server(s).`);
       await disconnectAllLocalMcp();
-      localMcpToolsCache = null;
+      invalidateLocalMcpToolsCache();
 
       const MAX_REFRESH_ATTEMPTS = 3;
       const REFRESH_RETRY_DELAY_MS = 2000;
@@ -7835,8 +6957,8 @@ function registerCommandPaletteCommands(extensionAPI) {
         await new Promise(r => setTimeout(r, REFRESH_RETRY_DELAY_MS));
         for (const port of [...remaining]) {
           // Clear stale failure state so connectLocalMcp doesn't skip via backoff
-          const stale = localMcpClients.get(port);
-          if (stale && !stale.client) localMcpClients.delete(port);
+          const stale = getLocalMcpClients().get(port);
+          if (stale && !stale.client) getLocalMcpClients().delete(port);
           try {
             const client = await connectLocalMcp(port);
             if (client) {
@@ -8103,7 +7225,7 @@ function registerCommandPaletteCommands(extensionAPI) {
                         }
                         showInfoToast("Connecting…", `Reaching ${connectPorts.length} local MCP server(s)…`);
                         await disconnectAllLocalMcp();
-                        localMcpToolsCache = null;
+                        invalidateLocalMcpToolsCache();
                         const MAX_ATTEMPTS = 3;
                         const RETRY_MS = 2000;
                         let ok = 0;
@@ -8111,8 +7233,8 @@ function registerCommandPaletteCommands(extensionAPI) {
                         for (let att = 1; att <= MAX_ATTEMPTS && rem.size > 0; att++) {
                           await new Promise(r => setTimeout(r, RETRY_MS));
                           for (const p of [...rem]) {
-                            const stale = localMcpClients.get(p);
-                            if (stale && !stale.client) localMcpClients.delete(p);
+                            const stale = getLocalMcpClients().get(p);
+                            if (stale && !stale.client) getLocalMcpClients().delete(p);
                             try {
                               const c = await connectLocalMcp(p);
                               if (c) { ok++; rem.delete(p); }
@@ -8190,10 +7312,7 @@ function registerCommandPaletteCommands(extensionAPI) {
   extensionAPI.ui.commandPalette.addCommand({
     label: "Chief of Staff: Reset Token Usage Stats",
     callback: () => {
-      sessionTokenUsage.totalInputTokens = 0;
-      sessionTokenUsage.totalOutputTokens = 0;
-      sessionTokenUsage.totalRequests = 0;
-      sessionTokenUsage.totalCostUsd = 0;
+      resetSessionTokenUsage();
       showInfoToast("Stats reset", "Session token counters cleared. Historical cost data is preserved.");
       debugLog("[Chief of Staff] Token usage stats reset");
     }
@@ -8765,6 +7884,19 @@ function onload({ extensionAPI }) {
   invalidateMemoryPromptCache();
   invalidateSkillsPromptCache();
   extensionAPIRef = extensionAPI;
+  initUsageTracking({
+    SETTINGS_KEYS,
+    getExtensionAPIRef: () => extensionAPIRef,
+    getSettingString,
+    ensurePageUidByTitle,
+    createRoamBlock,
+    formatRoamDate,
+    queryRoamDatalog,
+    escapeForDatalog,
+    getRoamAlphaApi: () => window.roamAlphaAPI,
+    debugLog,
+    getUnloadInProgress: () => unloadInProgress,
+  });
   initSecurity({
     debugLog,
     recordUsageStat,
@@ -8834,7 +7966,7 @@ function onload({ extensionAPI }) {
     getExtensionAPIRef: () => extensionAPIRef,
     getSettingArray,
     SETTINGS_KEYS,
-    getSessionTokenUsage: () => sessionTokenUsage,
+    getSessionTokenUsage,
     getCostHistorySummary,
     getActiveAgentAbortController: () => activeAgentAbortController,
     writeResponseToTodayDailyPage,
@@ -8858,7 +7990,7 @@ function onload({ extensionAPI }) {
         caps.composioCalendar = activeToolkits.has("GOOGLECALENDAR");
       } catch { /* no Composio */ }
       // Local MCP
-      caps.localMcp = localMcpClients.size > 0 && [...localMcpClients.values()].some(e => e.client);
+      caps.localMcp = getLocalMcpClients().size > 0 && [...getLocalMcpClients().values()].some(e => e.client);
       // Extension Tools — collect display names (e.g. "Better Tasks", "Focus Mode")
       try {
         const reg = (typeof window !== "undefined" && window.RoamExtensionTools) || {};
@@ -8924,6 +8056,19 @@ function onload({ extensionAPI }) {
     checkSchemaPin,
     updateMcpBom
   });
+  initLocalMcp({
+    debugLog,
+    getExtensionAPI: () => extensionAPIRef,
+    SETTINGS_KEY_mcpSchemaHashes: SETTINGS_KEYS.mcpSchemaHashes,
+    showInfoToast,
+    showErrorToast,
+    getLocalMcpPorts,
+    scanToolDescriptions,
+    checkSchemaPin,
+    updateMcpBom,
+    isUnloadInProgress: () => unloadInProgress,
+    COMPOSIO_AUTO_CONNECT_DELAY_MS,
+  });
   initCronScheduler({
     debugLog,
     cronJobsSettingKey: SETTINGS_KEYS.cronJobs,
@@ -8959,11 +8104,11 @@ function onload({ extensionAPI }) {
     consumeDryRunMode,
     getSessionUsedLocalMcp,
     setSessionUsedLocalMcp,
-    getLocalMcpToolsCache: () => localMcpToolsCache,
+    getLocalMcpToolsCache,
     getBtProjectsCache: () => btProjectsCache,
     setBtProjectsCache: (v) => { btProjectsCache = v; },
     getMcpClient: () => mcpClient,
-    getLocalMcpClients: () => localMcpClients,
+    getLocalMcpClients,
     getRoamNativeTools,
     getBetterTasksTools,
     getCosIntegrationTools,
@@ -9006,7 +8151,7 @@ function onload({ extensionAPI }) {
     getExtToolsConfig,
     formatRoamDate,
     debugLog,
-    getLocalMcpToolsCache: () => localMcpToolsCache,
+    getLocalMcpToolsCache,
     getBtProjectsCache: () => btProjectsCache,
     setBtProjectsCache: (v) => { btProjectsCache = v; },
   });
@@ -9154,18 +8299,7 @@ function onunload() {
   invalidateSkillsPromptCache();
   flushPersistChatPanelHistory(api);
   flushPersistConversationContext(api);
-  if (costHistoryPersistTimeoutId) {
-    window.clearTimeout(costHistoryPersistTimeoutId);
-    costHistoryPersistTimeoutId = null;
-    pruneCostHistory();
-    api?.settings?.set?.(SETTINGS_KEYS.costHistory, costHistory);
-  }
-  if (usageStatsPersistTimeoutId) {
-    window.clearTimeout(usageStatsPersistTimeoutId);
-    usageStatsPersistTimeoutId = null;
-    pruneUsageStats();
-    api?.settings?.set?.(SETTINGS_KEYS.usageStats, usageStats);
-  }
+  flushUsageTracking(api);
   detachAllToastKeyboards();
   clearToolApprovals();
   destroyChatPanel();
@@ -9191,13 +8325,10 @@ function onunload() {
   inboxLastFullScanUidSignature = "";
   resetRoamNativeToolsCache();
   externalExtensionToolsCache = null;
-  localMcpToolsCache = null;
-  localMcpAutoConnectTimerIds.forEach(id => clearTimeout(id));
-  localMcpAutoConnectTimerIds.clear();
+  cleanupLocalMcp();
   btProjectsCache = null;
   toolkitSchemaRegistryCache = null;
   _schemaHashCache.clear();
-  suspendedMcpServers.clear();
   Promise.race([
     disconnectAllLocalMcp(),
     new Promise(resolve => setTimeout(resolve, 2000))
