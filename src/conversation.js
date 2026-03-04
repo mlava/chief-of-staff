@@ -119,6 +119,19 @@ function pruneAgentMessagesInPlace(
     messages.shift();
     totalChars -= removed;
     prunablePrefixCount -= 1;
+    // Pair-aware: if we just removed an assistant message with tool_calls,
+    // the next message may be an orphaned tool result — remove it too to
+    // avoid provider API 400 errors from unpaired tool results.
+    while (
+      messages.length > deps.MIN_AGENT_MESSAGES_TO_KEEP &&
+      prunablePrefixCount > 0 &&
+      messages[0]?.role === "tool"
+    ) {
+      const orphaned = perMessageChars.shift() || 0;
+      messages.shift();
+      totalChars -= orphaned;
+      prunablePrefixCount -= 1;
+    }
   }
   return prunablePrefixCount;
 }

@@ -208,7 +208,7 @@ export async function discoverToolkitSchema(toolkitName, options = {}) {
   if (!force && _discoverInflight.has(key)) return _discoverInflight.get(key);
   const promise = _discoverToolkitSchemaInner(key, options);
   _discoverInflight.set(key, promise);
-  promise.finally(() => _discoverInflight.delete(key));
+  promise.finally(() => { if (_discoverInflight.get(key) === promise) _discoverInflight.delete(key); });
   return promise;
 }
 
