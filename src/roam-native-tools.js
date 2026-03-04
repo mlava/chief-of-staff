@@ -1507,6 +1507,13 @@ export function getRoamNativeTools() {
         const newBlockStr = `${newMarker} ${newContent}`;
 
         const api = deps.requireRoamUpdateBlockApi(deps.getRoamAlphaApi());
+        // TOCTOU guard: re-read block text right before write to detect concurrent edits
+        const recheck = await deps.queryRoamDatalog(
+          `[:find ?str . :where [?b :block/uid "${deps.escapeForDatalog(blockUid)}"] [?b :block/string ?str]]`
+        );
+        if (recheck != null && String(recheck) !== blockStr) {
+          throw new Error("Block was modified concurrently — aborting to avoid clobbering changes. Please retry.");
+        }
         await deps.withRoamWriteRetry(() =>
           api.updateBlock({ block: { uid: blockUid, string: deps.truncateRoamBlockText(newBlockStr) } })
         );
@@ -1696,6 +1703,7 @@ export function getRoamNativeTools() {
         if (!blockUid) throw new Error("uid is required");
         deps.requireRoamUidExists(blockUid, "uid");
         const api = deps.getRoamAlphaApi();
+        if (!api?.updateBlock) throw new Error("Roam updateBlock API unavailable");
         const pull = api?.pull?.("[:block/string]", [":block/uid", blockUid]);
         const currentText = pull?.[":block/string"] || "";
         const stripped = currentText.replace(/^\[\[>\]\]\s*/, "");
@@ -1761,6 +1769,7 @@ export function getRoamNativeTools() {
         if (!blockUid) throw new Error("uid is required");
         deps.requireRoamUidExists(blockUid, "uid");
         const api = deps.getRoamAlphaApi();
+        if (!api?.updateBlock) throw new Error("Roam updateBlock API unavailable");
         const pull = api?.pull?.("[:block/string]", [":block/uid", blockUid]);
         const currentText = pull?.[":block/string"] || "";
         const stripped = currentText.replace(/^\[\[>\]\]\s*\[\[![A-Z_]+\]\][+-]?\s*/, "");

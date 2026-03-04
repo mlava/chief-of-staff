@@ -65,6 +65,7 @@ let cosThemeObserver = null;
 let cosThemeSyncTimer = null;
 let cosThemeVerifyTimer = null;
 let cosThemeMediaHandler = null;
+let cosThemeMediaQuery = null;
 let cosThemeToggleHandler = null;
 let cosLastThemeDark = null;
 
@@ -320,9 +321,9 @@ export function observeCosThemeChanges() {
 
   // prefers-color-scheme media query
   if (!cosThemeMediaHandler && window.matchMedia) {
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    cosThemeMediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
     cosThemeMediaHandler = () => triggerCosThemeResync(0);
-    mq.addEventListener?.("change", cosThemeMediaHandler);
+    cosThemeMediaQuery.addEventListener?.("change", cosThemeMediaHandler);
   }
 
   // Listen for clicks on Roam Studio / Blueprint dark-mode toggle buttons
@@ -343,10 +344,10 @@ export function teardownCosThemeObserver() {
   if (cosThemeObserver) { cosThemeObserver.disconnect(); cosThemeObserver = null; }
   if (cosThemeSyncTimer) { clearTimeout(cosThemeSyncTimer); cosThemeSyncTimer = null; }
   if (cosThemeVerifyTimer) { clearTimeout(cosThemeVerifyTimer); cosThemeVerifyTimer = null; }
-  if (cosThemeMediaHandler && window.matchMedia) {
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    mq.removeEventListener?.("change", cosThemeMediaHandler);
+  if (cosThemeMediaHandler && cosThemeMediaQuery) {
+    cosThemeMediaQuery.removeEventListener?.("change", cosThemeMediaHandler);
     cosThemeMediaHandler = null;
+    cosThemeMediaQuery = null;
   }
   if (cosThemeToggleHandler) {
     document.body?.removeEventListener("click", cosThemeToggleHandler, true);
@@ -910,6 +911,7 @@ async function handleChatPanelSend() {
   } finally {
     clearTimeout(chatThinkingTimerId);
     clearTimeout(chatWorkingTimerId);
+    if (streamRenderTimerId) { clearTimeout(streamRenderTimerId); streamRenderTimerId = null; }
     setChatPanelSendingState(false);
     if (chatPanelInput) chatPanelInput.focus();
   }

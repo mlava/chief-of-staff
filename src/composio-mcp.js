@@ -204,8 +204,8 @@ export async function discoverToolkitSchema(toolkitName, options = {}) {
   const key = String(toolkitName || "").toUpperCase();
   if (!key) return null;
 
-  // Dedup concurrent discoveries of the same toolkit
-  if (_discoverInflight.has(key)) return _discoverInflight.get(key);
+  // Dedup concurrent discoveries of the same toolkit (but honour force refresh)
+  if (!force && _discoverInflight.has(key)) return _discoverInflight.get(key);
   const promise = _discoverToolkitSchemaInner(key, options);
   _discoverInflight.set(key, promise);
   promise.finally(() => _discoverInflight.delete(key));

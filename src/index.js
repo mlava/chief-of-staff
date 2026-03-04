@@ -2157,27 +2157,8 @@ async function updateChiefMemory({ page, action = "append", content, block_uid }
       throw new Error(`Too many existing children (${childUids.length}) to replace safely. Maximum is ${MAX_CREATE_BLOCKS_TOTAL}. Delete the skill and recreate it.`);
     }
 
-    // Delete all existing children — log UIDs first for crash recovery
-    if (childUids.length > 0) {
-      debugLog("[Chief memory] replace_children deleting UIDs (recovery log):", JSON.stringify(childUids));
-    }
-    for (const childUid of childUids) {
-      await withRoamWriteRetry(() => api.deleteBlock({ block: { uid: childUid } }));
-    }
-
-    // Brief pause after mass deletion — Roam's internal children state needs
-    // time to settle before we create new children (avoids "n.map is not a function")
-    if (childUids.length > 0) {
-      const settleMs = Math.min(5000, Math.max(500, childUids.length * 100));
-      await new Promise(resolve => setTimeout(resolve, settleMs));
-    }
-    // Re-pull parent after deletions to refresh Roam's internal child cache before re-creating.
-    try {
-      api.data?.pull?.("[:block/uid {:block/children [:block/uid :block/order]}]", [":block/uid", uid]);
-    } catch (_) { /* non-critical */ }
-
-    // Parse new content into block tree and create children with nesting preserved
-    // Normalise escaped newlines from LLM output
+    // ── Parse new content BEFORE deleting old children ──
+    // This prevents data loss if parsing yields an empty tree or fails.
     debugLog("[Chief memory] replace_children raw content:", JSON.stringify(text).slice(0, 500));
     let normalisedText = text.replace(/\\n/g, "\n").replace(/\\t/g, "\t");
 
@@ -2225,6 +2206,32 @@ async function updateChiefMemory({ page, action = "append", content, block_uid }
     debugLog("[Chief memory] replace_children newline count:", (normalisedText.match(/\n/g) || []).length);
     const blockTree = parseMarkdownToBlockTree(normalisedText);
     debugLog("[Chief memory] replace_children blockTree roots:", blockTree.length, "total nodes:", JSON.stringify(blockTree).length);
+
+    // Reject empty replacement to prevent accidental data loss
+    if (blockTree.length === 0 && childUids.length > 0) {
+      throw new Error("Parsed replacement content is empty — refusing to delete existing children. Provide non-empty content.");
+    }
+
+    // ── Now safe to delete old children ──
+    if (childUids.length > 0) {
+      debugLog("[Chief memory] replace_children deleting UIDs (recovery log):", JSON.stringify(childUids));
+    }
+    for (const childUid of childUids) {
+      await withRoamWriteRetry(() => api.deleteBlock({ block: { uid: childUid } }));
+    }
+
+    // Brief pause after mass deletion — Roam's internal children state needs
+    // time to settle before we create new children (avoids "n.map is not a function")
+    if (childUids.length > 0) {
+      const settleMs = Math.min(5000, Math.max(500, childUids.length * 100));
+      await new Promise(resolve => setTimeout(resolve, settleMs));
+    }
+    // Re-pull parent after deletions to refresh Roam's internal child cache before re-creating.
+    try {
+      api.data?.pull?.("[:block/uid {:block/children [:block/uid :block/order]}]", [":block/uid", uid]);
+    } catch (_) { /* non-critical */ }
+
+    // ── Create new children ──
     for (let i = 0; i < blockTree.length; i++) {
       // Append sequentially ("last") to preserve order while avoiding index-based insert races
       // on parents that were just mass-deleted and can have stale internal child arrays.
