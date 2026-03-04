@@ -458,6 +458,7 @@ export async function callOpenAIStreaming(apiKey, model, system, messages, tools
   let buffer = "";
   let textContent = "";
   const toolCallDeltas = {}; // index -> { id, name, arguments }
+  const indexRedirects = {}; // original index -> redirected index (for collision continuations)
   let usage = null;
 
   const streamStartMs = Date.now();
@@ -508,13 +509,18 @@ export async function callOpenAIStreaming(apiKey, model, system, messages, tools
         // Tool call deltas — accumulate arguments with bounds
         if (Array.isArray(delta.tool_calls)) {
           for (const tc of delta.tool_calls) {
-            let idx = tc.index ?? 0;
+            const origIdx = tc.index ?? 0;
+            let idx = origIdx;
             if (idx < 0 || idx > 64) continue;
 
             // Gemini OpenAI-compat sometimes sends multiple parallel tool calls
             // at the same index. Detect when a new tool name or id arrives at an
             // already-occupied slot and redirect to a fresh slot to prevent
             // argument concatenation across different tools.
+            //
+            // When a collision redirect happens, subsequent arg-only chunks
+            // (no name or id) at the original index must follow the redirect —
+            // otherwise their arguments land in the wrong slot.
             const existing = toolCallDeltas[idx];
             if (existing) {
               const hasNewName = tc.function?.name && existing.name && tc.function.name !== existing.name;
@@ -522,10 +528,14 @@ export async function callOpenAIStreaming(apiKey, model, system, messages, tools
               if (hasNewName || hasNewId) {
                 const keys = Object.keys(toolCallDeltas).map(Number).filter(n => !isNaN(n));
                 const newIdx = (keys.length > 0 ? Math.max(...keys) : -1) + 1;
-                deps.debugLog("[Chief flow] Gemini parallel tool-call collision at index", tc.index ?? 0,
+                deps.debugLog("[Chief flow] Gemini parallel tool-call collision at index", origIdx,
                   "— redirecting", tc.function?.name || tc.id, "to slot", newIdx,
                   "(existing:", existing.name + ")");
                 idx = newIdx;
+                indexRedirects[origIdx] = newIdx;
+              } else if (!tc.function?.name && !tc.id && indexRedirects[origIdx] !== undefined) {
+                // Arg-only continuation chunk — follow the last redirect for this index
+                idx = indexRedirects[origIdx];
               }
             }
 
