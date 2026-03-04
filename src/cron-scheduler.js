@@ -90,13 +90,14 @@ function saveCronJobs(jobs) {
 }
 
 function generateCronJobId(name) {
+  const suffix = Math.random().toString(16).slice(2, 6);
   const base = String(name || "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "")
     .slice(0, 40);
-  if (!base) return `job-${Date.now()}`;
-  return base;
+  if (!base) return `job-${suffix}`;
+  return `${base}-${suffix}`;
 }
 
 function ensureUniqueCronJobId(id, existingJobs) {
@@ -683,6 +684,35 @@ export function getCronTools() {
         saveCronJobs(jobs);
         return { deleted: true, id: removed.id, name: removed.name };
       }
+    },
+    {
+      name: "cos_cron_delete_jobs",
+      isMutating: true,
+      description: "Delete multiple scheduled jobs by ID in a single atomic operation. Use this instead of calling cos_cron_delete multiple times.",
+      input_schema: {
+        type: "object",
+        properties: {
+          ids: { type: "array", items: { type: "string" }, description: "Array of job IDs to delete." }
+        },
+        required: ["ids"]
+      },
+      execute: async ({ ids } = {}) => {
+        if (!Array.isArray(ids) || ids.length === 0) return { error: "ids array is required and must not be empty." };
+        const jobs = loadCronJobs();
+        const deleted = [];
+        const notFound = [];
+        for (const id of ids) {
+          const idx = jobs.findIndex(j => j.id === id);
+          if (idx < 0) {
+            notFound.push(id);
+          } else {
+            deleted.push({ id: jobs[idx].id, name: jobs[idx].name });
+            jobs.splice(idx, 1);
+          }
+        }
+        saveCronJobs(jobs);
+        return { deleted, notFound, remainingJobs: jobs.length };
+      }
     }
   ];
 }
@@ -695,7 +725,7 @@ export function buildCronJobsPromptSection() {
 
   const enabledJobs = jobs.filter(j => j.enabled);
   if (!enabledJobs.length) {
-    return `## Scheduled Jobs\n\nAll ${jobs.length} scheduled job(s) are currently disabled. Use cos_cron_update to re-enable or cos_cron_delete to remove them.`;
+    return `## Scheduled Jobs\n\nAll ${jobs.length} scheduled job(s) are currently disabled. Use cos_cron_update to re-enable or cos_cron_delete / cos_cron_delete_jobs to remove them.`;
   }
 
   const lines = enabledJobs.map(j => {
@@ -720,7 +750,7 @@ export function buildCronJobsPromptSection() {
 
   return `## Scheduled Jobs
 
-You have access to cron job tools (cos_cron_list, cos_cron_create, cos_cron_update, cos_cron_delete).
+You have access to cron job tools (cos_cron_list, cos_cron_create, cos_cron_update, cos_cron_delete, cos_cron_delete_jobs).
 Use type 'reminder' with cos_cron_create to set one-shot reminders — these show a persistent sticky toast at the specified time without running the agent loop.
 The user currently has ${enabledJobs.length} active scheduled job(s):
 ${deps.wrapUntrustedWithInjectionScan("cron_jobs", lines.join("\n"))}`;

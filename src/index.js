@@ -308,7 +308,10 @@ const WRITE_TOOL_NAMES = new Set([
   "cos_write_draft_skill",
   "cos_cron_create",
   "cos_cron_update",
-  "cos_cron_delete"
+  "cos_cron_delete",
+  "cos_cron_delete_jobs",
+  "roam_excalidraw_embed",
+  "roam_mermaid_embed"
 ]);
 
 /**
@@ -4185,6 +4188,10 @@ async function runAgentLoop(userMessage, options = {}) {
           finalText = `Job "${resultData.id || "job"}" updated.`;
         } else if (toolName === "cos_cron_delete" && resultData?.deleted) {
           finalText = `Job "${resultData.id || "job"}" deleted.`;
+        } else if (toolName === "cos_cron_delete_jobs" && Array.isArray(resultData?.deleted)) {
+          const names = resultData.deleted.map(d => `"${d.name || d.id}"`).join(", ");
+          finalText = `Deleted ${resultData.deleted.length} job(s): ${names}.`;
+          if (resultData.notFound?.length) finalText += ` Not found: ${resultData.notFound.join(", ")}.`;
         } else {
           finalText = `Written successfully.`;
         }

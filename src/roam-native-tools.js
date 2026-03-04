@@ -1757,6 +1757,191 @@ export function getRoamNativeTools() {
       }
     },
     {
+      name: "roam_mermaid_embed",
+      isMutating: true,
+      description: "Embed a Mermaid diagram into a Roam block. Sets the block to {{mermaid}} (collapsed) and creates each line of the Mermaid code as a child block. If mermaid_code is omitted, creates a blank {{mermaid}} block that shows Roam's built-in diagram instructions. Use target_uid for an existing block or parent_uid to create a new one.",
+      input_schema: {
+        type: "object",
+        properties: {
+          target_uid: {
+            type: "string",
+            description: "UID of an existing block to embed the diagram into. Mutually exclusive with parent_uid."
+          },
+          parent_uid: {
+            type: "string",
+            description: "UID of a parent block/page to create a new child block for the diagram. Mutually exclusive with target_uid."
+          },
+          mermaid_code: {
+            type: "string",
+            description: "Mermaid diagram code as a string. Can include ```mermaid fences or raw Mermaid syntax. Each line becomes a child block. Omit to create a blank {{mermaid}} block that shows Roam's built-in diagram instructions."
+          }
+        },
+        required: []
+      },
+      execute: async ({ target_uid, parent_uid, mermaid_code } = {}) => {
+        const api = deps.getRoamAlphaApi();
+        if (!api?.updateBlock) throw new Error("Roam updateBlock API unavailable");
+        if (!api?.createBlock) throw new Error("Roam createBlock API unavailable");
+
+        // Determine target UID
+        let uid;
+        if (target_uid) {
+          uid = String(target_uid).trim();
+          deps.requireRoamUidExists(uid, "target_uid");
+        } else if (parent_uid) {
+          const parentUid = String(parent_uid).trim();
+          deps.requireRoamUidExists(parentUid, "parent_uid");
+          uid = await deps.createRoamBlock(parentUid, "{{mermaid}}", "last");
+        } else {
+          throw new Error("Either target_uid or parent_uid is required.");
+        }
+
+        // Parse mermaid code — strip fences if present, split into lines
+        let raw = String(mermaid_code || "").replace(/\\n/g, "\n").trim();
+        // Strip ```mermaid ... ``` fences
+        const fenced = raw.match(/```mermaid\s*[\r\n]+([\s\S]*?)```/i)
+          || raw.match(/```mermaid\s*[\r\n]+([\s\S]*)$/i);
+        if (fenced) raw = fenced[1].trim();
+
+        const lines = raw
+          ? raw.split(/\r?\n/).map(l => l.trimEnd()).filter(l => l.length > 0)
+          : [];
+
+        // Cap at 200 lines to stay within safety limits
+        if (lines.length > 200) throw new Error(`Mermaid code too large (${lines.length} lines). Maximum is 200.`);
+
+        // Set block to {{mermaid}} and collapse it
+        await deps.withRoamWriteRetry(() =>
+          api.updateBlock({ block: { uid, string: "{{mermaid}}", open: false } })
+        );
+
+        // Clear existing children so target_uid updates replace rather than append
+        const existingPull = api.data?.pull?.(
+          "[:block/children {:block/children [:block/uid :block/order]}]",
+          [":block/uid", uid]
+        );
+        if (existingPull?.[":block/children"]) {
+          const childUids = existingPull[":block/children"]
+            .sort((a, b) => (a[":block/order"] ?? 0) - (b[":block/order"] ?? 0))
+            .map(c => c[":block/uid"]);
+          for (const cuid of childUids) {
+            await deps.withRoamWriteRetry(() => api.deleteBlock({ block: { uid: cuid } }));
+          }
+        }
+
+        // If blank, return early — Roam shows built-in diagram instructions
+        if (lines.length === 0) {
+          return { success: true, uid, line_count: 0, blank: true };
+        }
+
+        // Create each line as a child block
+        for (const line of lines) {
+          await deps.withRoamWriteRetry(() =>
+            api.createBlock({
+              location: { "parent-uid": uid, order: "last" },
+              block: { string: line }
+            })
+          );
+        }
+
+        return {
+          success: true,
+          uid,
+          line_count: lines.length
+        };
+      }
+    },
+    {
+      name: "roam_excalidraw_embed",
+      isMutating: true,
+      description: "Embed an Excalidraw diagram into a Roam block. If excalidraw is omitted, creates a blank canvas the user can draw on. Accepts an optional full Excalidraw JSON object (with type, version, elements, appState, files) and a target block UID. The block content is set to {{excalidraw}} and diagram data is stored in block props. Creates the block first if parent_uid is provided instead of target_uid.",
+      input_schema: {
+        type: "object",
+        properties: {
+          target_uid: {
+            type: "string",
+            description: "UID of an existing block to embed the diagram into. Mutually exclusive with parent_uid."
+          },
+          parent_uid: {
+            type: "string",
+            description: "UID of a parent block/page to create a new child block for the diagram. Mutually exclusive with target_uid."
+          },
+          excalidraw: {
+            type: "object",
+            description: "Full Excalidraw JSON object. Omit to create a blank canvas. If provided, must have type: 'excalidraw', elements array, and appState object.",
+            properties: {
+              type: { type: "string", enum: ["excalidraw"] },
+              version: { type: "number" },
+              elements: { type: "array", description: "Array of Excalidraw element objects." },
+              appState: { type: "object" },
+              files: { type: "object" }
+            },
+            required: ["type", "elements", "appState"]
+          }
+        },
+        required: []
+      },
+      execute: async ({ target_uid, parent_uid, excalidraw } = {}) => {
+        // Default to blank canvas if excalidraw is omitted
+        const exc = excalidraw && typeof excalidraw === "object"
+          ? excalidraw
+          : { type: "excalidraw", version: 2, elements: [], appState: { viewBackgroundColor: "#ffffff" }, files: {} };
+
+        if (exc.type !== "excalidraw") throw new Error("excalidraw.type must be 'excalidraw'");
+        if (!Array.isArray(exc.elements)) throw new Error("excalidraw.elements must be an array");
+        if (!exc.appState || typeof exc.appState !== "object") throw new Error("excalidraw.appState must be an object");
+
+        const api = deps.getRoamAlphaApi();
+        if (!api?.updateBlock) throw new Error("Roam updateBlock API unavailable");
+
+        // Determine target UID — either use existing block or create a new one
+        let uid;
+        if (target_uid) {
+          uid = String(target_uid).trim();
+          deps.requireRoamUidExists(uid, "target_uid");
+        } else if (parent_uid) {
+          const parentUid = String(parent_uid).trim();
+          deps.requireRoamUidExists(parentUid, "parent_uid");
+          uid = await deps.createRoamBlock(parentUid, "{{excalidraw}}", "last");
+        } else {
+          throw new Error("Either target_uid or parent_uid is required.");
+        }
+
+        const elements = exc.elements;
+        const appState = exc.appState;
+        const files = exc.files && typeof exc.files === "object" ? exc.files : {};
+        const roamExcalidrawVersion = "0.18.0";
+
+        // Generate a unique instance ID
+        const instanceId = typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+        await deps.withRoamWriteRetry(() =>
+          api.updateBlock({
+            block: {
+              uid,
+              string: "{{excalidraw}}",
+              props: {
+                "excalidraw/instance-id": instanceId,
+                "excalidraw/elements-json": JSON.stringify(elements),
+                "excalidraw/state-json": JSON.stringify(appState),
+                "excalidraw/files-json": JSON.stringify(files),
+                "excalidraw/version": roamExcalidrawVersion,
+              },
+            },
+          })
+        );
+
+        return {
+          success: true,
+          uid,
+          element_count: elements.length,
+          instance_id: instanceId
+        };
+      }
+    },
+    {
       name: "roam_remove_callout",
       isMutating: true,
       description: "Remove callout formatting from a block, keeping the text content. Strips the [[>]] [[!TYPE]] prefix and any foldable marker, leaving only the title and body text.",
