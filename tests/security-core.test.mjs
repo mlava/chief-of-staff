@@ -43,6 +43,65 @@ test("detectClaimedActionWithoutToolCall uses dynamic tool hints and skips read-
   );
 });
 
+test("detectClaimedActionWithoutToolCall detects memory write claims (saved/appended/stored)", () => {
+  // "I've saved" — new verb in actionClaimPattern
+  assert.equal(
+    detectClaimedActionWithoutToolCall("I've saved your hobbies to memory.", []).detected,
+    true
+  );
+  // "I've appended" — new verb in actionClaimPattern
+  assert.equal(
+    detectClaimedActionWithoutToolCall("I've appended that information.", []).detected,
+    true
+  );
+  // "I've stored" — new verb in actionClaimPattern
+  assert.equal(
+    detectClaimedActionWithoutToolCall("I've stored the preferences.", []).detected,
+    true
+  );
+  // "I've remembered" — new verb in actionClaimPattern
+  assert.equal(
+    detectClaimedActionWithoutToolCall("I've remembered your birthday.", []).detected,
+    true
+  );
+  // "has been saved" — new verb in has-been pattern
+  assert.equal(
+    detectClaimedActionWithoutToolCall("The note has been saved.", []).detected,
+    true
+  );
+  // "has been appended" — new verb in has-been pattern
+  assert.equal(
+    detectClaimedActionWithoutToolCall("Your hobby has been appended to memory.", []).detected,
+    true
+  );
+});
+
+test("detectClaimedActionWithoutToolCall detects memory-specific tool claim patterns", () => {
+  // "Memory appended successfully" alone — hits tool-specific pattern with hint
+  const r1 = detectClaimedActionWithoutToolCall("Chief of Staff/Memory appended successfully.", []);
+  assert.equal(r1.detected, true);
+  assert.equal(r1.matchedToolHint, "cos_update_memory");
+
+  // With "I've saved" prefix — hits generic actionClaimPattern first (empty hint)
+  const r1b = detectClaimedActionWithoutToolCall("I've saved your hobbies to Chief of Staff/Memory.", []);
+  assert.equal(r1b.detected, true);
+
+  // "saved to memory" pattern
+  const r2 = detectClaimedActionWithoutToolCall("That was saved to memory.", []);
+  assert.equal(r2.detected, true);
+  assert.equal(r2.matchedToolHint, "cos_update_memory");
+
+  // "stored in Chief of Staff" pattern
+  const r3 = detectClaimedActionWithoutToolCall("The info was stored in Chief of Staff/Memory.", []);
+  assert.equal(r3.detected, true);
+  assert.equal(r3.matchedToolHint, "cos_update_memory");
+
+  // "written to memory" pattern
+  const r4 = detectClaimedActionWithoutToolCall("Your preferences have been written to memory.", []);
+  assert.equal(r4.detected, true);
+  assert.equal(r4.matchedToolHint, "cos_update_memory");
+});
+
 test("guardMemoryWriteCore blocks suspicious memory content and records usage stats", () => {
   const stats = [];
   const result = guardMemoryWriteCore(

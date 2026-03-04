@@ -188,7 +188,9 @@ export async function persistAuditLogEntry(trace, userPrompt) {
     const outcome = trace.capExceeded ? "cap-exceeded"
       : trace.error ? `error: ${String(trace.error).slice(0, 80)}`
       : "success";
-    const prompt = String(userPrompt || trace.promptPreview || "").slice(0, 120);
+    const prompt = String(userPrompt || trace.promptPreview || "").slice(0, 120)
+      .replace(/\[\[/g, "⟦").replace(/\]\]/g, "⟧")
+      .replace(/\{\{/g, "⦃⦃").replace(/\}\}/g, "⦄⦄");
 
     const block = `[[${dateStr}]] **${trace.model || "unknown"}** `
       + `(${trace.iterations || 0} iter, ${durationSec}s, ${tokens} tok${cost ? ", " + cost : ""}) `
@@ -222,9 +224,10 @@ async function trimAuditLog() {
     auditTrimInFlight = true;
     const pageTitle = "Chief of Staff/Audit Log";
     const api = deps.getRoamAlphaApi();
+    const safeTitle = deps.escapeForDatalog(pageTitle);
     const allBlocks = api.q(`
       [:find ?uid ?str
-       :where [?p :node/title "${pageTitle}"]
+       :where [?p :node/title "${safeTitle}"]
               [?p :block/children ?b]
               [?b :block/string ?str]
               [?b :block/uid ?uid]]
@@ -310,7 +313,10 @@ function ensureTodayUsageStats() {
 export function recordUsageStat(stat, detail) {
   const day = ensureTodayUsageStats();
   if (stat === "toolCall" && detail) {
-    day.toolCalls[detail] = (day.toolCalls[detail] || 0) + 1;
+    // Cap distinct tool names per day to prevent unbounded key growth from dynamic MCP tool names
+    if (Object.keys(day.toolCalls).length < 200 || detail in day.toolCalls) {
+      day.toolCalls[detail] = (day.toolCalls[detail] || 0) + 1;
+    }
   } else if (stat in day && typeof day[stat] === "number") {
     day[stat] += 1;
   }

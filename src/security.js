@@ -119,11 +119,10 @@ export function sanitiseLlmPayloadText(text) {
   if (!text || typeof text !== "string") return text;
   let cleaned = text;
   for (const re of LLM_BLOCKLIST_PATTERNS) {
-    re.lastIndex = 0; // reset global regex state
-    if (re.test(cleaned)) {
+    const before = cleaned;
+    cleaned = cleaned.replace(new RegExp(re.source, re.flags), "[BLOCKED_CONTROL_STRING]");
+    if (cleaned !== before) {
       deps.debugLog("[Chief security] DD-2 LLM blocklist: stripped control string from payload");
-      re.lastIndex = 0;
-      cleaned = cleaned.replace(re, "[BLOCKED_CONTROL_STRING]");
     }
   }
   return cleaned;
@@ -173,7 +172,7 @@ export const REDACT_PATTERNS = [
   /\b(gsk_[a-zA-Z0-9]{3})[a-zA-Z0-9]{10,}/g,
   /\b(key-[a-zA-Z0-9]{3})[a-zA-Z0-9]{10,}/g,
   /(Bearer\s+)[a-zA-Z0-9._\-]{10,}/gi,
-  /("x-api-key"\s*:\s*")[^"]{8,}(")/gi,
+  /("x-api-key"\s*:\s*")[^"]{8,}(?=")/gi,
 ];
 
 export function redactForLog(value) {

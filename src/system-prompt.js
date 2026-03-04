@@ -91,7 +91,7 @@ function detectPromptSections(userMessage) {
   if (sections.size <= 1) {
     if (lastPromptSections && lastPromptSections.size > 1) {
       // Short messages like "yes", "sure", "tell me more" are likely follow-ups
-      const isLikelyFollowUp = text.length < 60 || /^(yes|no|sure|ok|please|go ahead|tell me|show me|do it|help|more|details)\b/.test(text);
+      const isLikelyFollowUp = text.length < 60 && /^(yes|no|sure|ok|please|go ahead|tell me|show me|do it|help|more|details)\b/.test(text);
       if (isLikelyFollowUp) {
         for (const s of lastPromptSections) sections.add(s);
       }

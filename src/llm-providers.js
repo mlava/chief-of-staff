@@ -240,10 +240,13 @@ export function isLikelyPhoneNumber(match) {
   return true;
 }
 
-export function scrubPiiFromText(text) {
+export function scrubPiiFromText(text, { skipEmail = false } = {}) {
   if (!text || typeof text !== "string") return text;
   let result = text;
   for (const { re, replacement, minLength, validator } of PII_SCRUB_PATTERNS) {
+    // When email tools are active, preserve email addresses so the LLM can
+    // use them in tool calls (e.g. "send email to user@example.com").
+    if (skipEmail && replacement === "[EMAIL]") continue;
     re.lastIndex = 0; // reset stateful regex
     result = result.replace(re, (match) => {
       if (minLength && match.replace(/[\s\-]/g, "").length < minLength) return match;
@@ -252,6 +255,16 @@ export function scrubPiiFromText(text) {
     });
   }
   return result;
+}
+
+// Returns true when the active tool set includes email-related tools
+// (Gmail, Outlook, or any tool with "email" in its name/slug). When true,
+// email addresses in user messages should NOT be scrubbed because the LLM
+// needs them to populate recipient fields in tool calls.
+const EMAIL_TOOL_RE = /\b(GMAIL_|OUTLOOK_|email)/i;
+export function hasEmailTools(tools) {
+  if (!Array.isArray(tools)) return false;
+  return tools.some(t => EMAIL_TOOL_RE.test(t.name || ""));
 }
 
 // Deep-scrubs PII from a messages array (both Anthropic and OpenAI formats).
@@ -263,8 +276,13 @@ export function scrubPiiFromText(text) {
 // subsequent tool calls. Scrubbing email-format identifiers like Google
 // Calendar IDs (e.g. "user@gmail.com", "abc@group.calendar.google.com")
 // to "[EMAIL]" breaks downstream tool calls that depend on those exact values.
-export function scrubPiiFromMessages(messages) {
+//
+// When the active tool set includes email tools (Gmail, Outlook, etc.),
+// email addresses in user messages are also preserved so the LLM can use
+// them as recipient addresses in compose/draft/send tool calls.
+export function scrubPiiFromMessages(messages, { tools } = {}) {
   if (!Array.isArray(messages)) return messages;
+  const skipEmail = hasEmailTools(tools);
   return messages.map(msg => {
     if (!msg) return msg;
 
@@ -277,7 +295,7 @@ export function scrubPiiFromMessages(messages) {
 
     // OpenAI format: content is a string
     if (typeof scrubbed.content === "string") {
-      scrubbed.content = scrubPiiFromText(scrubbed.content);
+      scrubbed.content = scrubPiiFromText(scrubbed.content, { skipEmail });
     }
     // Anthropic format: content is an array of blocks
     else if (Array.isArray(scrubbed.content)) {
@@ -286,8 +304,8 @@ export function scrubPiiFromMessages(messages) {
         // Skip tool_result blocks — same rationale as role:"tool" above
         if (block.type === "tool_result") return block;
         const b = { ...block };
-        if (typeof b.text === "string") b.text = scrubPiiFromText(b.text);
-        if (typeof b.content === "string") b.content = scrubPiiFromText(b.content);
+        if (typeof b.text === "string") b.text = scrubPiiFromText(b.text, { skipEmail });
+        if (typeof b.content === "string") b.content = scrubPiiFromText(b.content, { skipEmail });
         return b;
       });
     }
@@ -304,8 +322,10 @@ export function isPiiScrubEnabled() {
 export async function callAnthropic(apiKey, model, system, messages, tools, options = {}) {
   // Anthropic supports direct browser access via the anthropic-dangerous-direct-browser-access header,
   // so skip the CORS proxy (which returns 404 for api.anthropic.com).
-  const safeSystem = deps.sanitiseLlmPayloadText(system);
-  const safeMessages = deps.sanitiseLlmMessages(messages);
+  // DD-2: Defence-in-depth PII scrub — in case this function is ever called directly
+  const scrubbed = isPiiScrubEnabled() ? scrubPiiFromMessages(messages, { tools }) : messages;
+  const safeSystem = deps.sanitiseLlmPayloadText(isPiiScrubEnabled() ? scrubPiiFromText(system) : system);
+  const safeMessages = deps.sanitiseLlmMessages(scrubbed);
   return fetchLlmJsonWithRetry(
     LLM_API_ENDPOINTS.anthropic,
     {
@@ -334,8 +354,10 @@ export async function callAnthropic(apiKey, model, system, messages, tools, opti
 }
 
 export async function callOpenAI(apiKey, model, system, messages, tools, options = {}, provider = "openai") {
-  const safeSystem = deps.sanitiseLlmPayloadText(system);
-  const safeMessages = deps.sanitiseLlmMessages(messages);
+  // DD-2: Defence-in-depth PII scrub — in case this function is ever called directly
+  const scrubbed = isPiiScrubEnabled() ? scrubPiiFromMessages(messages, { tools }) : messages;
+  const safeSystem = deps.sanitiseLlmPayloadText(isPiiScrubEnabled() ? scrubPiiFromText(system) : system);
+  const safeMessages = deps.sanitiseLlmMessages(scrubbed);
   const maxTokens = options.maxOutputTokens || deps.STANDARD_MAX_OUTPUT_TOKENS;
   // OpenAI newer models (GPT-4.1, GPT-5) require max_completion_tokens; Gemini/Mistral use max_tokens
   const tokenParam = provider === "openai"
@@ -375,8 +397,9 @@ export async function callOpenAI(apiKey, model, system, messages, tools, options
  */
 export async function callOpenAIStreaming(apiKey, model, system, messages, tools, onTextChunk, options = {}, provider = "openai") {
   // DD-2: Scrub PII from content sent to external LLM APIs
+  // Pass tools so email addresses are preserved when email tools are active
   const scrubbedSystem = isPiiScrubEnabled() ? scrubPiiFromText(system) : system;
-  const scrubbedMessages = isPiiScrubEnabled() ? scrubPiiFromMessages(messages) : messages;
+  const scrubbedMessages = isPiiScrubEnabled() ? scrubPiiFromMessages(messages, { tools }) : messages;
   // DD-2b: Strip known LLM control strings before sending to provider
   const safeSystem = deps.sanitiseLlmPayloadText(scrubbedSystem);
   const safeMessages = deps.sanitiseLlmMessages(scrubbedMessages);
@@ -556,8 +579,9 @@ export async function callOpenAIStreaming(apiKey, model, system, messages, tools
 
 export async function callLlm(provider, apiKey, model, system, messages, tools, options = {}) {
   // DD-2: Scrub PII from content sent to external LLM APIs
+  // Pass tools so email addresses are preserved when email tools are active
   const scrubbedSystem = isPiiScrubEnabled() ? scrubPiiFromText(system) : system;
-  const scrubbedMessages = isPiiScrubEnabled() ? scrubPiiFromMessages(messages) : messages;
+  const scrubbedMessages = isPiiScrubEnabled() ? scrubPiiFromMessages(messages, { tools }) : messages;
   if (isOpenAICompatible(provider)) return callOpenAI(apiKey, model, scrubbedSystem, scrubbedMessages, tools, options, provider);
   return callAnthropic(apiKey, model, scrubbedSystem, scrubbedMessages, tools, options);
 }

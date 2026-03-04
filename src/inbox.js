@@ -121,7 +121,7 @@ export function setInboxStaticUIDs(uidSet) {
 export function getInboxBlockStringIfExists(uid) {
   const safeUid = String(uid || "").trim();
   if (!safeUid) return null;
-  const api = window.roamAlphaAPI;
+  const api = deps.getRoamAlphaApi ? deps.getRoamAlphaApi() : (typeof window !== "undefined" ? window.roamAlphaAPI : null);
   const data = api?.data?.pull?.("[:block/string :node/title]", [":block/uid", safeUid]);
   if (!data || data[":node/title"]) return null;
   if (typeof data[":block/string"] !== "string") return null;
@@ -248,6 +248,9 @@ async function processInboxItem(block) {
       suppressToasts: true,
       readOnlyTools: true
     });
+
+    // Reset prompt sections so subsequent user chat doesn't inherit inbox context
+    deps.resetLastPromptSections?.();
 
     // Concurrency guard rejection — askChiefOfStaff returns undefined when
     // another request is in flight. Do NOT move the block; leave it in the inbox

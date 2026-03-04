@@ -11,7 +11,9 @@ export const PROMPT_BOUNDARY_TAG_RE = /<\s*\/?\s*(system|human|assistant|user|to
 
 export function sanitiseUserContentForPrompt(text) {
   if (!text) return "";
-  return String(text).replace(PROMPT_BOUNDARY_TAG_RE, (match) =>
+  // Construct a fresh regex to avoid shared lastIndex state from the module-level constant
+  const re = new RegExp(PROMPT_BOUNDARY_TAG_RE.source, PROMPT_BOUNDARY_TAG_RE.flags);
+  return String(text).replace(re, (match) =>
     match.replace(/</g, "\uFF1C").replace(/>/g, "\uFF1E")
   );
 }
@@ -124,8 +126,8 @@ export function scanToolDescriptionsCore(tools, serverName, deps = {}) {
   } = deps;
   const flagged = [];
 
-  function extractSchemaText(schema, path) {
-    if (!schema || typeof schema !== "object") return;
+  function extractSchemaText(schema, path, depth = 0) {
+    if (!schema || typeof schema !== "object" || depth > 6) return;
     const textParts = [
       schema.description,
       schema.title,
@@ -143,21 +145,21 @@ export function scanToolDescriptionsCore(tools, serverName, deps = {}) {
     }
     if (schema.properties) {
       for (const [key, prop] of Object.entries(schema.properties)) {
-        extractSchemaText(prop, `${path}.${key}`);
+        extractSchemaText(prop, `${path}.${key}`, depth + 1);
       }
     }
     if (schema.items) {
-      extractSchemaText(schema.items, `${path}[items]`);
+      extractSchemaText(schema.items, `${path}[items]`, depth + 1);
     }
     for (const combiner of ["oneOf", "anyOf", "allOf"]) {
       if (Array.isArray(schema[combiner])) {
         schema[combiner].forEach((variant, i) => {
-          extractSchemaText(variant, `${path}.${combiner}[${i}]`);
+          extractSchemaText(variant, `${path}.${combiner}[${i}]`, depth + 1);
         });
       }
     }
     if (schema.additionalProperties && typeof schema.additionalProperties === "object") {
-      extractSchemaText(schema.additionalProperties, `${path}[additionalProperties]`);
+      extractSchemaText(schema.additionalProperties, `${path}[additionalProperties]`, depth + 1);
     }
   }
 
@@ -369,7 +371,7 @@ export function detectClaimedActionWithoutToolCall(text, registeredTools) {
     return { detected: true, matchedToolHint: isRedo ? "roam_redo" : "roam_undo" };
   }
 
-  const actionClaimPattern = /\b(Done\s*[—–\-,;:!.]|I've\s+(added|removed|changed|created|updated|deleted|set|applied|configured|enabled|disabled|turned|executed|moved|copied|sent|posted|modified|installed|fixed|written|toggled|checked|scanned|fetched|retrieved|looked\s+up|searched|read|opened|closed|activated|deactivated)|has been\s+(added|removed|changed|created|updated|deleted|applied|configured|enabled|disabled|written|toggled|activated|deactivated))/i;
+  const actionClaimPattern = /\b(Done\s*[—–\-,;:!.]|I've\s+(added|removed|changed|created|updated|deleted|set|applied|configured|enabled|disabled|turned|executed|moved|copied|sent|posted|modified|installed|fixed|written|toggled|checked|scanned|fetched|retrieved|looked\s+up|searched|read|opened|closed|activated|deactivated|saved|appended|stored|recorded|remembered|logged)|has been\s+(added|removed|changed|created|updated|deleted|applied|configured|enabled|disabled|written|toggled|activated|deactivated|saved|appended|stored|recorded|logged))/i;
   if (actionClaimPattern.test(text)) return { detected: true, matchedToolHint: "" };
 
   const toolClaimPatterns = [
@@ -379,14 +381,24 @@ export function detectClaimedActionWithoutToolCall(text, registeredTools) {
     { pattern: /\b(?:the\s+)?definition\s+(?:of|for)\s+.+?\s+is\b/i, tool: "def_lookup" },
     { pattern: /\b(?:last\s+)?action\s+(?:has\s+been\s+)?(?:undone|redone)\b/i, tool: "roam_undo" },
     { pattern: /\b(?:undo|redo)\s+(?:was\s+)?(?:successful|completed?|done|performed|executed)\b/i, tool: "roam_undo" },
+    { pattern: /\b(?:memory|Chief\s+of\s+Staff\/Memory)\s+(?:appended|updated|saved|written|stored)\s+successfully\b/i, tool: "cos_update_memory" },
+    { pattern: /\b(?:saved|stored|recorded|appended|written|remembered)\s+(?:to|in|into|under)\s+(?:your\s+)?(?:memory|Chief\s+of\s+Staff)\b/i, tool: "cos_update_memory" },
   ];
 
   if (Array.isArray(registeredTools)) {
     for (const tool of registeredTools) {
       const name = String(tool?.name || "");
       if (tool?.isMutating === false) continue;
-      const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/_/g, "[_ ]");
-      if (escapedName && new RegExp(`\\b(?:I've\\s+(?:used|called|run|executed)|I\\s+(?:used|called|ran|executed))\\s+${escapedName}\\b`, "i").test(text)) {
+      // Use cached regex from tool object if available (pre-built at registration time),
+      // otherwise build on the fly for dynamic tool lists.
+      let re = tool._claimedActionRe;
+      if (!re) {
+        const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/_/g, "[_ ]");
+        if (!escapedName) continue;
+        re = new RegExp(`\\b(?:I've\\s+(?:used|called|run|executed)|I\\s+(?:used|called|ran|executed))\\s+${escapedName}\\b`, "i");
+        tool._claimedActionRe = re;
+      }
+      if (re.test(text)) {
         return { detected: true, matchedToolHint: name };
       }
     }

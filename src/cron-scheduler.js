@@ -13,7 +13,10 @@ let deps = {};
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 const CRON_TICK_INTERVAL_MS = 60_000; // Check due jobs every 60 seconds
-const CRON_LEADER_KEY = "chief-of-staff-cron-leader";
+function getCronLeaderKey() {
+  const graphName = (typeof window !== "undefined" && window.roamAlphaAPI && window.roamAlphaAPI.graph && window.roamAlphaAPI.graph.name) || "default";
+  return `chief-of-staff-cron-leader-${graphName}`;
+}
 const CRON_LEADER_HEARTBEAT_MS = 30_000; // 30s heartbeat for multi-tab leader lock
 const CRON_LEADER_STALE_MS = 90_000; // 90s without heartbeat = stale, claim leadership
 const CRON_MAX_JOBS = 20; // Soft cap on total scheduled jobs
@@ -43,6 +46,12 @@ export function getDefaultBrowserTimezone() {
     if (tz && typeof tz === "string") return tz;
   } catch { /* ignore */ }
   return "Australia/Melbourne";
+}
+
+function formatLocalTime(date, tz) {
+  try {
+    return new Date(date).toLocaleString("en-GB", { timeZone: tz || getDefaultBrowserTimezone(), dateStyle: "medium", timeStyle: "short" });
+  } catch { return null; }
 }
 
 function normaliseCronJob(input) {
@@ -105,7 +114,7 @@ function ensureUniqueCronJobId(id, existingJobs) {
 function cronTryClaimLeadership() {
   try {
     const now = Date.now();
-    const raw = localStorage.getItem(CRON_LEADER_KEY);
+    const raw = localStorage.getItem(getCronLeaderKey());
     if (raw) {
       const data = JSON.parse(raw);
       if (data.heartbeat && (now - data.heartbeat) < CRON_LEADER_STALE_MS) {
@@ -117,12 +126,12 @@ function cronTryClaimLeadership() {
     }
     // Claim leadership
     cronLeaderTabId = Math.random().toString(36).slice(2, 10);
-    localStorage.setItem(CRON_LEADER_KEY, JSON.stringify({
+    localStorage.setItem(getCronLeaderKey(), JSON.stringify({
       tabId: cronLeaderTabId,
       heartbeat: now
     }));
     // Re-read to detect race condition with another tab
-    const check = JSON.parse(localStorage.getItem(CRON_LEADER_KEY) || "{}");
+    const check = JSON.parse(localStorage.getItem(getCronLeaderKey()) || "{}");
     if (check.tabId === cronLeaderTabId) {
       deps.debugLog("[Chief cron] Claimed leadership:", cronLeaderTabId);
       return true;
@@ -143,26 +152,26 @@ function cronIsLeader() {
 function cronHeartbeat() {
   if (!cronIsLeader()) return;
   try {
-    const raw = localStorage.getItem(CRON_LEADER_KEY);
+    const raw = localStorage.getItem(getCronLeaderKey());
     if (!raw) { cronLeaderTabId = null; return; }
     const data = JSON.parse(raw);
     if (data.tabId !== cronLeaderTabId) { cronLeaderTabId = null; return; }
     data.heartbeat = Date.now();
-    localStorage.setItem(CRON_LEADER_KEY, JSON.stringify(data));
+    localStorage.setItem(getCronLeaderKey(), JSON.stringify(data));
     // Re-verify after write to detect near-simultaneous claims
-    const check = JSON.parse(localStorage.getItem(CRON_LEADER_KEY) || "{}");
+    const check = JSON.parse(localStorage.getItem(getCronLeaderKey()) || "{}");
     if (check.tabId !== cronLeaderTabId) { cronLeaderTabId = null; }
   } catch { /* ignore */ }
 }
 
 function cronReleaseLeadership() {
   try {
-    const raw = localStorage.getItem(CRON_LEADER_KEY);
+    const raw = localStorage.getItem(getCronLeaderKey());
     if (raw) {
       const data = JSON.parse(raw);
       // Only remove if we own it
       if (data.tabId === cronLeaderTabId) {
-        localStorage.removeItem(CRON_LEADER_KEY);
+        localStorage.removeItem(getCronLeaderKey());
       }
     }
   } catch { /* ignore */ }
@@ -343,7 +352,7 @@ async function cronTick() {
   // Re-verify leadership right before executing (belt-and-suspenders for TOCTOU).
   // Read-only check first — avoids a write that could itself race with another tab.
   try {
-    const leaderRaw = localStorage.getItem(CRON_LEADER_KEY);
+    const leaderRaw = localStorage.getItem(getCronLeaderKey());
     if (leaderRaw) {
       const leaderData = JSON.parse(leaderRaw);
       if (leaderData.tabId !== cronLeaderTabId) { cronLeaderTabId = null; return; }
@@ -394,7 +403,7 @@ export function startCronScheduler() {
   // This closes the TOCTOU window — even if two tabs briefly both claim leadership,
   // the loser's storage event fires before the next tick executes any jobs.
   cronStorageHandler = (event) => {
-    if (event.key !== CRON_LEADER_KEY || !cronLeaderTabId) return;
+    if (event.key !== getCronLeaderKey() || !cronLeaderTabId) return;
     try {
       const data = event.newValue ? JSON.parse(event.newValue) : null;
       if (!data || data.tabId !== cronLeaderTabId) {
@@ -406,10 +415,8 @@ export function startCronScheduler() {
   window.addEventListener("storage", cronStorageHandler);
 
   // Heartbeat: maintain leadership or try to claim if leader is stale.
-  // Only skip when confirmed zero AND not in the initial unknown state (-1).
-  // This prevents stale counts from another tab's job changes causing missed heartbeats.
+  // Always heartbeat regardless of job count — cheap operation that prevents stale leadership.
   cronLeaderHeartbeatId = window.setInterval(() => {
-    if (lastKnownCronJobCount === 0) return;
     if (cronIsLeader()) cronHeartbeat();
     else cronTryClaimLeadership();
   }, CRON_LEADER_HEARTBEAT_MS);
@@ -497,6 +504,7 @@ export function getCronTools() {
               lastRun: j.lastRun ? new Date(j.lastRun).toISOString() : null,
               lastRunError: j.lastRunError || null,
               nextRun,
+              nextRunLocal: nextRun ? formatLocalTime(nextRun, j.timezone) : null,
               runCount: j.runCount
             };
           }),
@@ -515,18 +523,27 @@ export function getCronTools() {
           type: { type: "string", enum: ["cron", "interval", "once", "reminder"], description: "Schedule type. Use 'reminder' for a sticky toast notification at a specific time." },
           cron: { type: "string", description: "5-field cron expression (required for type 'cron'). E.g. '0 8 * * 1-5' for weekdays at 08:00." },
           interval_minutes: { type: "number", description: "Interval in minutes (required for type 'interval')." },
-          run_at: { type: "string", description: "ISO 8601 datetime for one-shot execution (required for type 'once' or 'reminder')." },
+          run_at: { type: "string", description: "ISO 8601 datetime for one-shot execution (required for type 'once' or 'reminder' unless delay_minutes is provided)." },
+          delay_minutes: { type: "number", description: "Minutes from now to fire (alternative to run_at for 'once'/'reminder'). E.g. 1 = one minute from now, 30 = half an hour." },
           timezone: { type: "string", description: "IANA timezone. Default: auto-detected from browser." },
           prompt: { type: "string", description: "The instruction to send to Chief of Staff when the job fires (not used for 'reminder' type)." },
           message: { type: "string", description: "The reminder text to display in the sticky toast (required for type 'reminder')." }
         },
         required: ["name", "type"]
       },
-      execute: async ({ name, type, cron: cronExpr, interval_minutes, run_at, timezone, prompt, message } = {}) => {
+      execute: async ({ name, type, cron: cronExpr, interval_minutes, run_at, delay_minutes, timezone, prompt, message } = {}) => {
         if (!name || !type) return { error: "name and type are required." };
+        // Convert delay_minutes to absolute run_at (coerce string→number since LLMs often send "1" not 1)
+        if (delay_minutes != null && !run_at && (type === "once" || type === "reminder")) {
+          const delayNum = Number(delay_minutes);
+          if (!Number.isFinite(delayNum) || delayNum < 0.5) {
+            return { error: "delay_minutes must be a number >= 0.5." };
+          }
+          run_at = new Date(Date.now() + delayNum * 60_000).toISOString();
+        }
         if (type === "reminder") {
           if (!message && !name) return { error: "message is required for type 'reminder'." };
-          if (!run_at) return { error: "run_at (ISO 8601 datetime) is required for type 'reminder'." };
+          if (!run_at) return { error: "run_at or delay_minutes is required for type 'reminder'." };
         } else if (!prompt) {
           return { error: "prompt is required for non-reminder job types." };
         }
@@ -552,7 +569,7 @@ export function getCronTools() {
           return { error: `interval_minutes must be at least ${CRON_MIN_INTERVAL_MINUTES}.` };
         }
         if (type === "once" && !run_at) {
-          return { error: "run_at (ISO 8601 datetime) is required for type 'once'." };
+          return { error: "run_at or delay_minutes is required for type 'once'." };
         }
         if ((type === "once" || type === "reminder") && run_at) {
           const parsedRunAt = new Date(run_at).getTime();
@@ -591,10 +608,10 @@ export function getCronTools() {
         try {
           if (type === "cron" && cronExpr) nextRun = new Cron(cronExpr, { timezone: tz }).nextRun()?.toISOString();
           else if (type === "interval") nextRun = new Date(Date.now() + (interval_minutes || 60) * 60_000).toISOString();
-          else if (type === "once" && run_at) nextRun = new Date(run_at).toISOString();
+          else if ((type === "once" || type === "reminder") && run_at) nextRun = new Date(run_at).toISOString();
         } catch { /* ignore */ }
 
-        return { created: true, id: newJob.id, name: newJob.name, type: newJob.type, nextRun, timezone: tz };
+        return { created: true, id: newJob.id, name: newJob.name, type: newJob.type, nextRun, nextRunLocal: nextRun ? formatLocalTime(nextRun, tz) : null, timezone: tz };
       }
     },
     {

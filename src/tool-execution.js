@@ -271,7 +271,7 @@ function extractTargetPageUids(toolName, args) {
 // ── Main tool execution dispatcher ──────────────────────────────────────────
 
 export async function executeToolCall(toolName, args, { readOnly = false } = {}) {
-  // Tool name normalisation: LLMs (especially gemini-2.5-flash) sometimes hallucinate
+  // Tool name normalisation: LLMs (especially gemini flash-lite) sometimes hallucinate
   // hyphens in tool names (e.g. "cos_get-current-time" instead of "cos_get_current_time").
   // Try the original name first — MCP tools use hyphens natively (e.g. "list-events").
   // Only fall back to underscore normalisation if the original name doesn't resolve.

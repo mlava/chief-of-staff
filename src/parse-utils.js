@@ -68,7 +68,7 @@ export function extractMcpKeyReference(mcpResultTexts) {
       }
     }
     // Also match "Item Key: XYZ" with nearby title (cap name to 200 chars to limit backtracking)
-    const itemKeyPattern = /\*\*(?:Title|Name):\*\*\s*(.{1,200}?)[\n\r].*?\*\*(?:Item Key|Key):\*\*\s*`?([A-Za-z0-9]+)`?/g;
+    const itemKeyPattern = /\*\*(?:Title|Name):\*\*\s*(.{1,200})[\s\S]{0,500}?\*\*(?:Item Key|Key):\*\*\s*`?([A-Za-z0-9]+)`?/g;
     while ((match = itemKeyPattern.exec(text)) !== null) {
       const name = match[1].trim();
       const key = match[2];
