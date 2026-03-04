@@ -524,7 +524,7 @@ export function appendChatPanelMessage(role, text) {
 
 /**
  * Extract a short human-friendly label from a full model ID string.
- * e.g. "claude-haiku-4-5-20251001" → "haiku", "gemini-2.5-flash-lite" → "flash-lite"
+ * e.g. "claude-haiku-4-5-20251001" → "haiku", "gemini-3.1-flash-lite-preview" → "flash-lite"
  */
 function shortModelLabel(modelId) {
   if (!modelId || typeof modelId !== "string") return "";
@@ -702,8 +702,8 @@ function buildCostTooltipContent() {
   let html = `<div class="chief-cost-section">`;
   html += `<div class="chief-cost-heading">Session</div>`;
   html += `<div class="chief-cost-row"><span>Cost</span><span>${deps.escapeHtml(fmt(session.totalCostUsd))}</span></div>`;
-  html += `<div class="chief-cost-row"><span>Input tokens</span><span>${tokFmt(session.totalInputTokens)}</span></div>`;
-  html += `<div class="chief-cost-row"><span>Output tokens</span><span>${tokFmt(session.totalOutputTokens)}</span></div>`;
+  html += `<div class="chief-cost-row"><span>Input tokens</span><span>${deps.escapeHtml(tokFmt(session.totalInputTokens))}</span></div>`;
+  html += `<div class="chief-cost-row"><span>Output tokens</span><span>${deps.escapeHtml(tokFmt(session.totalOutputTokens))}</span></div>`;
   html += `<div class="chief-cost-row"><span>Requests</span><span>${session.totalRequests}</span></div>`;
   html += `</div>`;
 
@@ -712,7 +712,7 @@ function buildCostTooltipContent() {
     html += `<div class="chief-cost-section">`;
     html += `<div class="chief-cost-heading">Today</div>`;
     html += `<div class="chief-cost-row"><span>Cost</span><span>${deps.escapeHtml(fmt(summary.today.cost))}</span></div>`;
-    html += `<div class="chief-cost-row"><span>Tokens</span><span>${tokFmt(summary.today.input + summary.today.output)}</span></div>`;
+    html += `<div class="chief-cost-row"><span>Tokens</span><span>${deps.escapeHtml(tokFmt(summary.today.input + summary.today.output))}</span></div>`;
     html += `<div class="chief-cost-row"><span>Requests</span><span>${summary.today.requests}</span></div>`;
 
     if (summary.today.models && Object.keys(summary.today.models).length > 1) {
@@ -813,6 +813,9 @@ async function handleChatPanelSend() {
   let streamingEl = null;
   let streamText = "";
   let streamRenderPending = false;
+  let lastStreamRenderAt = 0;
+  let streamRenderTimerId = null;
+  const STREAM_RENDER_MIN_INTERVAL_MS = 200; // ~5/sec max
 
   function ensureStreamingEl() {
     if (streamingEl) return;
@@ -826,10 +829,12 @@ async function handleChatPanelSend() {
 
   function flushStreamRender() {
     streamRenderPending = false;
+    lastStreamRenderAt = Date.now();
     if (!streamingEl || !document.body.contains(streamingEl)) return;
     const joined = streamText.replace(/\[Key reference:[^\]]*\]\s*/g, "");
     const capped = joined.length > 60000 ? joined.slice(joined.length - 60000) : joined;
     streamingEl.innerHTML = deps.renderMarkdownToSafeHtml(capped);
+    deps.sanitizeChatDom(streamingEl);
     if (chatPanelMessages) chatPanelMessages.scrollTop = chatPanelMessages.scrollHeight;
   }
 
@@ -862,8 +867,20 @@ async function handleChatPanelSend() {
         ensureStreamingEl();
         streamText += chunk;
         if (!streamRenderPending) {
-          streamRenderPending = true;
-          requestAnimationFrame(flushStreamRender);
+          const elapsed = Date.now() - lastStreamRenderAt;
+          if (elapsed >= STREAM_RENDER_MIN_INTERVAL_MS) {
+            streamRenderPending = true;
+            requestAnimationFrame(flushStreamRender);
+          } else {
+            // Schedule deferred render to avoid stale display
+            if (!streamRenderTimerId) {
+              streamRenderTimerId = setTimeout(() => {
+                streamRenderTimerId = null;
+                streamRenderPending = true;
+                requestAnimationFrame(flushStreamRender);
+              }, STREAM_RENDER_MIN_INTERVAL_MS - elapsed);
+            }
+          }
         }
       }
     });
@@ -1759,6 +1776,9 @@ export function destroyChatPanel() {
   clearTimeout(chatWorkingTimerId);
   chatThinkingTimerId = null;
   chatWorkingTimerId = null;
+  // Remove any orphaned cost tooltip
+  const orphanTooltip = document.querySelector(".chief-cost-tooltip");
+  if (orphanTooltip) orphanTooltip.remove();
 }
 
 // ── Toast prompt / approval dialogs ─────────────────────────────────

@@ -132,7 +132,13 @@ export function buildLocalMcpMetaTool() {
     execute: async (args) => {
       const innerName = args?.tool_name;
       if (!innerName) return { error: "tool_name is required" };
-      const tool = (localMcpToolsCache || []).find(t => t.name === innerName);
+      const cache = localMcpToolsCache || [];
+      let tool = cache.find(t => t.name === innerName);
+      // Case-insensitive fallback — LLMs often send differently-cased tool names
+      if (!tool) {
+        const lower = innerName.toLowerCase();
+        tool = cache.find(t => t.name.toLowerCase() === lower);
+      }
       if (!tool) return { error: `Tool "${innerName}" not found in local MCP servers` };
       return tool.execute(args.arguments || {});
     }
@@ -344,6 +350,11 @@ export class NativeSSETransport {
 // ── Connection management ───────────────────────────────────────────────────
 
 export async function connectLocalMcp(port) {
+  const p = Number(port);
+  if (!Number.isInteger(p) || p < 1 || p > 65535) {
+    console.warn(`[Local MCP] Invalid port: ${port}`);
+    return null;
+  }
   const existing = localMcpClients.get(port);
 
   // Already connected — return cached client
@@ -487,7 +498,9 @@ export async function connectLocalMcp(port) {
                 return result;
               } catch (e) {
                 const errMsg = e?.message || `Failed: ${toolName}`;
-                return { error: errMsg };
+                // Hint at reconnection for transport-level failures
+                const isStale = /not connected|connection closed|transport|endpoint/i.test(errMsg);
+                return { error: isStale ? `${errMsg} — try "Refresh Local MCP Servers" to reconnect.` : errMsg };
               }
             }
           });
@@ -495,6 +508,7 @@ export async function connectLocalMcp(port) {
         deps.debugLog(`[Local MCP] Discovered ${serverTools.length} tools from port ${port} (server: ${serverName})`);
       } catch (e) {
         console.warn(`[Local MCP] listTools failed at connect for port ${port}:`, e?.message);
+        throw e; // treat as connection failure — outer catch will clean up transport
       }
 
       // ─── MCP Supply Chain Hardening (scan → pin → BOM) ───
@@ -580,9 +594,12 @@ export function scheduleLocalMcpAutoConnect() {
       return;
     }
 
-    // Clear stale failure state so connectLocalMcp doesn't skip via backoff
+    // Reset backoff so connectLocalMcp doesn't skip — preserve other state
     const stale = localMcpClients.get(port);
-    if (stale && !stale.client) localMcpClients.delete(port);
+    if (stale && !stale.client) {
+      stale.lastFailureAt = 0;
+      stale.failureCount = 0;
+    }
 
     connectLocalMcp(port).then(client => {
       if (client) return; // success
@@ -626,4 +643,10 @@ export function cleanupLocalMcp() {
   localMcpAutoConnectTimerIds.forEach(id => clearTimeout(id));
   localMcpAutoConnectTimerIds.clear();
   suspendedMcpServers.clear();
+  // Safety net: force-close transports in case disconnectAllLocalMcp() times out,
+  // preventing orphaned EventSource connections from leaking.
+  for (const [, entry] of localMcpClients) {
+    if (entry?.transport) try { entry.transport.close(); } catch { /* ignore */ }
+  }
+  localMcpClients.clear();
 }

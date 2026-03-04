@@ -1,4 +1,4 @@
-// roam-native-tools.js — 28 Roam tool definitions, extracted from index.js
+// roam-native-tools.js — 44 Roam tool definitions, extracted from index.js
 // All external dependencies are injected via initRoamNativeTools().
 
 let deps = {};
@@ -14,6 +14,35 @@ export function resetRoamNativeToolsCache() {
 
 export function getRoamNativeTools() {
   if (roamNativeToolsCache) return roamNativeToolsCache;
+
+  // Shared helper: click an item in the top-bar "..." popover menu by label text.
+  // Opens the popover if needed, finds the menu item, and clicks it.
+  async function clickTopBarMenuItem(label, successMessage) {
+    // Helper: find a menu item inside an open popover by its label text
+    const findItem = () => {
+      const items = document.querySelectorAll(".bp3-popover-content .bp3-menu-item");
+      for (const item of items) {
+        const el = item.querySelector(".bp3-fill.bp3-text-overflow-ellipsis");
+        if (el && el.textContent.trim() === label) return item;
+      }
+      return null;
+    };
+
+    // Check if the popover is already open
+    const existing = findItem();
+    if (existing) { existing.click(); return { success: true, message: successMessage }; }
+
+    // Open the popover — bp3-icon-more is a class on the button itself
+    const menuBtn = document.querySelector(".rm-topbar .bp3-icon-more");
+    if (!menuBtn) return { success: false, error: "Top-bar menu button not found." };
+    menuBtn.click();
+    await new Promise(r => setTimeout(r, 300));
+    const item = findItem();
+    if (!item) return { success: false, error: `"${label}" menu item not found after opening menu.` };
+    item.click();
+    return { success: true, message: successMessage };
+  }
+
   roamNativeToolsCache = [
     {
       name: "roam_search",
@@ -1488,6 +1517,260 @@ export function getRoamNativeTools() {
           new_status: newStatus,
           text: newBlockStr.slice(0, 200)
         };
+      }
+    },
+    {
+      name: "roam_open_depot",
+      isMutating: false,
+      description: "Open the Roam Depot (extension marketplace) panel in the left sidebar.",
+      input_schema: { type: "object", properties: {}, required: [] },
+      execute: async () => {
+        const btn = document.querySelector(".rm-left-sidebar__roam-depot");
+        if (!btn) return { success: false, error: "Roam Depot button not found in sidebar. Is the left sidebar open?" };
+        btn.click();
+        return { success: true, message: "Roam Depot panel opened." };
+      }
+    },
+    {
+      name: "roam_open_graph_overview",
+      isMutating: false,
+      description: "Open the Graph Overview visualisation in the left sidebar.",
+      input_schema: { type: "object", properties: {}, required: [] },
+      execute: async () => {
+        const btn = document.querySelector(".rm-left-sidebar__graph-overview");
+        if (!btn) return { success: false, error: "Graph Overview button not found in sidebar. Is the left sidebar open?" };
+        btn.click();
+        return { success: true, message: "Graph Overview opened." };
+      }
+    },
+    {
+      name: "roam_open_all_pages",
+      isMutating: false,
+      description: "Open the All Pages list in the left sidebar.",
+      input_schema: { type: "object", properties: {}, required: [] },
+      execute: async () => {
+        const btn = document.querySelector(".rm-left-sidebar__all-pages");
+        if (!btn) return { success: false, error: "All Pages button not found in sidebar. Is the left sidebar open?" };
+        btn.click();
+        return { success: true, message: "All Pages list opened." };
+      }
+    },
+    // ---- Top-bar popover menu tools ----
+    // The "..." button in the top bar opens a popover with items like Settings,
+    // Open Graph View, Share Link, Export All, etc. Each item is a .bp3-menu-item
+    // containing <div class="bp3-fill bp3-text-overflow-ellipsis">Label</div>.
+    // The "..." button has bp3-icon-more as a class on itself (not a child):
+    //   <span class="bp3-button bp3-minimal bp3-small bp3-icon-more" tabindex="0"></span>
+
+    {
+      name: "roam_open_settings",
+      isMutating: false,
+      description: "Open the Roam Settings dialog. Clicks the top-bar '...' menu and then the Settings option.",
+      input_schema: { type: "object", properties: {}, required: [] },
+      execute: async () => {
+        return await clickTopBarMenuItem("Settings", "Settings dialog opened.");
+      }
+    },
+    {
+      name: "roam_open_graph_view",
+      isMutating: false,
+      description: "Open the Graph View visualisation from the top-bar '...' menu.",
+      input_schema: { type: "object", properties: {}, required: [] },
+      execute: async () => {
+        return await clickTopBarMenuItem("Open Graph View", "Graph View opened.");
+      }
+    },
+    {
+      name: "roam_share_link",
+      isMutating: false,
+      description: "Open the Share Link dialog from the top-bar '...' menu. Copies the current page's share link.",
+      input_schema: { type: "object", properties: {}, required: [] },
+      execute: async () => {
+        return await clickTopBarMenuItem("Share Link", "Share Link dialog opened.");
+      }
+    },
+    {
+      name: "roam_open_help",
+      isMutating: false,
+      description: "Open the Roam help menu in the top bar.",
+      input_schema: { type: "object", properties: {}, required: [] },
+      execute: async () => {
+        const helpBtn = document.querySelector(".rm-topbar__help .bp3-icon-help");
+        if (!helpBtn) return { success: false, error: "Help button not found in top bar." };
+        helpBtn.click();
+        return { success: true, message: "Help menu opened." };
+      }
+    },
+
+    // ── Page Shortcuts ──────────────────────────────────────────────
+    // Manage the Shortcuts section in the left sidebar (starred/pinned pages).
+
+    {
+      name: "roam_add_page_shortcut",
+      isMutating: true,
+      description: "Add a page to the Shortcuts section in the left sidebar. Takes the page UID (the 9-character identifier, NOT the page title).",
+      input_schema: {
+        type: "object",
+        properties: {
+          uid: { type: "string", description: "The 9-character UID of the page to add as a shortcut." }
+        },
+        required: ["uid"]
+      },
+      execute: async ({ uid }) => {
+        if (!uid || typeof uid !== "string") return { success: false, error: "uid is required." };
+        deps.requireRoamUidExists(uid, "uid");
+        const api = deps.getRoamAlphaApi();
+        if (!api?.data?.page?.addShortcut) return { success: false, error: "Roam addShortcut API unavailable." };
+        try {
+          await api.data.page.addShortcut(uid);
+          return { success: true, message: `Page ${uid} added to shortcuts.` };
+        } catch (e) {
+          return { success: false, error: e?.message || "Failed to add shortcut." };
+        }
+      }
+    },
+    {
+      name: "roam_remove_page_shortcut",
+      isMutating: true,
+      description: "Remove a page from the Shortcuts section in the left sidebar. Takes the page UID (the 9-character identifier, NOT the page title).",
+      input_schema: {
+        type: "object",
+        properties: {
+          uid: { type: "string", description: "The 9-character UID of the page to remove from shortcuts." }
+        },
+        required: ["uid"]
+      },
+      execute: async ({ uid }) => {
+        if (!uid || typeof uid !== "string") return { success: false, error: "uid is required." };
+        deps.requireRoamUidExists(uid, "uid");
+        const api = deps.getRoamAlphaApi();
+        if (!api?.data?.page?.removeShortcut) return { success: false, error: "Roam removeShortcut API unavailable." };
+        try {
+          await api.data.page.removeShortcut(uid);
+          return { success: true, message: `Page ${uid} removed from shortcuts.` };
+        } catch (e) {
+          return { success: false, error: e?.message || "Failed to remove shortcut." };
+        }
+      }
+    },
+
+    // ── Blockquotes ────────────────────────────────────────────────
+    // Roam blockquote format: "[[>]] text"
+    // Just [[>]] followed by the content — no type annotation.
+
+    {
+      name: "roam_add_blockquote",
+      isMutating: true,
+      description: "Create a blockquote in Roam. Formats the block with [[>]] prefix. For callouts with a type (NOTE, WARNING, etc.) use roam_add_callout instead.",
+      input_schema: {
+        type: "object",
+        properties: {
+          parent_uid: { type: "string", description: "Parent block or page UID to place the blockquote under." },
+          text: { type: "string", description: "The blockquote text content." },
+          order: { type: "string", description: "\"first\" or \"last\". Default \"last\"." }
+        },
+        required: ["parent_uid", "text"]
+      },
+      execute: async ({ parent_uid, text, order = "last" } = {}) => {
+        const parentUid = String(parent_uid || "").trim();
+        if (!parentUid) throw new Error("parent_uid is required");
+        deps.requireRoamUidExists(parentUid, "parent_uid");
+        const blockText = `[[>]] ${String(text || "").trim()}`;
+        const uid = await deps.createRoamBlock(parentUid, blockText, order);
+        return { success: true, uid, parent_uid: parentUid };
+      }
+    },
+    {
+      name: "roam_remove_blockquote",
+      isMutating: true,
+      description: "Remove blockquote formatting from a block, keeping the text content. Strips the [[>]] prefix.",
+      input_schema: {
+        type: "object",
+        properties: {
+          uid: { type: "string", description: "UID of the blockquote block to strip formatting from." }
+        },
+        required: ["uid"]
+      },
+      execute: async ({ uid } = {}) => {
+        const blockUid = String(uid || "").trim();
+        if (!blockUid) throw new Error("uid is required");
+        deps.requireRoamUidExists(blockUid, "uid");
+        const api = deps.getRoamAlphaApi();
+        const pull = api?.pull?.("[:block/string]", [":block/uid", blockUid]);
+        const currentText = pull?.[":block/string"] || "";
+        const stripped = currentText.replace(/^\[\[>\]\]\s*/, "");
+        if (stripped === currentText) {
+          return { success: false, error: "Block does not appear to be a blockquote." };
+        }
+        await deps.withRoamWriteRetry(() =>
+          api.updateBlock({ block: { uid: blockUid, string: deps.truncateRoamBlockText(stripped) } })
+        );
+        return { success: true, uid: blockUid, new_text: stripped };
+      }
+    },
+
+    // ── Callouts ─────────────────────────────────────────────────────
+    // Roam callout format: "[[>]] [[!TYPE]] Title\nBody text"
+    // Built-in types: NOTE, INFO, SUMMARY (TLDR, ABSTRACT), TIP (HINT, IMPORTANT),
+    // SUCCESS (CHECK, DONE), QUESTION (HELP, FAQ), WARNING (CAUTION, ATTENTION),
+    // FAILURE (FAIL, MISSING), DANGER (ERROR), BUG, EXAMPLE, QUOTE (CITE).
+    // Foldable: append + (expanded) or - (collapsed) e.g. [[!TIP]]+ or [[!WARNING]]-.
+
+    {
+      name: "roam_add_callout",
+      isMutating: true,
+      description: "Create a callout block in Roam. Automatically formats the block with the correct [[>]] [[!TYPE]] syntax. Built-in types: NOTE, INFO, SUMMARY, TIP, SUCCESS, QUESTION, WARNING, FAILURE, DANGER, BUG, EXAMPLE, QUOTE. Foldable: set foldable to '+' (starts expanded) or '-' (starts collapsed).",
+      input_schema: {
+        type: "object",
+        properties: {
+          parent_uid: { type: "string", description: "Parent block or page UID to place the callout under." },
+          type: { type: "string", description: "Callout type, e.g. 'NOTE', 'WARNING', 'TIP', 'BUG'. Case-insensitive." },
+          title: { type: "string", description: "The callout title text (displayed on the first line after the type tag)." },
+          body: { type: "string", description: "Optional body text displayed below the title inside the callout." },
+          foldable: { type: "string", enum: ["+", "-", ""], description: "Optional. '+' = foldable, starts expanded. '-' = foldable, starts collapsed. Empty or omitted = not foldable." },
+          order: { type: "string", description: "\"first\" or \"last\". Default \"last\"." }
+        },
+        required: ["parent_uid", "type", "title"]
+      },
+      execute: async ({ parent_uid, type, title, body, foldable = "", order = "last" } = {}) => {
+        const parentUid = String(parent_uid || "").trim();
+        if (!parentUid) throw new Error("parent_uid is required");
+        deps.requireRoamUidExists(parentUid, "parent_uid");
+        const t = String(type || "").toUpperCase().trim();
+        if (!t) throw new Error("type is required");
+        const fold = foldable === "+" || foldable === "-" ? foldable : "";
+        let blockText = `[[>]] [[!${t}]]${fold} ${String(title || "").trim()}`;
+        if (body) blockText += `\n${String(body).trim()}`;
+        const uid = await deps.createRoamBlock(parentUid, blockText, order);
+        return { success: true, uid, parent_uid: parentUid, callout_type: t };
+      }
+    },
+    {
+      name: "roam_remove_callout",
+      isMutating: true,
+      description: "Remove callout formatting from a block, keeping the text content. Strips the [[>]] [[!TYPE]] prefix and any foldable marker, leaving only the title and body text.",
+      input_schema: {
+        type: "object",
+        properties: {
+          uid: { type: "string", description: "UID of the callout block to strip formatting from." }
+        },
+        required: ["uid"]
+      },
+      execute: async ({ uid } = {}) => {
+        const blockUid = String(uid || "").trim();
+        if (!blockUid) throw new Error("uid is required");
+        deps.requireRoamUidExists(blockUid, "uid");
+        const api = deps.getRoamAlphaApi();
+        const pull = api?.pull?.("[:block/string]", [":block/uid", blockUid]);
+        const currentText = pull?.[":block/string"] || "";
+        const stripped = currentText.replace(/^\[\[>\]\]\s*\[\[![A-Z_]+\]\][+-]?\s*/, "");
+        if (stripped === currentText) {
+          return { success: false, error: "Block does not appear to be a callout." };
+        }
+        await deps.withRoamWriteRetry(() =>
+          api.updateBlock({ block: { uid: blockUid, string: deps.truncateRoamBlockText(stripped) } })
+        );
+        return { success: true, uid: blockUid, new_text: stripped };
       }
     }
   ];

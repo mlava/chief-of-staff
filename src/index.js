@@ -42,6 +42,7 @@ import {
   extractAuthRedirectUrls,
   clearAuthPollForSlug,
   clearAllAuthPolls,
+  clearSchemaPromptCache,
   getToolsConfigState,
   saveToolsConfigState,
   ensureToolsConfigState,
@@ -306,7 +307,7 @@ const LLM_MODEL_COSTS = {
   "gpt-5-mini": [0.25, 2.00],
   "gpt-4.1": [2.00, 8.00],
   "gpt-5.2": [1.75, 14.00],
-  "gemini-2.5-flash": [0.30, 2.50],
+  "gemini-3.1-flash-lite-preview": [0.25, 1.50],
   "gemini-3-flash-preview": [0.50, 3.00],
   "gemini-3.1-pro-preview-customtools": [2.00, 12.00],
   "mistral-small-latest": [0.10, 0.30],
@@ -834,6 +835,7 @@ function renderMarkdownToSafeHtml(markdownText) {
   let lastOlLiOpen = false; // track if we have an unclosed <li> in an <ol>
   let inTable = false;
   let tableRows = [];
+  let olBlankLineSeen = false;
 
   const closeOlLi = () => {
     if (lastOlLiOpen) {
@@ -1015,20 +1017,27 @@ function renderMarkdownToSafeHtml(markdownText) {
       }
       html.push(`<li>${renderInlineMarkdown(olMatch[1])}`);
       lastOlLiOpen = true;
+      olBlankLineSeen = false;
       return;
     }
 
     if (!line.trim()) {
       // blank lines inside an open list are swallowed so numbered items don't restart at 1
       if (ulStack.length === 0 && !inOl) html.push("<br/>");
+      if (inOl) olBlankLineSeen = true;
       return;
     }
 
-    // Continuation text inside a numbered list item (e.g. description lines between items)
-    // — keep it inside the current <li> so the <ol> isn't closed and numbering doesn't reset
+    // Continuation text inside a numbered list item (e.g. indented description lines)
+    // — keep it inside the current <li> so the <ol> isn't closed and numbering doesn't reset.
+    // But if a blank line was seen and this line is NOT indented, it's a new paragraph — close the list.
     if (inOl && lastOlLiOpen) {
-      html.push(`<br/>${renderInlineMarkdown(line.trim())}`);
-      return;
+      const isIndented = /^\s{2,}/.test(line);
+      if (!olBlankLineSeen || isIndented) {
+        html.push(`<br/>${renderInlineMarkdown(line.trim())}`);
+        return;
+      }
+      // Not indented after a blank line — fall through to close the list and render as paragraph
     }
 
     closeLists();
@@ -1746,7 +1755,8 @@ function parseMarkdownToBlockTree(markdown) {
     }
 
     // List item: detect indent level then strip marker
-    const listMatch = trimmed.match(/^(\s*)([-*]|\d+[.)]) (.+)$/);
+    // Handles ASCII markers (- * 1. 1)) and Unicode bullets (•◦▪▸►‣⁃–—)
+    const listMatch = trimmed.match(/^(\s*)([-*•◦▪▸►‣⁃–—]|\d+[.)]) (.+)$/);
     if (listMatch) {
       const indent = listMatch[1].length;
       const text = listMatch[3].trim();
@@ -2147,7 +2157,10 @@ async function updateChiefMemory({ page, action = "append", content, block_uid }
       throw new Error(`Too many existing children (${childUids.length}) to replace safely. Maximum is ${MAX_CREATE_BLOCKS_TOTAL}. Delete the skill and recreate it.`);
     }
 
-    // Delete all existing children
+    // Delete all existing children — log UIDs first for crash recovery
+    if (childUids.length > 0) {
+      debugLog("[Chief memory] replace_children deleting UIDs (recovery log):", JSON.stringify(childUids));
+    }
     for (const childUid of childUids) {
       await withRoamWriteRetry(() => api.deleteBlock({ block: { uid: childUid } }));
     }
@@ -2254,9 +2267,37 @@ async function updateChiefMemory({ page, action = "append", content, block_uid }
   const isDatedLogPage =
     pageTitle === "Chief of Staff/Decisions" ||
     pageTitle === "Chief of Staff/Lessons Learned";
-  const prefixedText = isDatedLogPage && !text.startsWith("[[")
-    ? `[[${formatRoamDate(new Date())}]] ${text}`
-    : text;
+
+  // Normalise escaped newlines from LLM output (same as replace_children path)
+  let normalisedText = text.replace(/\\n/g, "\n").replace(/\\t/g, "\t");
+
+  // If content has real newlines, parse into a nested block tree so Roam gets
+  // proper child blocks instead of raw markdown text in a single block.
+  const hasMultipleLines = (normalisedText.match(/\n/g) || []).length >= 1;
+  if (hasMultipleLines) {
+    const blockTree = parseMarkdownToBlockTree(normalisedText);
+    if (blockTree.length > 0) {
+      // For dated log pages, prepend date to the first root block
+      if (isDatedLogPage && !blockTree[0].text.startsWith("[[")) {
+        blockTree[0].text = `[[${formatRoamDate(new Date())}]] ${blockTree[0].text}`;
+      }
+      let firstUid;
+      for (let i = 0; i < blockTree.length; i++) {
+        const uid = await createRoamBlockTree(pageUid, blockTree[i], "last", 0, { appendSequentially: true });
+        if (i === 0) firstUid = uid;
+      }
+      invalidateMemoryPromptCache();
+      if (pageTitle === SKILLS_PAGE_TITLE) invalidateSkillsPromptCache();
+      return { success: true, action: "appended", page: pageTitle, uid: firstUid, blocks_created: blockTree.length };
+    }
+  }
+
+  // Single-line content — write as a flat block (original behaviour)
+  // Strip leading markdown list markers (- * • ◦ ▪ ▸ ► ‣ ⁃ – —) that LLMs often prepend
+  let cleanedText = normalisedText.replace(/^\s*[-*•◦▪▸►‣⁃–—]\s+/, "").trim();
+  const prefixedText = isDatedLogPage && !cleanedText.startsWith("[[")
+    ? `[[${formatRoamDate(new Date())}]] ${cleanedText}`
+    : cleanedText;
   const uid = await createRoamBlock(pageUid, prefixedText, "last");
   invalidateMemoryPromptCache();
   if (pageTitle === SKILLS_PAGE_TITLE) invalidateSkillsPromptCache();
@@ -4142,7 +4183,7 @@ async function runAgentLoop(userMessage, options = {}) {
         // Collect LOCAL_MCP_EXECUTE result text for context enrichment
         if (toolCall.name === "LOCAL_MCP_EXECUTE" && !errorMessage) {
           const txt = typeof result === "string" ? result : result?.text || (typeof result === "object" ? JSON.stringify(result) : "");
-          if (txt && mcpResultTexts.length < 20) mcpResultTexts.push(txt);
+          if (txt && mcpResultTexts.length < 20) mcpResultTexts.push(txt.slice(0, MAX_TOOL_RESULT_CHARS));
         }
         toolResults.push({ toolCall, result });
       }
@@ -4170,6 +4211,21 @@ async function runAgentLoop(userMessage, options = {}) {
           const page = resultData?.page || "memory";
           const action = resultData?.action || "updated";
           finalText = `${page} ${action} successfully.`;
+        } else if (toolName === "cos_cron_create" && resultData?.created) {
+          const cronType = resultData.type || "job";
+          const cronName = resultData.name || "";
+          const cronWhen = resultData.nextRunLocal || resultData.nextRun || "";
+          if (cronType === "reminder") {
+            finalText = cronWhen ? `Reminder set — I'll notify you at ${cronWhen}.` : `Reminder set.`;
+          } else {
+            finalText = cronWhen
+              ? `Scheduled ${cronType}${cronName ? ` "${cronName}"` : ""} — next run at ${cronWhen}.`
+              : `Scheduled ${cronType}${cronName ? ` "${cronName}"` : ""} successfully.`;
+          }
+        } else if (toolName === "cos_cron_update" && resultData?.updated) {
+          finalText = `Job "${resultData.id || "job"}" updated.`;
+        } else if (toolName === "cos_cron_delete" && resultData?.deleted) {
+          finalText = `Job "${resultData.id || "job"}" deleted.`;
         } else {
           finalText = `Written successfully.`;
         }
@@ -4642,6 +4698,8 @@ async function connectComposio(extensionAPI, options = {}) {
   }
 
   const promise = (async () => {
+    let transport = null;
+    let client = null;
     try {
       const composioMcpUrl = getSettingString(
         extensionAPI,
@@ -4672,7 +4730,7 @@ async function connectComposio(extensionAPI, options = {}) {
         return fetch(input, { ...init, signal: composioTransportAbortController?.signal });
       };
 
-      const transport = new StreamableHTTPClientTransport(
+      transport = new StreamableHTTPClientTransport(
         new URL(composioMcpUrl),
         {
           fetch: transportFetch,
@@ -4682,7 +4740,7 @@ async function connectComposio(extensionAPI, options = {}) {
         }
       );
 
-      const client = new Client({
+      client = new Client({
         name: "roam-mcp-client",
         version: "0.1.0"
       });
@@ -5993,6 +6051,36 @@ async function tryRunDeterministicAskIntent(prompt, context = {}) {
         return publishAskResponse(prompt, `${side.charAt(0).toUpperCase() + side.slice(1)} sidebar closed.`, assistantName, suppressToasts);
       } catch (e) {
         return publishAskResponse(prompt, `Could not close ${side} sidebar: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+      }
+    }
+  }
+
+  // ── UI panel shortcuts ─────────────────────────────────────────
+  // "open roam depot", "open graph overview", "open all pages", "open settings", "open help", "open graph view", "share link"
+  const uiPanelRoutes = [
+    { pattern: /^(?:open|show)\s+(?:the\s+)?(?:roam\s+)?depot\s*[.!?]*$/i,       tool: "roam_open_depot",          label: "Roam Depot" },
+    { pattern: /^(?:open|show)\s+(?:the\s+)?graph(?:\s+overview)?\s*[.!?]*$/i,    tool: "roam_open_graph_overview", label: "Graph Overview" },
+    { pattern: /^(?:open|show|list)\s+(?:the\s+)?all\s+pages?\s*[.!?]*$/i,        tool: "roam_open_all_pages",      label: "All Pages" },
+    { pattern: /^(?:open|show)\s+(?:the\s+)?(?:roam\s+)?settings?\s*[.!?]*$/i,    tool: "roam_open_settings",       label: "Settings" },
+    { pattern: /^(?:open|show)\s+(?:the\s+)?graph\s+view\s*[.!?]*$/i,            tool: "roam_open_graph_view",     label: "Graph View" },
+    { pattern: /^(?:share|copy)\s+(?:the\s+)?(?:page\s+)?link\s*[.!?]*$/i,       tool: "roam_share_link",          label: "Share Link" },
+    { pattern: /^(?:open|show)\s+(?:the\s+)?(?:roam\s+)?help(?:\s+menu)?\s*[.!?]*$/i, tool: "roam_open_help",       label: "Help" },
+  ];
+  for (const route of uiPanelRoutes) {
+    if (route.pattern.test(prompt)) {
+      debugLog(`[Chief flow] Deterministic route matched: ${route.tool}`);
+      const roamTools = getRoamNativeTools() || [];
+      const tool = roamTools.find(t => t.name === route.tool);
+      if (tool && typeof tool.execute === "function") {
+        try {
+          const result = await tool.execute({});
+          if (result?.success === false) {
+            return publishAskResponse(prompt, `Could not open ${route.label}: ${result.error || "Unknown error"}`, assistantName, suppressToasts);
+          }
+          return publishAskResponse(prompt, `${route.label} opened.`, assistantName, suppressToasts);
+        } catch (e) {
+          return publishAskResponse(prompt, `Could not open ${route.label}: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+        }
       }
     }
   }
@@ -7520,7 +7608,10 @@ function teardownPullWatches() {
 }
 
 function onload({ extensionAPI }) {
-  if (extensionAPIRef !== null) return;
+  if (extensionAPIRef !== null) {
+    console.warn("[Chief of Staff] onload called while already loaded — ignoring duplicate.");
+    return;
+  }
   unloadInProgress = false;
   debugLog("Chief of Staff loaded");
   removeOrphanChiefPanels();
@@ -7722,6 +7813,7 @@ function onload({ extensionAPI }) {
     invalidateMemoryPromptCache,
     askChiefOfStaff,
     clearConversationContext,
+    resetLastPromptSections,
     isUnloadInProgress: () => unloadInProgress,
   });
   initCronScheduler({
@@ -7868,8 +7960,10 @@ function onload({ extensionAPI }) {
   } catch (e) {
     debugLog("[Chief flow] Startup inbox sweep failed:", e?.message || e);
   }
-  setInboxStaticUIDs(null); // reset so primeInboxStaticUIDs re-snapshots
-  primeInboxStaticUIDs();
+  // Keep instruction-only static UIDs — don't reset to null and re-snapshot ALL children.
+  // Re-snapshotting would permanently freeze unprocessed items beyond the per-scan cap (8)
+  // as "static", preventing them from ever being processed by subsequent scans.
+  primeInboxStaticUIDs(); // no-op: inboxStaticUIDs is already set (instruction-only)
   setupExtensionBroadcastListeners();
   startCronScheduler();
   scheduleRuntimeAibomRefresh(1200);
@@ -7974,6 +8068,7 @@ function onunload() {
   cleanupLocalMcp();
   btProjectsCache = null;
   toolkitSchemaRegistryCache = null;
+  clearSchemaPromptCache();
   _schemaHashCache.clear();
   Promise.race([
     disconnectAllLocalMcp(),

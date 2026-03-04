@@ -280,6 +280,11 @@
 }
 
 /* User bubble */
+.chief-msg ul,
+.chief-msg ol {
+  margin-bottom: 4px;
+}
+
 .chief-msg--user {
   background: var(--cos-user-bubble-bg);
   border: 1px solid var(--cos-user-bubble-border);

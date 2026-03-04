@@ -197,10 +197,23 @@ function populateSlugAllowlist(entry) {
   }
 }
 
+const _discoverInflight = new Map(); // toolkit key → Promise
+
 export async function discoverToolkitSchema(toolkitName, options = {}) {
   const { force = false } = options;
   const key = String(toolkitName || "").toUpperCase();
   if (!key) return null;
+
+  // Dedup concurrent discoveries of the same toolkit
+  if (_discoverInflight.has(key)) return _discoverInflight.get(key);
+  const promise = _discoverToolkitSchemaInner(key, options);
+  _discoverInflight.set(key, promise);
+  promise.finally(() => _discoverInflight.delete(key));
+  return promise;
+}
+
+async function _discoverToolkitSchemaInner(key, options = {}) {
+  const { force = false } = options;
 
   // Check cache freshness
   if (!force) {
@@ -346,6 +359,13 @@ export async function discoverToolkitSchema(toolkitName, options = {}) {
       }
     }
 
+    // Truncate tool descriptions to keep persisted settings compact
+    for (const t of Object.values(tools)) {
+      if (t.description && t.description.length > 500) {
+        t.description = t.description.slice(0, 500);
+      }
+    }
+
     const entry = {
       toolkit: key,
       discoveredAt: Date.now(),
@@ -429,6 +449,10 @@ export async function discoverAllConnectedToolkitSchemas(extensionAPI = deps.get
 // ═══════════════════════════════════════════════════════════════════════
 
 let _schemaPromptCache = { key: "", value: "" };
+
+export function clearSchemaPromptCache() {
+  _schemaPromptCache = { key: "", value: "" };
+}
 
 export function buildToolkitSchemaPromptSection(activeSections) {
   const registry = getToolkitSchemaRegistry();
@@ -656,6 +680,10 @@ export function canonicaliseComposioToolSlug(slug) {
 
 export function normaliseComposioMultiExecuteArgs(args) {
   const base = args && typeof args === "object" ? { ...args } : {};
+  // LLMs sometimes send tools as a JSON string instead of an array — parse it
+  if (typeof base.tools === "string") {
+    try { base.tools = JSON.parse(base.tools); } catch (_) { /* leave as-is */ }
+  }
   const tools = Array.isArray(base.tools) ? base.tools : [];
   if (!tools.length) return base;
   base.tools = tools.map((tool) => {

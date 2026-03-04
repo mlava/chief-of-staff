@@ -8,7 +8,7 @@ export const LLM_API_ENDPOINTS = {
 export const DEFAULT_LLM_MODELS = {
   anthropic: "claude-haiku-4-5-20251001",
   openai: "gpt-5-mini",
-  gemini: "gemini-2.5-flash",
+  gemini: "gemini-3.1-flash-lite-preview",
   mistral: "mistral-small-latest"
 };
 

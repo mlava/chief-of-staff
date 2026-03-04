@@ -199,12 +199,14 @@ export function buildSettingsConfig(extensionAPI) {
       .sort(([a], [b]) => a.localeCompare(b));
 
     if (!extEntries.length) {
+      
       settings.push({
         id: "ext-tools-none",
         name: "No extensions detected",
-        description: "No Roam extensions have registered tools yet. Install extensions that support the Extension Tools API.",
-        action: { type: "input", placeholder: "", onChange: () => {} }
+        description: "No installed extensions have registered tools yet. Install extensions that support the Extension Tools API.",
+        //action: { type: "input", placeholder: "", onChange: () => {} }
       });
+      
     } else {
       for (const [extKey, ext] of extEntries) {
         const label = String(ext.name || extKey).trim();
