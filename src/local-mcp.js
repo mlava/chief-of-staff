@@ -499,7 +499,7 @@ export async function connectLocalMcp(port) {
               } catch (e) {
                 const errMsg = e?.message || `Failed: ${toolName}`;
                 // Hint at reconnection for transport-level failures
-                const isStale = /not connected|connection closed|transport|endpoint/i.test(errMsg);
+                const isStale = /not connected|connection closed|EventSource|SSE.*fail|cannot send/i.test(errMsg);
                 return { error: isStale ? `${errMsg} — try "Refresh Local MCP Servers" to reconnect.` : errMsg };
               }
             }
@@ -599,6 +599,7 @@ export function scheduleLocalMcpAutoConnect() {
     if (stale && !stale.client) {
       stale.lastFailureAt = 0;
       stale.failureCount = 0;
+      stale.connectPromise = null;
     }
 
     connectLocalMcp(port).then(client => {

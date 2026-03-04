@@ -184,7 +184,6 @@ export function runFullInboxScan(reason = "watch") {
   inboxLastFullScanAt = Date.now();
   const staticUIDs = getInboxStaticUIDs();
   deps.debugLog?.("[Chief flow] Inbox pull result:", inboxChildren.length, "children, static:", staticUIDs.size, "processing:", inboxProcessingSet.size, "reason:", reason);
-  deps.debugLog?.("[Chief flow] Inbox children detail:", inboxChildren.map(c => ({ uid: c[":block/uid"], str: c[":block/string"] })));
 
   const newBlocks = getInboxCandidateBlocksFromChildrenRows(inboxChildren);
   if (newBlocks.length > 0) {

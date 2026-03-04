@@ -190,7 +190,8 @@ export async function persistAuditLogEntry(trace, userPrompt) {
       : "success";
     const prompt = String(userPrompt || trace.promptPreview || "").slice(0, 120)
       .replace(/\[\[/g, "⟦").replace(/\]\]/g, "⟧")
-      .replace(/\{\{/g, "⦃⦃").replace(/\}\}/g, "⦄⦄");
+      .replace(/\{\{/g, "⦃⦃").replace(/\}\}/g, "⦄⦄")
+      .replace(/\(\(/g, "⦅⦅").replace(/\)\)/g, "⦆⦆");
 
     const block = `[[${dateStr}]] **${trace.model || "unknown"}** `
       + `(${trace.iterations || 0} iter, ${durationSec}s, ${tokens} tok${cost ? ", " + cost : ""}) `
