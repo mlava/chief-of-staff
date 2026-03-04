@@ -186,7 +186,7 @@ export async function persistAuditLogEntry(trace, userPrompt) {
     const tokens = (trace.totalInputTokens || 0) + (trace.totalOutputTokens || 0);
     const cost = typeof trace.cost === "number" ? `$${trace.cost.toFixed(4)}` : "";
     const outcome = trace.capExceeded ? "cap-exceeded"
-      : trace.error ? `error: ${String(trace.error).slice(0, 80)}`
+      : trace.error ? `error: ${String(trace.error).slice(0, 80).replace(/\[\[/g, "⟦").replace(/\]\]/g, "⟧").replace(/\{\{/g, "⦃⦃").replace(/\}\}/g, "⦄⦄").replace(/\(\(/g, "⦅⦅").replace(/\)\)/g, "⦆⦆")}`
       : "success";
     const prompt = String(userPrompt || trace.promptPreview || "").slice(0, 120)
       .replace(/\[\[/g, "⟦").replace(/\]\]/g, "⟧")

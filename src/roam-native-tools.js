@@ -1511,7 +1511,10 @@ export function getRoamNativeTools() {
         const recheck = await deps.queryRoamDatalog(
           `[:find ?str . :where [?b :block/uid "${deps.escapeForDatalog(blockUid)}"] [?b :block/string ?str]]`
         );
-        if (recheck != null && String(recheck) !== blockStr) {
+        if (recheck == null) {
+          throw new Error(`Block ${blockUid} was deleted concurrently — aborting.`);
+        }
+        if (String(recheck) !== blockStr) {
           throw new Error("Block was modified concurrently — aborting to avoid clobbering changes. Please retry.");
         }
         await deps.withRoamWriteRetry(() =>

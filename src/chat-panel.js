@@ -64,6 +64,7 @@ export function getChatPanelIsSending() { return chatPanelIsSending; }
 let cosThemeObserver = null;
 let cosThemeSyncTimer = null;
 let cosThemeVerifyTimer = null;
+let cosThemeHeadMutationTimer = null;
 let cosThemeMediaHandler = null;
 let cosThemeMediaQuery = null;
 let cosThemeToggleHandler = null;
@@ -283,7 +284,6 @@ export function observeCosThemeChanges() {
   // Head stylesheet mutations are throttled more aggressively because Roam
   // Studio themes fire dozens of mutations during animated transitions.
   if (!cosThemeObserver) {
-    let headMutationTimer = null;
     const cb = (mutations) => {
       const isBodyOrHtml = mutations.some(m =>
         m.target === document.body || m.target === document.documentElement
@@ -294,9 +294,9 @@ export function observeCosThemeChanges() {
       } else {
         // Head/stylesheet change → likely animated transition.  Use a longer
         // debounce and don't interrupt an already-scheduled resync.
-        if (!cosThemeSyncTimer && !headMutationTimer) {
-          headMutationTimer = setTimeout(() => {
-            headMutationTimer = null;
+        if (!cosThemeSyncTimer && !cosThemeHeadMutationTimer) {
+          cosThemeHeadMutationTimer = setTimeout(() => {
+            cosThemeHeadMutationTimer = null;
             triggerCosThemeResync(1200);
           }, 2000);
         }
@@ -344,6 +344,7 @@ export function teardownCosThemeObserver() {
   if (cosThemeObserver) { cosThemeObserver.disconnect(); cosThemeObserver = null; }
   if (cosThemeSyncTimer) { clearTimeout(cosThemeSyncTimer); cosThemeSyncTimer = null; }
   if (cosThemeVerifyTimer) { clearTimeout(cosThemeVerifyTimer); cosThemeVerifyTimer = null; }
+  if (cosThemeHeadMutationTimer) { clearTimeout(cosThemeHeadMutationTimer); cosThemeHeadMutationTimer = null; }
   if (cosThemeMediaHandler && cosThemeMediaQuery) {
     cosThemeMediaQuery.removeEventListener?.("change", cosThemeMediaHandler);
     cosThemeMediaHandler = null;

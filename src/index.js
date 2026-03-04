@@ -7,11 +7,11 @@ import { computeRoutingScore, recordTurnOutcome, sessionTrajectory } from "./tie
 import {
   initChatPanel, getChatPanelIsOpen, getChatPanelContainer, getChatPanelMessages,
   getChatPanelIsSending, showConnectedToast, showDisconnectedToast, showReconnectedToast,
-  showInfoToast, showErrorToast, showReminderToast, showInfoToastIfAllowed, showErrorToastIfAllowed,
-  removeOrphanChiefPanels, createChatPanelMessageElement, appendChatPanelMessage,
+  showInfoToast, showErrorToast, showReminderToast, showInfoToastIfAllowed,
+  removeOrphanChiefPanels, appendChatPanelMessage,
   loadChatPanelHistory, appendChatPanelHistory, flushPersistChatPanelHistory,
-  clearChatPanelHistory, setChatPanelSendingState, updateChatPanelCostIndicator,
-  ensureChatPanel, isChatPanelActuallyVisible, setChatPanelOpen, toggleChatPanel,
+  clearChatPanelHistory, updateChatPanelCostIndicator,
+  setChatPanelOpen, toggleChatPanel,
   destroyChatPanel, promptToolSlugWithToast, promptTextWithToast, promptTextareaWithToast,
   promptInstalledToolSlugWithToast, promptToolExecutionApproval,
   promptWriteToDailyPage, detachAllToastKeyboards,
@@ -28,15 +28,12 @@ import {
   getComposioToolkitCatalogCache,
   mergeComposioToolkitCatalogSlugs,
   getToolkitSchemaRegistry,
-  getToolkitEntry,
   getToolSchema,
   inferToolkitFromSlug,
   discoverToolkitSchema,
   discoverAllConnectedToolkitSchemas,
   buildToolkitSchemaPromptSection,
   recordToolResponseShape,
-  resolveToolkitSlugFromSuggestions,
-  canonicaliseComposioToolSlug,
   normaliseComposioMultiExecuteArgs,
   mapComposioStatusToInstallState,
   extractAuthRedirectUrls,
@@ -46,7 +43,6 @@ import {
   getToolsConfigState,
   saveToolsConfigState,
   ensureToolsConfigState,
-  extractCandidateToolkitSlugsFromComposioSearch,
   resolveComposioToolkitSlugForInstall
 } from "./composio-mcp.js";
 import {
@@ -56,24 +52,16 @@ import {
   getCronTools,
   buildCronJobsPromptSection,
   loadCronJobs,
-  getDefaultBrowserTimezone,
 } from "./cron-scheduler.js";
 import {
   initSystemPrompt,
-  detectPromptSections,
   buildDefaultSystemPrompt,
-  invalidateMemorySkillsCache,
   resetLastPromptSections,
-  getLastPromptSections
 } from "./system-prompt.js";
 import {
   initToolExecution,
   executeToolCall,
-  resolveToolByName,
-  isPotentiallyMutatingTool,
-  findClosestToolName,
   clearToolApprovals,
-  hasValidToolApproval,
   extractToolCalls,
   extractTextResponse,
   isLikelyLiveDataReadIntent,
@@ -95,12 +83,10 @@ import {
 } from "./aibom-config.js";
 import {
   initLlmProviders,
-  VALID_LLM_PROVIDERS,
   isOpenAICompatible,
   getLlmProvider,
   sanitizeHeaderValue,
   getApiKeyForProvider,
-  getOpenAiApiKey,
   getLlmModel,
   getPowerModel,
   getLudicrousModel,
@@ -108,17 +94,7 @@ import {
   setProviderCooldown,
   getFailoverProviders,
   getModelCostRates,
-  shouldRetryLlmStatus,
   isFailoverEligibleError,
-  fetchLlmJsonWithRetry,
-  PII_SCRUB_PATTERNS,
-  luhnCheck,
-  isLikelyPhoneNumber,
-  scrubPiiFromText,
-  scrubPiiFromMessages,
-  isPiiScrubEnabled,
-  callAnthropic,
-  callOpenAI,
   callOpenAIStreaming,
   callLlm,
   filterToolsByRelevance
@@ -127,15 +103,12 @@ import {
   initConversation,
   truncateForContext,
   approximateMessageChars,
-  approximateSingleMessageChars,
   enforceAgentMessageBudgetInPlace,
   getAgentOverBudgetMessage,
-  persistConversationContext,
   flushPersistConversationContext,
   loadConversationContext,
   getConversationMessages,
   extractWorkflowSuggestionIndex,
-  normaliseWorkflowSuggestionLabel,
   getLatestWorkflowSuggestionsFromConversation,
   promptLooksLikeWorkflowDraftFollowUp,
   appendConversationTurn,
@@ -146,13 +119,11 @@ import {
   getSessionUsedLocalMcp,
   setSessionUsedLocalMcp,
   getSessionClaimedActionCount,
-  setSessionClaimedActionCount,
   incrementSessionClaimedActionCount,
 } from "./conversation.js";
 import {
   initSecurity,
   detectInjectionPatterns,
-  detectMemoryInjection,
   guardMemoryWrite,
   wrapUntrustedWithInjectionScan,
   scanToolDescriptions,
@@ -170,15 +141,12 @@ import {
 import {
   initSettingsConfig,
   buildSettingsConfig,
-  rebuildSettingsPanel,
-  normaliseSwitchValue,
 } from "./settings-config.js";
 import {
   initUsageTracking,
   getSessionTokenUsage,
   accumulateSessionTokens,
   resetSessionTokenUsage,
-  todayDateKey,
   loadCostHistory,
   loadUsageStats,
   recordCostEntry,
@@ -199,11 +167,8 @@ import {
   getLocalMcpTools,
   buildLocalMcpMetaTool,
   formatToolListByServer,
-  formatServerToolList,
   buildLocalMcpRouteTool,
-  NativeSSETransport,
   connectLocalMcp,
-  disconnectLocalMcp,
   disconnectAllLocalMcp,
   scheduleLocalMcpAutoConnect,
   getLocalMcpClients,
@@ -213,25 +178,14 @@ import {
 } from "./local-mcp.js";
 import {
   initInbox,
-  collectInboxBlockMap,
-  getInboxStaticUIDs,
   resetInboxStaticUIDs,
   primeInboxStaticUIDs,
   setInboxStaticUIDs,
-  getInboxBlockStringIfExists,
   clearInboxCatchupScanTimer,
-  getInboxProxySignature,
-  shouldRunInboxFullScanFallback,
-  getInboxCandidateBlocksFromChildrenRows,
-  enqueueInboxCandidates,
   runFullInboxScan,
-  scheduleInboxCatchupScan,
-  getInboxProcessingTierSuffix,
-  enqueueInboxItems,
   handleInboxPullWatchEvent,
   cleanupInbox,
   getInboxProcessingQueue,
-  getInboxPendingQueueCount,
 } from "./inbox.js";
 
 const DEFAULT_COMPOSIO_MCP_URL = "enter your composio mcp url here";
@@ -281,7 +235,6 @@ const MAX_TOOL_RESULT_CHARS = 12000;
 const MAX_CONVERSATION_TURNS = 12;
 const MAX_CONTEXT_USER_CHARS = 500;       // User prompts are short — 500 is fine
 const MAX_CONTEXT_ASSISTANT_CHARS = 2000; // Assistant responses carry MCP/tool data — need more room
-const MAX_CHAT_PANEL_MESSAGES = 80;
 const MAX_AGENT_MESSAGES_CHAR_BUDGET = 50000; // Conservative budget (20% safety margin for token estimation)
 const MIN_AGENT_MESSAGES_TO_KEEP = 6;
 const STANDARD_MAX_OUTPUT_TOKENS = 2500;   // Regular chat
@@ -413,7 +366,6 @@ const COMPOSIO_CONNECT_BACKOFF_MS = 30000; // 30s cooldown after a failed connec
 const MAX_ROAM_BLOCK_CHARS = 20000; // Practical limit — avoids Roam UI rendering slowdowns
 const MAX_CREATE_BLOCKS_TOTAL = 50; // Hard cap on total blocks created in one roam_create_blocks call
 // INBOX_MAX_ITEMS_PER_SCAN, INBOX_MAX_PENDING_ITEMS, INBOX_FULL_SCAN_COOLDOWN_MS — moved to inbox.js
-const CHIEF_PANEL_CLEANUP_REGISTRY_KEY = "__chiefOfStaffPanelCleanupRegistry";
 
 let mcpClient = null;
 let commandPaletteRegistered = false;

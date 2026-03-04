@@ -600,7 +600,7 @@ export function filterToolsByRelevance(tools, userMessage) {
   // Only include optional tool categories when the query explicitly mentions them
   const needsBt = /\b(tasks?|todo|project|done|overdue|due|bt_|better\s*tasks?|assign|delegate|waiting.for)\b/.test(text);
   const needsCron = /\b(cron|schedule[ds]?|recurring|every\s+\d+\s+(min|hour)|hourly|timer|remind\s+me\s+in)\b/.test(text);
-  const needsEmail = /\b(email|gmail|inbox|unread|mail|messages?|send|draft|compose)\b/.test(text);
+  const needsEmail = /\b(email|gmail|inbox|unread|mail|draft)\b/.test(text);
   const needsCalendar = /\b(cal[ea]n[dn]a?[rt]|event|meeting|appointment|agenda|gcal)\b/.test(text);
   const needsComposio = /\b(composio|connect|integration|install|deregister|connected\s+tools?)\b/.test(text);
 
@@ -609,7 +609,7 @@ export function filterToolsByRelevance(tools, userMessage) {
     // Category-gated tools — only include if query explicitly needs them
     if (name.startsWith("roam_bt_")) return needsBt;
     if (name.startsWith("cos_cron_")) return needsCron;
-    if (name.startsWith("COMPOSIO_")) return needsComposio;
+    if (name.startsWith("COMPOSIO_")) return needsComposio || needsEmail || needsCalendar;
     // Everything else (roam native, LOCAL_MCP_*, extension, direct MCP, cos_update_memory, cos_get_skill): always include
     return true;
   });
