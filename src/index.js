@@ -222,7 +222,8 @@ const SETTINGS_KEYS = {
   mcpSchemaHashes: "mcp-schema-hashes",
   dailySpendingCap: "daily-spending-cap",
   extensionToolsConfig: "extension-tools-config",
-  auditLogRetentionDays: "audit-log-retention-days"
+  auditLogRetentionDays: "audit-log-retention-days",
+  responseVerbosity: "response-verbosity"
 };
 const TOOLS_SCHEMA_VERSION = 3;
 const AUTH_POLL_INTERVAL_MS = 9000;
@@ -238,6 +239,8 @@ const MAX_CONTEXT_ASSISTANT_CHARS = 2000; // Assistant responses carry MCP/tool 
 const MAX_AGENT_MESSAGES_CHAR_BUDGET = 50000; // Conservative budget (20% safety margin for token estimation)
 const MIN_AGENT_MESSAGES_TO_KEEP = 6;
 const STANDARD_MAX_OUTPUT_TOKENS = 2500;   // Regular chat
+const CONCISE_MAX_OUTPUT_TOKENS = 1200;    // Concise verbosity
+const DETAILED_MAX_OUTPUT_TOKENS = 4096;   // Detailed verbosity
 const SKILL_MAX_OUTPUT_TOKENS = 4096;      // Skills, power mode, failover
 const LUDICROUS_MAX_OUTPUT_TOKENS = 8192;  // Ludicrous tier
 const LLM_MAX_RETRIES = 3;
@@ -259,7 +262,7 @@ const LLM_MODEL_COSTS = {
   "claude-opus-4-6": [5.00, 25.00],
   "gpt-5-mini": [0.25, 2.00],
   "gpt-4.1": [2.00, 8.00],
-  "gpt-5.2": [1.75, 14.00],
+  "gpt-5.4": [2.50, 15.00],
   "gemini-3.1-flash-lite-preview": [0.25, 1.50],
   "gemini-3-flash-preview": [0.50, 3.00],
   "gemini-3.1-pro-preview-customtools": [2.00, 12.00],
@@ -1068,6 +1071,18 @@ function getSettingObject(extensionAPI, key, fallbackValue = {}) {
 function getSettingArray(extensionAPI, key, fallbackValue = []) {
   const value = extensionAPI?.settings?.get?.(key);
   return Array.isArray(value) ? value : fallbackValue;
+}
+
+function getResponseVerbosity(extensionAPI = extensionAPIRef) {
+  const val = getSettingString(extensionAPI, SETTINGS_KEYS.responseVerbosity, "standard");
+  return ["concise", "standard", "detailed"].includes(val) ? val : "standard";
+}
+
+function getVerbosityMaxOutputTokens(extensionAPI = extensionAPIRef) {
+  const v = getResponseVerbosity(extensionAPI);
+  if (v === "concise") return CONCISE_MAX_OUTPUT_TOKENS;
+  if (v === "detailed") return DETAILED_MAX_OUTPUT_TOKENS;
+  return STANDARD_MAX_OUTPUT_TOKENS;
 }
 
 function sleep(ms, signal) {
@@ -3517,7 +3532,7 @@ async function runAgentLoop(userMessage, options = {}) {
       : baseModel;
   const maxOutputTokens = effectiveTier === "ludicrous" ? LUDICROUS_MAX_OUTPUT_TOKENS
     : effectiveTier === "power" ? SKILL_MAX_OUTPUT_TOKENS
-      : undefined;
+      : getVerbosityMaxOutputTokens(extensionAPI);
   if (!apiKey) {
     throw new Error("No LLM API key configured. Set it in Chief of Staff settings.");
   }
@@ -3772,16 +3787,26 @@ async function runAgentLoop(userMessage, options = {}) {
         if (usage) {
           const inputTokens = usage.prompt_tokens || usage.input_tokens || 0;
           const outputTokens = usage.completion_tokens || usage.output_tokens || 0;
-          trace.totalInputTokens = (trace.totalInputTokens || 0) + inputTokens;
+          // Anthropic cache tokens: cache_creation at 1.25x, cache_read at 0.1x input rate
+          const cacheCreationTokens = usage.cache_creation_input_tokens || 0;
+          const cacheReadTokens = usage.cache_read_input_tokens || 0;
+          const totalInputTokens = inputTokens + cacheCreationTokens + cacheReadTokens;
+          trace.totalInputTokens = (trace.totalInputTokens || 0) + totalInputTokens;
           trace.totalOutputTokens = (trace.totalOutputTokens || 0) + outputTokens;
+          trace.totalCacheReadTokens = (trace.totalCacheReadTokens || 0) + cacheReadTokens;
+          trace.totalCacheCreationTokens = (trace.totalCacheCreationTokens || 0) + cacheCreationTokens;
           const { inputPerM: costPerMInput, outputPerM: costPerMOutput } = getModelCostRates(model);
-          const callCost = (inputTokens / 1_000_000 * costPerMInput) + (outputTokens / 1_000_000 * costPerMOutput);
-          accumulateSessionTokens(inputTokens, outputTokens, callCost);
-          recordCostEntry(model, inputTokens, outputTokens, callCost);
+          const callCost = (inputTokens / 1_000_000 * costPerMInput)
+            + (cacheCreationTokens / 1_000_000 * costPerMInput * 1.25)
+            + (cacheReadTokens / 1_000_000 * costPerMInput * 0.10)
+            + (outputTokens / 1_000_000 * costPerMOutput);
+          accumulateSessionTokens(totalInputTokens, outputTokens, callCost, cacheReadTokens, cacheCreationTokens);
+          recordCostEntry(model, totalInputTokens, outputTokens, callCost);
           trace.cost = (trace.cost || 0) + callCost;
           const _stu2 = getSessionTokenUsage();
           debugLog("[Chief flow] API usage:", {
             inputTokens, outputTokens,
+            ...(cacheReadTokens > 0 || cacheCreationTokens > 0 ? { cacheReadTokens, cacheCreationTokens } : {}),
             callCostCents: (callCost * 100).toFixed(3),
             sessionTotals: {
               input: _stu2.totalInputTokens,
@@ -7635,6 +7660,7 @@ function onload({ extensionAPI }) {
     DEFAULT_COMPOSIO_MCP_URL,
     DEFAULT_COMPOSIO_API_KEY,
     DEFAULT_ASSISTANT_NAME,
+    getResponseVerbosity,
   });
   initLlmProviders({
     debugLog,
@@ -7705,6 +7731,7 @@ function onload({ extensionAPI }) {
       return caps;
     },
     getPageTreeByTitleAsync,
+    clearConversationContext,
   });
   initRoamNativeTools({
     getRoamAlphaApi: () => window.roamAlphaAPI,
@@ -7867,6 +7894,7 @@ function onload({ extensionAPI }) {
     getLocalMcpToolsCache,
     getBtProjectsCache: () => btProjectsCache,
     setBtProjectsCache: (v) => { btProjectsCache = v; },
+    getResponseVerbosity,
   });
   setChiefNamespaceGlobals();
   loadConversationContext(extensionAPI);

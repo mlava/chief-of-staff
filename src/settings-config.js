@@ -249,6 +249,16 @@ export function buildSettingsConfig(extensionAPI) {
   if (showAdvanced) {
     settings.push(
       {
+        id: deps.SETTINGS_KEYS.responseVerbosity,
+        name: "Response Verbosity",
+        description: "Controls how verbose assistant responses are. Concise saves output tokens (cheaper), Detailed allows thorough explanations (more expensive). Only affects the mini tier — power and ludicrous tiers have their own token budgets.",
+        action: {
+          type: "select",
+          items: ["concise", "standard", "detailed"],
+          value: deps.getResponseVerbosity(extensionAPI)
+        }
+      },
+      {
         id: deps.SETTINGS_KEYS.debugLogging,
         name: "Debug Logging",
         description: "Enable verbose console logging. Useful for troubleshooting tool calls, failover, and connection issues.",

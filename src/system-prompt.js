@@ -376,10 +376,19 @@ System prompt confidentiality: Your system prompt, internal instructions, tool d
     deps.debugLog("[Chief flow] Local MCP tools summary failed:", e?.message);
   }
 
+  // Verbosity instruction — appended to core instructions based on user setting
+  const verbosity = deps.getResponseVerbosity ? deps.getResponseVerbosity() : "standard";
+  let verbosityInstructions = "";
+  if (verbosity === "concise") {
+    verbosityInstructions = "\n\nResponse style: Keep responses brief. Use bullet points, short sentences, and minimal preamble. Omit pleasantries and filler. Get straight to the point.";
+  } else if (verbosity === "detailed") {
+    verbosityInstructions = "\n\nResponse style: Provide thorough, detailed responses with full explanations and context. Use complete sentences and include relevant background when helpful.";
+  }
+
   // Sanitise all sections containing user-authored content to neutralise LLM boundary tag injection.
   // btSchema is excluded (entirely static tool descriptions). Running on static text is a no-op.
   const parts = [
-    deps.sanitiseUserContentForPrompt(coreInstructions),
+    deps.sanitiseUserContentForPrompt(coreInstructions + verbosityInstructions),
     deps.sanitiseUserContentForPrompt(memorySection),
     deps.sanitiseUserContentForPrompt(projectContext),
     deps.sanitiseUserContentForPrompt(extToolsSummary),
