@@ -153,7 +153,7 @@ That's it. On every subsequent Roam load, the extension auto-connects to your co
 - When your prompt mentions a connected server by name (e.g. "search Zotero for..." or "GitHub issues on..."), the request is automatically escalated to the power tier for better tool-use reasoning.
 - On first connection, the tool schema is pinned (SHA-256 hash). On subsequent connections, any schema drift (added, removed, or modified tools) is flagged. Tool descriptions are scanned for injection patterns before tools are made available. Connection details are logged to `[[Chief of Staff/MCP Servers]]` in your graph — see [MCP supply chain security](#mcp-supply-chain-security) for details.
 
-A detailed operational guide for manual supergateway setup, LaunchAgent configuration, and troubleshooting is available in [`docs/mcp-supergateway-playbook.md`](docs/mcp-supergateway-playbook.md).
+A detailed operational guide for manual supergateway setup, LaunchAgent configuration, and troubleshooting is available in [`public/mcp-supergateway-playbook.md`](public/mcp-supergateway-playbook.md).
 
 ---
 
@@ -382,6 +382,8 @@ Each skill is a top-level block (the skill name) with child blocks (the instruct
   - Sources: Google Calendar (meeting details + attendees), Better Tasks (related project tasks).
   - Output: Agenda summary, attendee context, relevant open tasks, and suggested talking points.
 ```
+
+There are six skills installed during onboarding, however a series of other skills are available at [`public/other_skills.md`](public/other_skills.md).
 
 ### How skills work
 
