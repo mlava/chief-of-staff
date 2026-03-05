@@ -10,6 +10,8 @@ let deps = {};
 const sessionTokenUsage = {
   totalInputTokens: 0,
   totalOutputTokens: 0,
+  totalCacheReadTokens: 0,
+  totalCacheCreationTokens: 0,
   totalRequests: 0,
   totalCostUsd: 0,
 };
@@ -33,9 +35,11 @@ export function getSessionTokenUsage() {
   return sessionTokenUsage;
 }
 
-export function accumulateSessionTokens(inputTokens, outputTokens, callCost) {
+export function accumulateSessionTokens(inputTokens, outputTokens, callCost, cacheReadTokens = 0, cacheCreationTokens = 0) {
   sessionTokenUsage.totalInputTokens += inputTokens;
   sessionTokenUsage.totalOutputTokens += outputTokens;
+  sessionTokenUsage.totalCacheReadTokens += cacheReadTokens;
+  sessionTokenUsage.totalCacheCreationTokens += cacheCreationTokens;
   sessionTokenUsage.totalRequests += 1;
   sessionTokenUsage.totalCostUsd += callCost;
 }
@@ -43,6 +47,8 @@ export function accumulateSessionTokens(inputTokens, outputTokens, callCost) {
 export function resetSessionTokenUsage() {
   sessionTokenUsage.totalInputTokens = 0;
   sessionTokenUsage.totalOutputTokens = 0;
+  sessionTokenUsage.totalCacheReadTokens = 0;
+  sessionTokenUsage.totalCacheCreationTokens = 0;
   sessionTokenUsage.totalRequests = 0;
   sessionTokenUsage.totalCostUsd = 0;
 }

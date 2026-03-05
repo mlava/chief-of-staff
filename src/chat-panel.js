@@ -540,7 +540,7 @@ function shortModelLabel(modelId) {
   if (id.includes("flash"))      return "flash";
   // OpenAI
   if (id.includes("gpt-5-mini")) return "gpt-5-mini";
-  if (id.includes("gpt-5.2"))    return "gpt-5.2";
+  if (id.includes("gpt-5.4"))    return "gpt-5.4";
   if (id.includes("gpt-4.1"))    return "gpt-4.1";
   // Mistral
   if (id.includes("mistral-small"))  return "mistral-small";
@@ -705,6 +705,13 @@ function buildCostTooltipContent() {
   html += `<div class="chief-cost-heading">Session</div>`;
   html += `<div class="chief-cost-row"><span>Cost</span><span>${deps.escapeHtml(fmt(session.totalCostUsd))}</span></div>`;
   html += `<div class="chief-cost-row"><span>Input tokens</span><span>${deps.escapeHtml(tokFmt(session.totalInputTokens))}</span></div>`;
+  if (session.totalCacheReadTokens > 0) {
+    const cachedPct = Math.round(session.totalCacheReadTokens / session.totalInputTokens * 100);
+    html += `<div class="chief-cost-row chief-cost-cache"><span>├ cached (90% off)</span><span>${deps.escapeHtml(tokFmt(session.totalCacheReadTokens))} (${cachedPct}%)</span></div>`;
+  }
+  if (session.totalCacheCreationTokens > 0) {
+    html += `<div class="chief-cost-row chief-cost-cache"><span>├ cache write</span><span>${deps.escapeHtml(tokFmt(session.totalCacheCreationTokens))}</span></div>`;
+  }
   html += `<div class="chief-cost-row"><span>Output tokens</span><span>${deps.escapeHtml(tokFmt(session.totalOutputTokens))}</span></div>`;
   html += `<div class="chief-cost-row"><span>Requests</span><span>${session.totalRequests}</span></div>`;
   html += `</div>`;
@@ -792,6 +799,7 @@ async function handleChatPanelSend() {
   if (/^\/clear$/i.test(message)) {
     chatPanelInput.value = "";
     clearChatPanelHistory();
+    if (deps.clearConversationContext) deps.clearConversationContext({ persist: true });
     renderEmptyStateHint(chatPanelMessages, deps.getAssistantDisplayName());
     return;
   }
@@ -1530,6 +1538,7 @@ export function ensureChatPanel() {
   clearButton.classList.add("chief-panel-btn");
   clearButton.onclick = () => {
     clearChatPanelHistory();
+    if (deps.clearConversationContext) deps.clearConversationContext({ persist: true });
     renderEmptyStateHint(chatPanelMessages, deps.getAssistantDisplayName());
   };
   headerButtons.appendChild(clearButton);

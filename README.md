@@ -47,6 +47,7 @@ Open **Settings > Chief of Staff** and fill in:
   - Google Gemini API Key (`AIza...`)
   - Mistral API Key
 - **LLM Model** — leave blank to use the default for your provider, or enter any model ID supported by that provider
+- **Response Verbosity** — controls how verbose assistant responses are and how many output tokens are allowed per call. `concise` (1,200 tokens, brief bullet-point style), `standard` (2,500 tokens, default), or `detailed` (4,096 tokens, thorough explanations). Only affects the mini tier — power and ludicrous tiers have their own token budgets. With prompt caching reducing input costs, output tokens become the dominant expense, so this setting gives you direct control over the main remaining cost lever.
 - **Debug Logging** — enable verbose console output for troubleshooting
 - **Dry Run** — one-shot toggle that simulates the next mutating tool call without writing anything (auto-disables after one use)
 - **Ludicrous mode failover** — allow escalation to the most expensive models (Opus / GPT-5.2) when all power-tier providers fail
@@ -57,7 +58,7 @@ Default models by tier:
 |---|---|---|---|---|
 | Mini (default) | claude-haiku-4-5 | gpt-5-mini | gemini-3.1-flash-lite-preview | mistral-small |
 | Power (`/power`) | claude-sonnet-4-6 | gpt-4.1 | gemini-3-flash-preview | mistral-medium |
-| Ludicrous (`/ludicrous`) | claude-opus-4-6 | gpt-5.2 | gemini-3.1-pro-preview-customtools | mistral-large |
+| Ludicrous (`/ludicrous`) | claude-opus-4-6 | gpt-5.4 | gemini-3.1-pro-preview-customtools | mistral-large |
 
 #### How tiers work
 
@@ -498,6 +499,6 @@ If you discover a security issue, please report it directly rather than filing a
 - **Agent iterations** — the reasoning loop is capped at 10 iterations per request to prevent runaway API usage.
 - **Conversation context** — the assistant retains up to 12 recent turns (truncated to 500 user / 2,000 assistant characters each) for follow-up context. Older turns are dropped automatically. Within a single agent run, tool result payloads are progressively trimmed if the message budget (50,000 characters) is exceeded. Key references (identifiers from MCP tool results) are extracted and stored at the front of assistant turns to survive truncation.
 - **Composio dependency** — external tool features (Gmail, Google Calendar, Todoist, etc.) require an active Composio connection. Roam graph and task features work fully without Composio.
-- **LLM API costs** — requests are sent directly from your browser to your configured provider. Costs are billed to your API account. Structured briefings, multi-tool agent runs, and scheduled jobs consume more tokens than simple queries. The chat panel shows a running cost estimate with per-model breakdowns. **Note:** displayed costs are estimates based on hardcoded per-model rates and may not reflect current provider pricing. Always check your provider's billing dashboard for authoritative usage and charges.
+- **LLM API costs** — requests are sent directly from your browser to your configured provider. Costs are billed to your API account. Structured briefings, multi-tool agent runs, and scheduled jobs consume more tokens than simple queries. The chat panel shows a running cost estimate with per-model breakdowns — for Anthropic, this includes a cache breakdown showing how many input tokens were served from cache. **Note:** displayed costs are estimates based on hardcoded per-model rates and may not reflect current provider pricing. Always check your provider's billing dashboard for authoritative usage and charges.
+- **Prompt caching** — the extension is structured to maximise cache hits across all providers. The system prompt and tool definitions (the largest, most stable token blocks) are placed at the start of every request, and variable content (conversation history, user message) comes last. For **Anthropic**, explicit `cache_control` breakpoints mark the system prompt and tool definitions as cacheable — after the first call in a session, subsequent calls serve these tokens from cache at 90% off the normal input price. For **OpenAI**, automatic prefix caching applies without opt-in as long as the prompt prefix is stable across calls, which this layout ensures. For **Gemini** and **Mistral**, the stable-prefix ordering provides the best conditions for any future caching support. With caching reducing input costs by up to 90%, output tokens become the dominant expense — use the **Response Verbosity** setting to control this directly.
 - **Scheduled job execution** — scheduled jobs require at least one Roam tab to be open. If all tabs are closed, jobs will not fire until a tab is reopened. Only one tab executes jobs at a time (automatic leader election).
-- **Model support** — any model ID accepted by the configured provider can be used. Non-tool-use models will not function correctly with the agent loop.

@@ -123,6 +123,13 @@
   padding-left: 8px;
   font-size: 10px;
 }
+.chief-cost-cache span:first-child {
+  padding-left: 8px;
+  font-size: 10px;
+}
+.chief-cost-cache span {
+  opacity: 0.7;
+}
 .chief-cost-divider {
   height: 1px;
   background: var(--cos-border-subtle, #eee);
@@ -691,7 +698,7 @@ h6.chief-heading { font-size: 0.8em; }
 .cos-onboarding-card {
   position: fixed;
   left: 50%;
-  bottom: 24px;
+  bottom: 94px;
   width: 400px;
   max-width: calc(100vw - 48px);
   max-height: 80vh;

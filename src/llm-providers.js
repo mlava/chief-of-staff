@@ -339,12 +339,15 @@ export async function callAnthropic(apiKey, model, system, messages, tools, opti
       body: JSON.stringify({
         model,
         max_tokens: options.maxOutputTokens || deps.STANDARD_MAX_OUTPUT_TOKENS,
-        system: safeSystem,
+        system: [
+          { type: "text", text: safeSystem, cache_control: { type: "ephemeral" } }
+        ],
         messages: safeMessages,
-        tools: tools.map((tool) => ({
+        tools: tools.map((tool, i) => ({
           name: tool.name,
           description: tool.description,
-          input_schema: tool.input_schema
+          input_schema: tool.input_schema,
+          ...(i === tools.length - 1 ? { cache_control: { type: "ephemeral" } } : {})
         }))
       })
     },

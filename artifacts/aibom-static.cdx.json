@@ -3803,7 +3803,7 @@
     {
       "type": "machine-learning-model",
       "name": "llm-model/openai/ludicrous",
-      "version": "gpt-5.2",
+      "version": "gpt-5.4",
       "properties": [
         {
           "name": "chief:aibom:component-class",
