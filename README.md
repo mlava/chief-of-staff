@@ -345,7 +345,7 @@ Because memory content is loaded into every system prompt, it is a high-value ta
 
 ## Inbox
 
-`Chief of Staff/Inbox` doubles as an input channel. Drop a block into the inbox page and the assistant will automatically process it in **read-only mode** — it can search, read, and gather information from your graph and connected tools, but it cannot create, update, move, or delete any blocks or send emails. The response is nested under the original inbox block, which is then moved to today's daily page under a "Processed Chief of Staff items" heading.
+`Chief of Staff/Inbox` acts as an semi-automated input channel. Drop a block into the inbox page and the assistant will automatically process it in **read-only mode** — it can search, read, and gather information from your graph and connected tools, but it cannot create, update, move, or delete any blocks or send emails. The response is nested under the original inbox block, which is then moved to today's daily page under a "Processed Chief of Staff items" heading.
 
 This is useful for quick captures — jot down a question or instruction as a block under `Chief of Staff/Inbox` and let the assistant process it in the background.
 
@@ -488,7 +488,7 @@ Chief of Staff generates an AI Bill of Materials in CycloneDX 1.6 format. A stat
 
 ### Reporting security issues
 
-If you discover a security issue, please report it directly rather than filing a public issue. Contact details are in the extension's Roam Depot listing.
+If you discover a security issue, please report it directly rather than filing a public issue (so you don't expose secure information). Send a direct message to me on the [Roam Research Slack channel](https://app.slack.com/client/TNEAEL9QW/dms).
 
 ---
 
