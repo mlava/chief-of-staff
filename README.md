@@ -4,7 +4,6 @@ An AI assistant embedded in Roam Research. Chief of Staff connects your Roam gra
 
 <div align="center">
   <a href="https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a">
-    <img src="https://cdn.loom.com/sessions/thumbnails/9aa3c07de0f147af971d2fc54fe65e4a-00001.jpg" width="600" alt="Chief of Staff Demo">
   </a>
 </div>
 
