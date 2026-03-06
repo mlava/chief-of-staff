@@ -1759,7 +1759,7 @@ export function getRoamNativeTools() {
     {
       name: "roam_mermaid_embed",
       isMutating: true,
-      description: "Embed a Mermaid diagram into a Roam block. Sets the block to {{mermaid}} (collapsed) and creates each line of the Mermaid code as a child block. If mermaid_code is omitted, creates a blank {{mermaid}} block that shows Roam's built-in diagram instructions. Use target_uid for an existing block or parent_uid to create a new one.",
+      description: "Embed a Mermaid diagram into a Roam block. Sets the block to {{mermaid}} (collapsed) and creates each line of the Mermaid code as a child block. If mermaid_code is omitted, creates a blank {{mermaid}} block that shows Roam's built-in diagram instructions. Use target_uid for an existing block or parent_uid to create a new one. IMPORTANT: Always quote node labels that contain parentheses, commas, or special characters — e.g. A[\"Label (ref, 2023)\"] not A[Label (ref, 2023)]. Unquoted special chars cause Mermaid parse errors.",
       input_schema: {
         type: "object",
         properties: {
@@ -1834,8 +1834,18 @@ export function getRoamNativeTools() {
           return { success: true, uid, line_count: 0, blank: true };
         }
 
+        // Auto-quote node labels containing special chars to prevent Mermaid parse errors.
+        // e.g. A[Label (ref)] → A["Label (ref)"] — unquoted parens confuse the parser.
+        const sanitized = lines.map(line =>
+          line.replace(/(\w)\[([^\]]+)\]/g, (_match, pre, content) => {
+            if (content.startsWith('"') && content.endsWith('"')) return _match;
+            if (/[(){}]/.test(content)) return `${pre}["${content.replace(/"/g, "#quot;")}"]`;
+            return _match;
+          })
+        );
+
         // Create each line as a child block
-        for (const line of lines) {
+        for (const line of sanitized) {
           await deps.withRoamWriteRetry(() =>
             api.createBlock({
               location: { "parent-uid": uid, order: "last" },
@@ -1847,7 +1857,7 @@ export function getRoamNativeTools() {
         return {
           success: true,
           uid,
-          line_count: lines.length
+          line_count: sanitized.length
         };
       }
     },
