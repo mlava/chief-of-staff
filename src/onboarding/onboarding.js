@@ -250,6 +250,15 @@ export function launchOnboarding(extensionAPI, deps) {
   activeStepIndicator = stepIndicator;
   activeBackLink = backLink;
 
+  // Hide the Roam Depot settings overlay so onboarding inputs are accessible.
+  // React-managed Blueprint portal ignores synthetic close events, so we hide
+  // it via CSS and restore on teardown.
+  const settingsPortal = document.querySelector(".rm-modal-portal--settings");
+  if (settingsPortal) {
+    settingsPortal.style.display = "none";
+    sessionState._hiddenSettingsPortal = settingsPortal;
+  }
+
   document.body.appendChild(card);
 
   // Start from the resume point
@@ -273,12 +282,19 @@ export function teardownOnboarding() {
     onboardingDestroyFn = null;
   }
 
+  // Grab ref before clearing sessionState
+  const hiddenPortal = sessionState._hiddenSettingsPortal;
+
   const card = onboardingCardEl || document.querySelector(".cos-onboarding-card");
   if (card) {
     card.classList.add("cos-onboarding-exit");
     setTimeout(() => {
       card.remove();
+      // Restore settings overlay after exit animation so it doesn't flash
+      if (hiddenPortal) hiddenPortal.style.display = "";
     }, 300);
+  } else if (hiddenPortal) {
+    hiddenPortal.style.display = "";
   }
 
   onboardingCardEl = null;
