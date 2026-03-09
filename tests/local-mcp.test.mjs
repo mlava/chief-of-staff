@@ -188,11 +188,11 @@ test("getLocalMcpTools returns empty array when no clients", () => {
 test("getLocalMcpTools aggregates tools from all clients", () => {
   const clients = getLocalMcpClients();
   clients.set(3000, {
-    client: {},
+    client: null, serverName: "ServerA",
     tools: [makeTool("tool_a"), makeTool("tool_b")],
   });
   clients.set(4000, {
-    client: {},
+    client: null, serverName: "ServerB",
     tools: [makeTool("tool_c")],
   });
   invalidateLocalMcpToolsCache(); // force rebuild
@@ -204,8 +204,8 @@ test("getLocalMcpTools aggregates tools from all clients", () => {
 
 test("getLocalMcpTools deduplicates by tool name", () => {
   const clients = getLocalMcpClients();
-  clients.set(3000, { client: {}, tools: [makeTool("dup_tool")] });
-  clients.set(4000, { client: {}, tools: [makeTool("dup_tool")] });
+  clients.set(3000, { client: null, serverName: "S1", tools: [makeTool("dup_tool")] });
+  clients.set(4000, { client: null, serverName: "S2", tools: [makeTool("dup_tool")] });
   invalidateLocalMcpToolsCache();
 
   const tools = getLocalMcpTools();
@@ -213,10 +213,10 @@ test("getLocalMcpTools deduplicates by tool name", () => {
   assert.equal(tools[0].name, "dup_tool");
 });
 
-test("getLocalMcpTools skips entries with null client", () => {
+test("getLocalMcpTools skips entries without serverName", () => {
   const clients = getLocalMcpClients();
-  clients.set(3000, { client: null, tools: [makeTool("orphan")] });
-  clients.set(4000, { client: {}, tools: [makeTool("real")] });
+  clients.set(3000, { client: null, tools: [makeTool("orphan")] }); // no serverName
+  clients.set(4000, { client: null, serverName: "Valid", tools: [makeTool("real")] });
   invalidateLocalMcpToolsCache();
 
   const tools = getLocalMcpTools();
@@ -226,12 +226,12 @@ test("getLocalMcpTools skips entries with null client", () => {
 
 test("getLocalMcpTools caches result until invalidated", () => {
   const clients = getLocalMcpClients();
-  clients.set(3000, { client: {}, tools: [makeTool("cached_tool")] });
+  clients.set(3000, { client: null, serverName: "S1", tools: [makeTool("cached_tool")] });
   invalidateLocalMcpToolsCache();
 
   const first = getLocalMcpTools();
   // Add another client — should NOT appear because cache is warm
-  clients.set(4000, { client: {}, tools: [makeTool("new_tool")] });
+  clients.set(4000, { client: null, serverName: "S2", tools: [makeTool("new_tool")] });
   const second = getLocalMcpTools();
   assert.strictEqual(first, second); // same reference
 
@@ -244,7 +244,7 @@ test("getLocalMcpTools caches result until invalidated", () => {
 test("invalidateLocalMcpToolsCache sets cache to null", () => {
   // Warm the cache
   const clients = getLocalMcpClients();
-  clients.set(3000, { client: {}, tools: [makeTool("t")] });
+  clients.set(3000, { client: null, serverName: "S", tools: [makeTool("t")] });
   invalidateLocalMcpToolsCache();
   getLocalMcpTools();
   assert.ok(getLocalMcpToolsCache() !== null);
@@ -350,7 +350,7 @@ test("buildLocalMcpMetaTool execute dispatches to matching cached tool", async (
   const clients = getLocalMcpClients();
   let calledWith = null;
   clients.set(3000, {
-    client: {},
+    client: null, serverName: "Zotero",
     tools: [makeTool("zotero_search", {
       execute: async (args) => { calledWith = args; return { results: [] }; },
     })],
@@ -384,7 +384,7 @@ test("buildLocalMcpRouteTool execute returns error for missing server_name", asy
 test("buildLocalMcpRouteTool execute returns tools for matching routed server", async () => {
   const clients = getLocalMcpClients();
   clients.set(3000, {
-    client: {},
+    client: null, serverName: "GitHub",
     tools: [
       makeTool("gh_search", { serverName: "GitHub", isDirect: false }),
       makeTool("gh_commit", { serverName: "GitHub", isDirect: false }),
@@ -403,7 +403,7 @@ test("buildLocalMcpRouteTool execute returns tools for matching routed server", 
 test("buildLocalMcpRouteTool execute case-insensitive fallback", async () => {
   const clients = getLocalMcpClients();
   clients.set(3000, {
-    client: {},
+    client: null, serverName: "Zotero",
     tools: [makeTool("z_search", { serverName: "Zotero", isDirect: false })],
   });
   invalidateLocalMcpToolsCache();
@@ -417,7 +417,7 @@ test("buildLocalMcpRouteTool execute case-insensitive fallback", async () => {
 test("buildLocalMcpRouteTool execute guides direct tool usage", async () => {
   const clients = getLocalMcpClients();
   clients.set(3000, {
-    client: {},
+    client: null, serverName: "Simple",
     tools: [makeTool("simple_tool", { serverName: "Simple", isDirect: true })],
   });
   invalidateLocalMcpToolsCache();
@@ -441,7 +441,7 @@ test("buildLocalMcpRouteTool execute returns error for unknown server", async ()
 test("buildLocalMcpRouteTool injects available server names in schema", () => {
   const clients = getLocalMcpClients();
   clients.set(3000, {
-    client: {},
+    client: null, serverName: "GitHub",
     tools: [
       makeTool("gh_tool", { serverName: "GitHub", isDirect: false }),
       makeTool("zot_tool", { serverName: "Zotero", isDirect: false }),
@@ -464,7 +464,7 @@ test("cleanupLocalMcp clears tools cache and suspended servers", () => {
   // Set up some state
   suspendMcpServer("local:3000", { summary: "test", serverName: "s" });
   const clients = getLocalMcpClients();
-  clients.set(3000, { client: {}, tools: [makeTool("t")] });
+  clients.set(3000, { client: null, serverName: "S", tools: [makeTool("t")] });
   invalidateLocalMcpToolsCache();
   getLocalMcpTools(); // warm cache
   assert.ok(getLocalMcpToolsCache() !== null);

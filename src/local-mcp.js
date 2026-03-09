@@ -12,18 +12,33 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 
 // ── Constants ───────────────────────────────────────────────────────────────
-const LOCAL_MCP_CONNECT_TIMEOUT_MS = 10_000;  // 10s — local servers should be fast
+const LOCAL_MCP_CONNECT_TIMEOUT_MS = 10_000;  // 10s — execution connections (real-time, needs to be fast)
+const LOCAL_MCP_DISCOVERY_TIMEOUT_MS = 20_000; // 20s — discovery connections (one-time at startup, can be patient)
 const LOCAL_MCP_INITIAL_BACKOFF_MS = 2_000;   // 2s initial backoff after first failure
 const LOCAL_MCP_MAX_BACKOFF_MS = 60_000;      // 60s cap on exponential backoff
 const LOCAL_MCP_AUTO_CONNECT_MAX_RETRIES = 5; // max startup retries per port (covers ~62s)
 const LOCAL_MCP_DIRECT_TOOL_THRESHOLD = 15;   // servers with ≤15 tools register directly; >15 use meta-tool
 const LOCAL_MCP_LIST_TOOLS_TIMEOUT_MS = 5_000; // 5s timeout for listTools call
+const LOCAL_MCP_POOL_IDLE_TTL_MS = 30_000;    // 30s — keep pooled execution connection alive after last use
 
 // ── Module state ────────────────────────────────────────────────────────────
 const localMcpClients = new Map(); // port → { client, transport, lastFailureAt, connectPromise, ... }
 let localMcpToolsCache = null;     // derived from localMcpClients Map; invalidated on connect/disconnect
 const localMcpAutoConnectTimerIds = new Set();
 const suspendedMcpServers = new Map(); // serverKey → { newHash, newToolNames, newFingerprints, added, removed, modified, summary, serverName, suspendedAt }
+
+// ── Connection pool for execution ───────────────────────────────────────────
+// Keeps one SSE connection per port alive for LOCAL_MCP_POOL_IDLE_TTL_MS after
+// last use. Parallel tool calls to the same port are serialized through a queue
+// to avoid MCP protocol interleaving. This replaces the old ephemeral
+// connect-per-execution model that caused timeouts on supergateway-wrapped servers.
+const execPool = new Map(); // port → { client, transport, idleTimer, lastUsed }
+
+// Per-port serialization queues — independent of pool entries so the queue
+// exists BEFORE the first connection is established. Without this, 10 parallel
+// calls arriving before any pool entry exists would all bypass the queue and
+// attempt simultaneous SSE connections (the exact stampede we're fixing).
+const portQueues = new Map(); // port → Promise (tail of the queue chain)
 
 // ── DI deps ─────────────────────────────────────────────────────────────────
 let deps = {};
@@ -101,7 +116,7 @@ export function getLocalMcpTools() {
   const allTools = [];
   const seenNames = new Set();
   for (const [, entry] of localMcpClients) {
-    if (!entry?.client || !Array.isArray(entry.tools)) continue;
+    if (!entry?.serverName || !Array.isArray(entry.tools)) continue;
     for (const tool of entry.tools) {
       if (seenNames.has(tool.name)) continue;
       seenNames.add(tool.name);
@@ -253,8 +268,11 @@ export class NativeSSETransport {
   }
 
   start() {
-    const MAX_START_ATTEMPTS = 4;
-    const START_RETRY_DELAY_MS = 1500;
+    // Localhost MCP servers: use fast retries with many attempts.
+    // Some servers (e.g. open-brain, brave-search) need more time to
+    // initialise their SSE endpoint, so we retry aggressively but cheaply.
+    const MAX_START_ATTEMPTS = 8;
+    const START_RETRY_DELAY_MS = 500; // 500ms — localhost doesn't need long delays
 
     return new Promise((resolve, reject) => {
       let resolved = false;
@@ -268,6 +286,7 @@ export class NativeSSETransport {
           this._eventSource = null;
         }
 
+        console.debug(`[SSE] Attempt ${attempt}/${MAX_START_ATTEMPTS} for ${this._url}`);
         const es = new EventSource(this._url.toString());
         this._eventSource = es;
 
@@ -278,6 +297,7 @@ export class NativeSSETransport {
             this._endpoint = new URL(e.data);
           }
           if (!resolved) {
+            console.debug(`[SSE] Endpoint received on attempt ${attempt} for ${this._url}`);
             resolved = true;
             resolve();
           }
@@ -294,12 +314,13 @@ export class NativeSSETransport {
 
         es.onerror = () => {
           if (!resolved) {
+            console.debug(`[SSE] Error on attempt ${attempt}/${MAX_START_ATTEMPTS} for ${this._url}`);
             es.close();
             this._eventSource = null;
             if (attempt < MAX_START_ATTEMPTS) {
               this._retryTimer = setTimeout(tryConnect, START_RETRY_DELAY_MS);
             } else {
-              reject(new Error("SSE connection failed to " + this._url));
+              reject(new Error("SSE connection failed to " + this._url + ` after ${attempt} attempts`));
             }
           } else {
             // Post-connect error: close immediately to prevent zombie EventSource
@@ -347,6 +368,133 @@ export class NativeSSETransport {
   }
 }
 
+// ── Connection pool for on-demand tool execution ─────────────────────────────
+
+/**
+ * Get or create a pooled MCP connection for tool execution on a given port.
+ * Returns { client, transport } — caller must NOT close the transport.
+ * The pool manages connection lifecycle with idle TTL.
+ *
+ * Replaces the old ephemeral connect-per-execution model. The old approach
+ * opened a fresh SSE connection for every tool call and closed it immediately
+ * after, which caused rapid reconnection storms that overwhelmed
+ * supergateway-wrapped servers (especially when the agent issued multiple
+ * parallel tool calls to the same server).
+ *
+ * The pool keeps one connection per port alive for LOCAL_MCP_POOL_IDLE_TTL_MS
+ * after the last tool call. This means:
+ * - First call: opens connection (10s timeout) → caches it
+ * - Subsequent calls within 30s: reuse the cached connection instantly
+ * - After 30s of inactivity: connection auto-closes to free browser slot
+ * - Chrome connection limit: at most one pooled connection per active port
+ */
+async function getPooledConnection(port) {
+  const existing = execPool.get(port);
+  if (existing?.client && existing?.transport) {
+    // Reset idle timer — connection is being used
+    if (existing.idleTimer) clearTimeout(existing.idleTimer);
+    existing.lastUsed = Date.now();
+    existing.idleTimer = setTimeout(() => closePooledConnection(port), LOCAL_MCP_POOL_IDLE_TTL_MS);
+    return { client: existing.client, transport: existing.transport };
+  }
+
+  // No cached connection — create one
+  const url = new URL(`http://localhost:${port}/sse`);
+  const transport = new NativeSSETransport(url);
+  const client = new Client({ name: `roam-local-mcp-${port}-exec`, version: "0.1.0" });
+
+  let timeoutId;
+  try {
+    await Promise.race([
+      client.connect(transport),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(`Execution connection timeout on port ${port}`)), LOCAL_MCP_CONNECT_TIMEOUT_MS);
+      })
+    ]);
+  } catch (err) {
+    if (timeoutId) clearTimeout(timeoutId);
+    try { await transport.close(); } catch { /* ignore */ }
+    throw err;
+  }
+  if (timeoutId) clearTimeout(timeoutId);
+
+  // Cache in pool with idle timer
+  const idleTimer = setTimeout(() => closePooledConnection(port), LOCAL_MCP_POOL_IDLE_TTL_MS);
+  execPool.set(port, { client, transport, idleTimer, lastUsed: Date.now() });
+
+  // If the transport closes unexpectedly (e.g. server restart), evict from pool
+  const origOnclose = transport.onclose;
+  transport.onclose = () => {
+    origOnclose?.();
+    const entry = execPool.get(port);
+    if (entry && entry.transport === transport) {
+      if (entry.idleTimer) clearTimeout(entry.idleTimer);
+      execPool.delete(port);
+      console.debug(`[Local MCP Pool] Connection evicted for port ${port} (transport closed)`);
+    }
+  };
+
+  console.debug(`[Local MCP Pool] New connection opened for port ${port}`);
+  return { client, transport };
+}
+
+/**
+ * Close a pooled connection and remove it from the pool.
+ * Called by idle timer or during cleanup.
+ */
+async function closePooledConnection(port) {
+  const entry = execPool.get(port);
+  if (!entry) return;
+  if (entry.idleTimer) clearTimeout(entry.idleTimer);
+  execPool.delete(port);
+  try { await entry.transport.close(); } catch { /* ignore */ }
+  console.debug(`[Local MCP Pool] Connection closed for port ${port} (idle timeout)`);
+}
+
+/**
+ * Execute a tool call through the connection pool with per-port serialization.
+ * Concurrent calls to the same port are queued to avoid MCP protocol issues.
+ * Returns the tool call result.
+ *
+ * @param {number} port - Server port
+ * @param {string} serverName - Server name for error messages
+ * @param {Function} callFn - async (client) => result — performs the actual tool call(s)
+ * @returns {Promise<*>} Tool call result
+ */
+async function executePooled(port, serverName, callFn) {
+  // Serialize calls to the same port through an independent queue chain.
+  // The queue lives in portQueues (not inside the pool entry) so it works
+  // even before the first connection is established — critical for preventing
+  // stampedes when the agent issues 10 parallel tool calls at once.
+  const prevQueue = portQueues.get(port) || Promise.resolve();
+
+  let resolveQueue;
+  const newQueue = new Promise(r => { resolveQueue = r; });
+
+  // Update the queue tail immediately so subsequent calls chain after us
+  portQueues.set(port, newQueue);
+
+  // Wait for previous call to finish (never throws — settled promise)
+  await prevQueue.catch(() => {});
+
+  try {
+    // Get (or create) the pooled connection
+    const { client } = await getPooledConnection(port);
+    return await callFn(client);
+  } catch (connErr) {
+    // Connection failure — evict stale entry so next call creates fresh connection
+    const entry = execPool.get(port);
+    if (entry) {
+      if (entry.idleTimer) clearTimeout(entry.idleTimer);
+      try { await entry.transport.close(); } catch { /* ignore */ }
+      execPool.delete(port);
+    }
+    return { error: `Connection to ${serverName} (port ${port}) failed: ${connErr?.message} — try "Refresh Local MCP Servers" to reconnect.` };
+  } finally {
+    resolveQueue(); // release queue so next call can proceed
+  }
+}
+
 // ── Connection management ───────────────────────────────────────────────────
 
 export async function connectLocalMcp(port) {
@@ -357,8 +505,9 @@ export async function connectLocalMcp(port) {
   }
   const existing = localMcpClients.get(port);
 
-  // Already connected — return cached client
-  if (existing?.client) return existing.client;
+  // Already discovered — tools cached, no persistent connection needed.
+  // On-demand connections are created per tool call in execute().
+  if (existing?.serverName && Array.isArray(existing.tools)) return existing;
 
   // Exponential backoff after recent failure: 2s, 4s, 8s, 16s, 32s, 60s (capped)
   if (existing?.lastFailureAt && existing.failureCount > 0) {
@@ -387,8 +536,8 @@ export async function connectLocalMcp(port) {
       const timeoutPromise = new Promise((_, reject) => {
         timeoutId = setTimeout(() => {
           timeoutId = null;
-          reject(new Error(`Local MCP connection timeout on port ${port}`));
-        }, LOCAL_MCP_CONNECT_TIMEOUT_MS);
+          reject(new Error(`Local MCP discovery timeout on port ${port} (${LOCAL_MCP_DISCOVERY_TIMEOUT_MS / 1000}s)`));
+        }, LOCAL_MCP_DISCOVERY_TIMEOUT_MS); // Discovery uses longer timeout — one-time cost at startup
       });
 
       try {
@@ -421,7 +570,6 @@ export async function connectLocalMcp(port) {
 
         for (const t of serverTools) {
           if (!t?.name) continue;
-          const boundClient = client;
           const toolName = t.name;
           // Derive isMutating from MCP ToolAnnotations (readOnlyHint, destructiveHint).
           // undefined = no annotation → heuristic fallback in isPotentiallyMutatingTool.
@@ -446,43 +594,45 @@ export async function connectLocalMcp(port) {
             _port: port,
             _isDirect: isDirect,
             execute: async (args = {}) => {
-              // Calendar auto-inject: for event-query tools, if calendarId is missing or invalid,
-              // auto-discover all calendars and inject their IDs BEFORE making the call.
-              // This prevents LLM failures from bad/missing calendarId on weaker models.
-              const CALENDAR_EVENT_TOOLS = ["list-events", "search-events", "get-freebusy"];
-              const isCalendarEventTool = CALENDAR_EVENT_TOOLS.includes(toolName);
-              if (isCalendarEventTool && !args.calendarId) {
-                try {
-                  deps.debugLog(`[Local MCP] Calendar auto-inject: ${toolName} called without calendarId, discovering calendars...`);
-                  const calResult = await boundClient.callTool({ name: "list-calendars", arguments: {} });
-                  const calText = calResult?.content?.[0]?.text;
-                  let calendars;
-                  if (typeof calText === "string") { try { calendars = JSON.parse(calText); } catch { /* ignore */ } }
-                  const ids = (calendars?.calendars || []).map(c => c.id).filter(Boolean);
-                  if (ids.length > 0) {
-                    deps.debugLog(`[Local MCP] Calendar auto-inject: adding ${ids.length} calendar IDs to ${toolName}`);
-                    args = { ...args, calendarId: ids };
+              // Pooled execution: reuse cached connection, serialized per port.
+              // Connection stays alive for 30s after last use, then auto-closes.
+              return executePooled(port, serverName, async (execClient) => {
+                // Calendar auto-inject: for event-query tools, if calendarId is missing or invalid,
+                // auto-discover all calendars and inject their IDs BEFORE making the call.
+                // This prevents LLM failures from bad/missing calendarId on weaker models.
+                const CALENDAR_EVENT_TOOLS = ["list-events", "search-events", "get-freebusy"];
+                const isCalendarEventTool = CALENDAR_EVENT_TOOLS.includes(toolName);
+                if (isCalendarEventTool && !args.calendarId) {
+                  try {
+                    deps.debugLog(`[Local MCP] Calendar auto-inject: ${toolName} called without calendarId, discovering calendars...`);
+                    const calResult = await execClient.callTool({ name: "list-calendars", arguments: {} });
+                    const calText = calResult?.content?.[0]?.text;
+                    let calendars;
+                    if (typeof calText === "string") { try { calendars = JSON.parse(calText); } catch { /* ignore */ } }
+                    const ids = (calendars?.calendars || []).map(c => c.id).filter(Boolean);
+                    if (ids.length > 0) {
+                      deps.debugLog(`[Local MCP] Calendar auto-inject: adding ${ids.length} calendar IDs to ${toolName}`);
+                      args = { ...args, calendarId: ids };
+                    }
+                  } catch (injectErr) {
+                    deps.debugLog(`[Local MCP] Calendar auto-inject failed:`, injectErr?.message);
                   }
-                } catch (injectErr) {
-                  deps.debugLog(`[Local MCP] Calendar auto-inject failed:`, injectErr?.message);
                 }
-              }
-              try {
-                const result = await boundClient.callTool({ name: toolName, arguments: args });
+                const result = await execClient.callTool({ name: toolName, arguments: args });
                 const text = result?.content?.[0]?.text;
                 if (typeof text === "string") {
                   // If the result is a calendar error about bad IDs, retry with discovered IDs
                   if (isCalendarEventTool && /MCP error|calendar\(s\)\s*not\s*found/i.test(text)) {
                     try {
                       deps.debugLog(`[Local MCP] Calendar retry: ${toolName} returned error, re-discovering calendars...`);
-                      const calResult = await boundClient.callTool({ name: "list-calendars", arguments: {} });
+                      const calResult = await execClient.callTool({ name: "list-calendars", arguments: {} });
                       const calText = calResult?.content?.[0]?.text;
                       let calendars;
                       if (typeof calText === "string") { try { calendars = JSON.parse(calText); } catch { /* ignore */ } }
                       const ids = (calendars?.calendars || []).map(c => c.id).filter(Boolean);
                       if (ids.length > 0) {
                         deps.debugLog(`[Local MCP] Calendar retry: retrying ${toolName} with ${ids.length} fresh calendar IDs`);
-                        const retryResult = await boundClient.callTool({ name: toolName, arguments: { ...args, calendarId: ids } });
+                        const retryResult = await execClient.callTool({ name: toolName, arguments: { ...args, calendarId: ids } });
                         const retryText = retryResult?.content?.[0]?.text;
                         if (typeof retryText === "string") {
                           try { return JSON.parse(retryText); } catch { return { text: retryText }; }
@@ -496,12 +646,7 @@ export async function connectLocalMcp(port) {
                   try { return JSON.parse(text); } catch { return { text }; }
                 }
                 return result;
-              } catch (e) {
-                const errMsg = e?.message || `Failed: ${toolName}`;
-                // Hint at reconnection for transport-level failures
-                const isStale = /not connected|connection closed|EventSource|SSE.*fail|cannot send|POST \d|Failed to fetch|NetworkError/i.test(errMsg);
-                return { error: isStale ? `${errMsg} — try "Refresh Local MCP Servers" to reconnect.` : errMsg };
-              }
+              });
             }
           });
         }
@@ -526,6 +671,32 @@ export async function connectLocalMcp(port) {
       }
       // ─── End MCP Supply Chain Hardening ───
 
+      // ─── Promote discovery connection into execution pool ───
+      // Supergateway-wrapped servers often break when the SSE connection is closed
+      // and a new one is opened: the stdio pipe to the underlying MCP server goes
+      // stale, causing ERR_EMPTY_RESPONSE on reconnect. Instead of closing, we
+      // hand the working discovery connection to the execution pool so tool calls
+      // reuse the same connection that successfully completed discovery + listTools.
+      //
+      // Trade-off: this keeps one browser connection slot per server occupied, but
+      // avoids the much worse failure mode of no execution working at all. The idle
+      // TTL (30s) will reclaim the slot if the server isn't used.
+      const idleTimer = setTimeout(() => closePooledConnection(port), LOCAL_MCP_POOL_IDLE_TTL_MS);
+      execPool.set(port, { client, transport, idleTimer, lastUsed: Date.now() });
+
+      // Auto-evict from pool on unexpected transport close
+      const origOnclose = transport.onclose;
+      transport.onclose = () => {
+        origOnclose?.();
+        const poolEntry = execPool.get(port);
+        if (poolEntry && poolEntry.transport === transport) {
+          if (poolEntry.idleTimer) clearTimeout(poolEntry.idleTimer);
+          execPool.delete(port);
+          console.debug(`[Local MCP Pool] Discovery connection evicted for port ${port} (transport closed)`);
+        }
+      };
+      console.debug(`[Local MCP Pool] Discovery connection promoted to exec pool for port ${port}`);
+
       // Pre-compute server name fragments and regex patterns for fast prompt matching (L7).
       // These patterns are stable for the lifetime of the connection.
       const _nameFragments = serverName
@@ -534,11 +705,11 @@ export async function connectLocalMcp(port) {
           try { return new RegExp(`\\b${escaped}\\b`); } catch { return null; }
         }).filter(Boolean)
         : [];
-      localMcpClients.set(port, { client, transport, lastFailureAt: 0, failureCount: 0, connectPromise: null, serverName, serverDescription, tools, _nameFragments });
+      localMcpClients.set(port, { client: null, transport: null, lastFailureAt: 0, failureCount: 0, connectPromise: null, serverName, serverDescription, tools, _nameFragments });
       localMcpToolsCache = null; // invalidate so getLocalMcpTools() rebuilds from Map
-      deps.debugLog(`[Local MCP] Connected to port ${port} — server: ${serverName}`);
+      deps.debugLog(`[Local MCP] Discovered ${tools.length} tool(s) on port ${port} — server: ${serverName} (connection promoted to exec pool)`);
       deps.showInfoToast("Local MCP connected", `${serverName} (port ${port}) — ${tools.length} tool${tools.length !== 1 ? "s" : ""} available.`);
-      return client;
+      return true; // success — tools cached, discovery connection reused for execution
     } catch (error) {
       // Close client and transport to prevent orphaned state and EventSource zombie connections
       if (transport) try { await transport.close(); } catch { }
@@ -563,6 +734,8 @@ export async function connectLocalMcp(port) {
 export async function disconnectLocalMcp(port) {
   const entry = localMcpClients.get(port);
   if (!entry) { localMcpClients.delete(port); return; }
+  // Close any pooled execution connection for this port
+  await closePooledConnection(port);
   try {
     if (entry.client) await entry.client.close();
     // Safety net: close transport directly in case client.close() didn't
@@ -594,9 +767,10 @@ export function scheduleLocalMcpAutoConnect() {
       return;
     }
 
-    // Reset backoff so connectLocalMcp doesn't skip — preserve other state
+    // Reset backoff so connectLocalMcp doesn't skip — preserve other state.
+    // Only reset for failed entries (no serverName), not already-discovered ones.
     const stale = localMcpClients.get(port);
-    if (stale && !stale.client && !stale.connectPromise) {
+    if (stale && !stale.serverName && !stale.connectPromise) {
       stale.lastFailureAt = 0;
       stale.failureCount = 0;
     }
@@ -637,12 +811,33 @@ export function invalidateLocalMcpToolsCache() {
   localMcpToolsCache = null;
 }
 
+export function getExecPool() {
+  return execPool;
+}
+
+export function getPortQueues() {
+  return portQueues;
+}
+
+/** Close all pooled execution connections. */
+export async function closeAllPooledConnections() {
+  const ports = [...execPool.keys()];
+  await Promise.allSettled(ports.map(p => closePooledConnection(p)));
+}
+
 /** Called from onunload to clean up all local MCP state. */
 export function cleanupLocalMcp() {
   localMcpToolsCache = null;
   localMcpAutoConnectTimerIds.forEach(id => clearTimeout(id));
   localMcpAutoConnectTimerIds.clear();
   suspendedMcpServers.clear();
+  // Drain the execution connection pool — close all idle timers and transports
+  for (const [port, poolEntry] of execPool) {
+    if (poolEntry.idleTimer) clearTimeout(poolEntry.idleTimer);
+    if (poolEntry.transport) try { poolEntry.transport.close(); } catch { /* ignore */ }
+  }
+  execPool.clear();
+  portQueues.clear();
   // Safety net: force-close transports in case disconnectAllLocalMcp() times out,
   // preventing orphaned EventSource connections from leaking.
   for (const [, entry] of localMcpClients) {

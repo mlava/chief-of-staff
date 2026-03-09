@@ -228,15 +228,15 @@ const SETTINGS_KEYS = {
 const TOOLS_SCHEMA_VERSION = 3;
 const AUTH_POLL_INTERVAL_MS = 9000;
 const AUTH_POLL_TIMEOUT_MS = 180000;
-const MAX_AGENT_ITERATIONS = 10;
+const MAX_AGENT_ITERATIONS = 20;
 const MAX_AGENT_ITERATIONS_SKILL = 16;    // Extended cap when gathering guard activates (skills need more iterations)
 const MAX_TOOL_CALLS_PER_ITERATION = 4;   // Caps tool calls from a single LLM response (prevents budget blowout)
-const MAX_CALLS_PER_TOOL_PER_LOOP = 5;    // Caps how many times the same tool can be called across the loop
+const MAX_CALLS_PER_TOOL_PER_LOOP = 10;   // Caps how many times the same tool can be called across the loop
 const MAX_TOOL_RESULT_CHARS = 12000;
 const MAX_CONVERSATION_TURNS = 12;
 const MAX_CONTEXT_USER_CHARS = 500;       // User prompts are short — 500 is fine
 const MAX_CONTEXT_ASSISTANT_CHARS = 2000; // Assistant responses carry MCP/tool data — need more room
-const MAX_AGENT_MESSAGES_CHAR_BUDGET = 50000; // Conservative budget (20% safety margin for token estimation)
+const MAX_AGENT_MESSAGES_CHAR_BUDGET = 70000; // Budget for multi-service workflows (20% safety margin for token estimation)
 const MIN_AGENT_MESSAGES_TO_KEEP = 6;
 const STANDARD_MAX_OUTPUT_TOKENS = 2500;   // Regular chat
 const CONCISE_MAX_OUTPUT_TOKENS = 1200;    // Concise verbosity
@@ -314,7 +314,8 @@ const WRITE_TOOL_NAMES = new Set([
   "cos_cron_delete",
   "cos_cron_delete_jobs",
   "roam_excalidraw_embed",
-  "roam_mermaid_embed"
+  "roam_mermaid_embed",
+  "roam_upload_file"
 ]);
 
 /**
@@ -3625,7 +3626,9 @@ async function runAgentLoop(userMessage, options = {}) {
   const toolCallCounts = new Map(); // Per-tool execution count across the entire loop (PI-1)
   const toolConsecutiveErrors = new Map(); // toolName -> { error, count } — detects retry loops
   const MAX_CONSECUTIVE_TOOL_ERRORS = 2; // Bail after 2 consecutive failures with same tool+error
-  let totalGuardBlocks = 0; // Counts how many times the consecutive error guard fires across all tools
+  const toolStaleResults = new Map(); // rateLimitKey -> { fingerprint, count } — detects futile polling
+  const MAX_STALE_RESULT_REPEATS = 2; // After 2 identical results from same tool, block further calls
+  let totalGuardBlocks = 0; // Counts how many times the consecutive error guard or stale result guard fires
   const MAX_GUARD_BLOCKS_BEFORE_LOOP_BREAK = 3; // After 3 guard blocks, force-exit the agent loop
   let forceExitAgentLoop = false; // Set by guard block limit to break out of outer for loop
   if (approximateMessageChars(messages) > MAX_AGENT_MESSAGES_CHAR_BUDGET) {
@@ -4030,7 +4033,11 @@ async function runAgentLoop(userMessage, options = {}) {
         }
 
         // Per-tool rate limit — prevents the same tool from being called excessively across the loop
-        const priorCallCount = toolCallCounts.get(toolCall.name) || 0;
+        // LOCAL_MCP_EXECUTE uses a composite key so each inner tool gets its own bucket
+        const rateLimitKey = toolCall.name === "LOCAL_MCP_EXECUTE"
+          ? `LOCAL_MCP_EXECUTE::${toolCall.arguments?.tool_name || ""}`
+          : toolCall.name;
+        const priorCallCount = toolCallCounts.get(rateLimitKey) || 0;
         if (priorCallCount >= MAX_CALLS_PER_TOOL_PER_LOOP) {
           debugLog("[Chief flow] Per-tool rate limit reached:", toolCall.name, `(${priorCallCount}/${MAX_CALLS_PER_TOOL_PER_LOOP})`);
           toolResults.push({
@@ -4072,6 +4079,39 @@ async function runAgentLoop(userMessage, options = {}) {
           continue;
         }
 
+        // Stale-result guard — blocks futile polling when the same tool returns identical results
+        const staleEntry = toolStaleResults.get(rateLimitKey);
+        if (staleEntry && staleEntry.count >= MAX_STALE_RESULT_REPEATS) {
+          totalGuardBlocks++;
+          // Build a follow-up hint so the model can tell the user how to check later.
+          // For LOCAL_MCP_EXECUTE, surface the inner tool name + arguments.
+          let followUpHint = "";
+          try {
+            const innerToolName = toolCall.arguments?.tool_name || toolCall.name;
+            const innerArgs = toolCall.arguments?.arguments || toolCall.arguments || {};
+            const argSnippet = safeJsonStringify(innerArgs, 300);
+            followUpHint = ` To check later, the user can ask you to call "${innerToolName}" with arguments: ${argSnippet}`;
+          } catch (_) { /* best-effort */ }
+          debugLog("[Chief flow] Stale-result guard:", rateLimitKey, `(${staleEntry.count} identical results, totalGuardBlocks: ${totalGuardBlocks})`);
+          toolResults.push({
+            toolCall,
+            result: { error: `Tool "${toolCall.name}" has returned the same result ${staleEntry.count} times — the operation is likely still in progress or unchanged. Do NOT call this tool again. Move on: summarise what you have accomplished so far and tell the user the status of the pending operation so they can ask you to check on it later.${followUpHint}` }
+          });
+          trace.toolCalls.push({
+            name: toolCall.name,
+            argumentsPreview: safeJsonStringify(toolCall.arguments, 350),
+            startedAt: Date.now(),
+            durationMs: 0,
+            error: "Stale-result guard"
+          });
+          if (totalGuardBlocks >= MAX_GUARD_BLOCKS_BEFORE_LOOP_BREAK) {
+            debugLog("[Chief flow] Guard block limit reached (" + totalGuardBlocks + "), force-exiting agent loop");
+            forceExitAgentLoop = true;
+            break;
+          }
+          continue;
+        }
+
         const isExternalToolCall = isExternalDataToolCall(toolCall.name);
         if (onToolCall) onToolCall(toolCall.name, toolCall.arguments);
         const startedAt = Date.now();
@@ -4103,7 +4143,7 @@ async function runAgentLoop(userMessage, options = {}) {
         }
         const durationMs = Date.now() - startedAt;
         iterToolExecutionCount++;
-        toolCallCounts.set(toolCall.name, (toolCallCounts.get(toolCall.name) || 0) + 1);
+        toolCallCounts.set(rateLimitKey, (toolCallCounts.get(rateLimitKey) || 0) + 1);
         recordUsageStat("toolCall", toolCall.name);
         debugLog("[Chief flow] tool result:", {
           tool: toolCall.name,
@@ -4121,6 +4161,18 @@ async function runAgentLoop(userMessage, options = {}) {
           }
         } else {
           toolConsecutiveErrors.delete(toolCall.name);
+          // Track stale (identical) results for futile-polling detection.
+          // Compute a lightweight fingerprint: first 200 chars of the stringified result.
+          // If the same tool returns the same fingerprint, increment; otherwise reset.
+          const resultStr = typeof result === "string" ? result : safeJsonStringify(result, 200);
+          const fingerprint = (resultStr || "").slice(0, 200);
+          const prevStale = toolStaleResults.get(rateLimitKey);
+          if (prevStale && prevStale.fingerprint === fingerprint) {
+            prevStale.count += 1;
+            debugLog("[Chief flow] Stale-result tracker:", rateLimitKey, "identical result count:", prevStale.count);
+          } else {
+            toolStaleResults.set(rateLimitKey, { fingerprint, count: 1 });
+          }
         }
         // Dynamic gathering guard activation when LLM fetches a skill
         if (toolCall.name === "cos_get_skill" && result && !result.error && !gatheringGuard) {
@@ -7052,7 +7104,7 @@ function registerCommandPaletteCommands(extensionAPI) {
         for (const port of [...remaining]) {
           // Clear stale failure state so connectLocalMcp doesn't skip via backoff
           const stale = getLocalMcpClients().get(port);
-          if (stale && !stale.client) getLocalMcpClients().delete(port);
+          if (stale && !stale.serverName) getLocalMcpClients().delete(port);
           try {
             const client = await connectLocalMcp(port);
             if (client) {
@@ -7328,7 +7380,7 @@ function registerCommandPaletteCommands(extensionAPI) {
                           await new Promise(r => setTimeout(r, RETRY_MS));
                           for (const p of [...rem]) {
                             const stale = getLocalMcpClients().get(p);
-                            if (stale && !stale.client) getLocalMcpClients().delete(p);
+                            if (stale && !stale.serverName) getLocalMcpClients().delete(p);
                             try {
                               const c = await connectLocalMcp(p);
                               if (c) { ok++; rem.delete(p); }
@@ -7718,7 +7770,7 @@ function onload({ extensionAPI }) {
         caps.composioCalendar = activeToolkits.has("GOOGLECALENDAR");
       } catch { /* no Composio */ }
       // Local MCP
-      caps.localMcp = getLocalMcpClients().size > 0 && [...getLocalMcpClients().values()].some(e => e.client);
+      caps.localMcp = getLocalMcpClients().size > 0 && [...getLocalMcpClients().values()].some(e => e.serverName);
       // Extension Tools — collect display names (e.g. "Better Tasks", "Focus Mode")
       try {
         const reg = (typeof window !== "undefined" && window.RoamExtensionTools) || {};

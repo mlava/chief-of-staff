@@ -1979,6 +1979,109 @@ export function getRoamNativeTools() {
         );
         return { success: true, uid: blockUid, new_text: stripped };
       }
+    },
+    {
+      name: "roam_upload_file",
+      isMutating: true,
+      description: "Upload a file to Roam Research from a URL. Downloads the file and uploads it via Roam's file API. Returns the Roam-hosted URL that can be embedded in blocks (e.g. as ![alt](url) for images or [label](url) for other files). Supports images, PDFs, audio, and other file types. Max file size: 10 MB.",
+      input_schema: {
+        type: "object",
+        properties: {
+          file_url: { type: "string", description: "URL of the file to download and upload to Roam." },
+          file_name: { type: "string", description: "Display name for the uploaded file (e.g. \"report.pdf\", \"photo.png\"). Defaults to filename from URL or \"attachment\"." },
+          mime_type: { type: "string", description: "MIME type override (e.g. \"image/png\", \"application/pdf\"). Auto-detected from file_name if omitted." }
+        },
+        required: ["file_url"]
+      },
+      execute: async ({ file_url, file_name, mime_type } = {}) => {
+        const url = String(file_url || "").trim();
+        if (!url) throw new Error("file_url is required");
+
+        const api = deps.getRoamAlphaApi();
+        if (!api?.file?.upload) throw new Error("Roam file upload API unavailable");
+
+        // Derive filename from URL if not provided
+        let fileName = String(file_name || "").trim();
+        if (!fileName) {
+          try {
+            const parsed = new URL(url);
+            const pathParts = parsed.pathname.split("/").filter(Boolean);
+            fileName = pathParts.length > 0 ? decodeURIComponent(pathParts[pathParts.length - 1]) : "attachment";
+          } catch {
+            fileName = "attachment";
+          }
+        }
+
+        // Auto-detect MIME type from extension if not provided
+        let mimeType = String(mime_type || "").trim();
+        if (!mimeType) {
+          const ext = fileName.split(".").pop()?.toLowerCase();
+          const mimeMap = {
+            png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
+            webp: "image/webp", svg: "image/svg+xml", bmp: "image/bmp", ico: "image/x-icon",
+            pdf: "application/pdf", doc: "application/msword",
+            docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            xls: "application/vnd.ms-excel",
+            xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ppt: "application/vnd.ms-powerpoint",
+            pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            txt: "text/plain", csv: "text/csv", json: "application/json",
+            md: "text/markdown", html: "text/html", xml: "application/xml",
+            mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg", m4a: "audio/mp4",
+            mp4: "video/mp4", webm: "video/webm",
+            zip: "application/zip", gz: "application/gzip", tar: "application/x-tar"
+          };
+          mimeType = mimeMap[ext] || "application/octet-stream";
+        }
+
+        // Download the file as a blob
+        const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+        const DOWNLOAD_TIMEOUT = 30000; // 30s
+        let blob;
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT);
+          // Use Roam CORS proxy if available
+          const proxy = window.roamAlphaAPI?.constants?.corsAnywhereProxyUrl;
+          const fetchUrl = proxy ? `${proxy.replace(/\/+$/, "")}/${url}` : url;
+          const resp = await fetch(fetchUrl, { signal: controller.signal });
+          clearTimeout(timeoutId);
+          if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+          blob = await resp.blob();
+        } catch (err) {
+          if (err.name === "AbortError") throw new Error(`Download timed out after ${DOWNLOAD_TIMEOUT / 1000}s`);
+          throw new Error(`Failed to download file: ${err.message}`);
+        }
+
+        if (blob.size > MAX_FILE_SIZE) {
+          throw new Error(`File too large: ${(blob.size / 1024 / 1024).toFixed(1)} MB (max ${MAX_FILE_SIZE / 1024 / 1024} MB)`);
+        }
+        if (blob.size === 0) {
+          throw new Error("Downloaded file is empty (0 bytes)");
+        }
+
+        // Upload to Roam
+        const file = new File([blob], fileName, { type: mimeType });
+        let roamUrl;
+        try {
+          roamUrl = await api.file.upload({ file, toast: { hide: true } });
+        } catch (err) {
+          throw new Error(`Roam upload failed: ${err.message}`);
+        }
+
+        if (!roamUrl) throw new Error("Roam upload returned no URL");
+
+        return {
+          success: true,
+          roam_url: roamUrl,
+          file_name: fileName,
+          mime_type: mimeType,
+          size_bytes: blob.size,
+          size_human: blob.size < 1024 ? `${blob.size} B`
+            : blob.size < 1024 * 1024 ? `${(blob.size / 1024).toFixed(1)} KB`
+            : `${(blob.size / 1024 / 1024).toFixed(1)} MB`
+        };
+      }
     }
   ];
   return roamNativeToolsCache;
