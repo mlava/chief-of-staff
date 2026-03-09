@@ -1882,7 +1882,7 @@ export function getRoamNativeTools() {
             properties: {
               type: { type: "string", enum: ["excalidraw"] },
               version: { type: "number" },
-              elements: { type: "array", description: "Array of Excalidraw element objects." },
+              elements: { type: "array", items: { type: "object" }, description: "Array of Excalidraw element objects." },
               appState: { type: "object" },
               files: { type: "object" }
             },
