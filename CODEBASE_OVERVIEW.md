@@ -4,7 +4,7 @@
 >
 > **Runtime:** Browser SPA (Roam Research tab). No Node.js at runtime.
 >
-> **Total source:** ~23,000 lines across 22 files. Build output: single ES module (`extension.js`, ~815 KiB).
+> **Total source:** ~22,450 lines across 22 files. Build output: single ES module (`extension.js`, ~834 KiB).
 
 ---
 
@@ -26,7 +26,7 @@
 | `supergateway-script.js` | 618 | Supergateway launch script builder for local MCP servers |
 | `tier-routing.js` | 478 | Complexity scoring for mini/power/ludicrous tier selection |
 | `inbox.js` | 465 | Inbox processing — pull watch, delta diffing, sequential queue |
-| `system-prompt.js` | 463 | Dynamic system prompt assembly, conditional section detection |
+| `system-prompt.js` | 519 | Dynamic system prompt assembly, conditional section detection, Roam syntax reference |
 | `security-core.js` | 414 | Pure security functions — injection detection, schema hashing, memory guards |
 | `conversation.js` | 409 | Conversation turns, context truncation, budget enforcement |
 | `usage-tracking.js` | 406 | Cost history, daily caps, audit log, session token tracking |
