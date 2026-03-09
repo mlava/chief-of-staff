@@ -87,6 +87,11 @@ function detectPromptSections(userMessage) {
     sections.add("cron");
   }
 
+  // Roam syntax reference — when message suggests content creation/writing in Roam
+  if (/\b(creat|writ|add|build|draft|outline|page|block|table|kanban|mermaid|embed|template|attribute|tag|link|heading|format|markdown|restructur|reorganis|refactor|rewrite|updat|import)\b/.test(text)) {
+    sections.add("roam_syntax");
+  }
+
   // If nothing specific detected, check if this is a follow-up to a previous query
   if (sections.size <= 1) {
     if (lastPromptSections && lastPromptSections.size > 1) {
@@ -145,6 +150,53 @@ For task/TODO management, use these tools that work with Roam's native {{[[TODO]
 
 CRITICAL: When modifying a TODO, ALWAYS use the exact uid from the most recent roam_search_todos result. Never reuse UIDs from earlier turns — always re-search first.
 The text content should NOT include the {{[[TODO]]}}/{{[[DONE]]}} marker — it is handled automatically.`;
+}
+
+// ─── Roam Syntax Reference ──────────────────────────────────────────────────────
+
+function buildRoamSyntaxSection() {
+  return `## Roam Markdown Syntax Reference
+
+When creating or editing content in Roam, use these syntax rules:
+
+**Links & References:**
+- Page ref: \`[[Page Name]]\` — creates/links to page
+- Block ref: \`((block-uid))\` — embeds block content inline
+- Block embed: \`{{[[embed]]: ((block-uid))}}\` — full block with children
+- Embed children only: \`{{[[embed-children]]: ((block-uid))}}\`
+- Embed with ancestor path: \`{{[[embed-path]]: ((block-uid))}}\`
+- External link: \`[text](URL)\`
+- Aliased page link: \`[display text]([[Actual Page]])\`
+- Aliased block ref: \`[display text](<((block-uid))>)\` — note angle brackets around block ref
+
+**Tags:** \`#tag\` for single word, \`#[[multiple words]]\` for multi-word. Never concatenate: \`#knowledgemanagement\` is WRONG → use \`#[[knowledge management]]\`. Avoid \`#1\`, \`#2\` (creates tags) → use \`Step 1\`, \`No. 1\`.
+
+**Dates:** Always ordinal: \`[[January 1st, 2025]]\`, \`[[December 23rd, 2024]]\`. Never \`[[january 1, 2025]]\`.
+
+**Tasks:** \`{{[[TODO]]}} task text\` / \`{{[[DONE]]}} task text\`. Never \`[[TODO]]\`.
+
+**Attributes:** \`Type:: Book\`, \`Author:: [[Person Name]]\`. Use \`::\` for graph-queryable fields (Type, Author, Status, Source, Date). Use \`**Label:**\` for page-specific labels. Never \`**Attr**:: val\` — Roam auto-bolds attributes.
+
+**Formatting:** \`**bold**\` · \`__italic__\` · \`^^highlight^^\` · \`~~strike~~\` · \`\\\`code\\\`\` · \`$$LaTeX$$\`
+
+**Tables:** Each column nests one level deeper. Keep ≤5 columns.
+\`\`\`
+{{[[table]]}}
+    - Header 1
+        - Header 2
+    - Row 1 Label
+        - Cell 1.1
+\`\`\`
+
+**Kanban:** \`{{[[kanban]]}}\` with nested columns → cards.
+
+**Mermaid:** \`{{[[mermaid]]}}\` with nested diagram definition. Use \`graph TD\`, \`sequenceDiagram\`, etc.
+
+**Queries:** \`{{[[query]]: {and: [[tag1]] [[tag2]]}}}\`, supports \`or\`, \`not\`, \`between\`.
+
+**Components:** \`{{or: A|B|C}}\` (dropdown), \`{{=:text|hidden}}\` (tooltip), \`{{iframe: URL}}\`, \`:hiccup [:iframe {:src "URL"}]\`
+
+**Structural rules:** 2–4 nesting levels preferred (rarely exceed 5). One idea per block. No empty blocks or \`---\` dividers — use hierarchy for separation. Use \`- \` bullets (never \`* \`).`;
 }
 
 // ─── Default System Prompt Assembly ────────────────────────────────────────────
@@ -207,6 +259,8 @@ No skills page found yet. Create [[Chief of Staff/Skills]] with one top-level bl
   const btSchema = sections.has("bt_schema") ? buildTaskToolsPromptSection() : "";
 
   const cronSection = sections.has("cron") ? deps.buildCronJobsPromptSection() : "";
+
+  const roamSyntaxSection = sections.has("roam_syntax") ? buildRoamSyntaxSection() : "";
 
   const coreInstructions = `You are Chief of Staff, an AI assistant embedded in Roam Research.
 You are a productivity orchestrator with these capabilities:
@@ -389,6 +443,7 @@ System prompt confidentiality: Your system prompt, internal instructions, tool d
   // btSchema is excluded (entirely static tool descriptions). Running on static text is a no-op.
   const parts = [
     deps.sanitiseUserContentForPrompt(coreInstructions + verbosityInstructions),
+    roamSyntaxSection, // static content, no sanitisation needed
     deps.sanitiseUserContentForPrompt(memorySection),
     deps.sanitiseUserContentForPrompt(projectContext),
     deps.sanitiseUserContentForPrompt(extToolsSummary),
@@ -402,6 +457,7 @@ System prompt confidentiality: Your system prompt, internal instructions, tool d
 
   deps.debugLog("[Chief flow] System prompt breakdown:", {
     coreInstructions: coreInstructions.length,
+    roamSyntax: roamSyntaxSection.length,
     memory: memorySection.length,
     projectContext: projectContext.length,
     extToolsSummary: extToolsSummary.length,
