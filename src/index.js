@@ -3251,9 +3251,26 @@ function checkGatheringCompleteness(expectedSources, actualCallNames) {
 
   console.info(`[Chief flow] Gathering guard sources: ${JSON.stringify(expectedByTool)}`);
 
+  // Build reverse map: short tool name → resolved name(s) from SOURCE_TOOL_NAME_MAP
+  // so "bt_search" calls also count towards "roam_bt_search_tasks" expectations
+  const reverseToolMap = {};
+  for (const [shortName, resolvedName] of Object.entries(SOURCE_TOOL_NAME_MAP)) {
+    if (shortName !== resolvedName) {
+      if (!reverseToolMap[shortName]) reverseToolMap[shortName] = new Set();
+      reverseToolMap[shortName].add(resolvedName);
+    }
+  }
+
   const actualCounts = {};
   for (const name of actualCallNames) {
     actualCounts[name] = (actualCounts[name] || 0) + 1;
+    // Also count under resolved aliases
+    const aliases = reverseToolMap[name];
+    if (aliases) {
+      for (const alias of aliases) {
+        actualCounts[alias] = (actualCounts[alias] || 0) + 1;
+      }
+    }
   }
 
   const missed = [];
@@ -3987,6 +4004,14 @@ async function runAgentLoop(userMessage, options = {}) {
           }
         }
         gatheringCallNames.push(toolCall.name);
+        // For COMPOSIO_MULTI_EXECUTE_TOOL calls, also push individual tool slugs
+        // so that Composio-based sources (e.g. GMAIL_FETCH_EMAILS) get counted
+        if (toolCall.name === "COMPOSIO_MULTI_EXECUTE_TOOL") {
+          const batchTools = Array.isArray(toolCall.arguments?.tools) ? toolCall.arguments.tools : [];
+          for (const bt of batchTools) {
+            if (bt?.tool_slug) gatheringCallNames.push(bt.tool_slug);
+          }
+        }
 
         if (carryoverWriteReplayGuard?.active && WRITE_TOOL_NAMES.has(toolCall.name)) {
           const fp = (() => {

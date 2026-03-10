@@ -118,7 +118,7 @@ Wrangler will print your worker URL (e.g. `https://roam-mcp-proxy.<you>.workers.
 
 ### 3. Connect local MCP servers (optional)
 
-Local MCP servers let the assistant interact with tools running on your machine — for example, a Zotero research library, a local GitHub MCP server, or custom tools. Most MCP servers communicate via stdio, but browser extensions can only use HTTP. Chief of Staff bridges this gap automatically using [supergateway](https://github.com/nicobailey/supergateway), which wraps any stdio MCP server as an SSE endpoint.
+Local MCP servers let the assistant interact with tools running on your machine — for example, a Zotero research library, a local GitHub MCP server, or custom tools. Most MCP servers communicate via stdio, but browser extensions can only use HTTP. Chief of Staff bridges this gap automatically using [supergateway](https://github.com/supercorp-ai/supergateway), which wraps any stdio MCP server as an SSE endpoint.
 
 #### One-command setup
 

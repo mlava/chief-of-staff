@@ -680,6 +680,13 @@ export function canonicaliseComposioToolSlug(slug) {
 
 export function normaliseComposioMultiExecuteArgs(args) {
   const base = args && typeof args === "object" ? { ...args } : {};
+
+  // LLMs (especially Gemini) sometimes send "actions" instead of "tools" as the top-level key
+  if (!base.tools && Array.isArray(base.actions)) {
+    base.tools = base.actions;
+    delete base.actions;
+  }
+
   // LLMs sometimes send tools as a JSON string instead of an array — parse it
   if (typeof base.tools === "string") {
     try { base.tools = JSON.parse(base.tools); } catch (_) { /* leave as-is */ }
@@ -688,6 +695,12 @@ export function normaliseComposioMultiExecuteArgs(args) {
   if (!tools.length) return base;
   base.tools = tools.map((tool) => {
     if (!tool || typeof tool !== "object") return tool;
+    // LLMs sometimes send "action_slug" or "action" instead of "tool_slug"
+    if (!tool.tool_slug && (tool.action_slug || tool.action)) {
+      tool = { ...tool, tool_slug: tool.action_slug || tool.action };
+      delete tool.action_slug;
+      delete tool.action;
+    }
     const nextSlug = canonicaliseComposioToolSlug(tool.tool_slug);
 
     const explicitArgs = tool.arguments && typeof tool.arguments === "object" ? tool.arguments : {};
