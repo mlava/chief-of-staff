@@ -123,7 +123,18 @@ Local MCP servers let the assistant interact with tools running on your machine 
 #### One-command setup
 
 1. Open the command palette and run **Chief of Staff: Generate Supergateway Script**.
-2. Paste your `mcpServers` JSON configuration — the same format used by Claude Desktop, Cursor, Cline, or any MCP client. For example:
+2. Paste your `mcpServers` JSON configuration — the same format used by Claude Desktop, Cursor, Cline, or any MCP client. You only need the inner server entries (not any wrapper keys). If you're not sure where your existing config lives, check these common locations:
+
+   | Client | Config file |
+   |--------|-------------|
+   | **Claude Desktop** | `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) · `%APPDATA%\Claude\claude_desktop_config.json` (Windows) |
+   | **Claude Code** | `.claude/settings.json` or `.mcp.json` in your project root |
+   | **Cursor** | `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global) |
+   | **VS Code (Copilot)** | `.vscode/mcp.json` in the project root |
+   | **Cline** | `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json` (macOS) |
+   | **Windsurf** | `~/.codeium/windsurf/mcp_config.json` |
+
+   Open the relevant file and copy the server entries from the `"mcpServers"` object. For example:
    ```json
    {
      "zotero": {
@@ -311,7 +322,7 @@ These queries are handled by a fast deterministic router that matches intent pat
 
 ### With Better Tasks installed
 
-If the [Better Tasks / Recurring Tasks](https://github.com/mlava/recurring-tasks) extension is installed, task queries use Better Tasks attributes (`BT_attrDue`, `BT_attrProject`, etc.) and support filtering by due date, project, status, priority, energy, GTD context, and free text. You can create new Better Tasks from natural language ("create a better task to review the budget due next Friday for the Planning Committee project"), and the assistant will set the appropriate attributes.
+If the [Better Tasks](https://github.com/mlava/recurring-tasks) extension is installed, task queries use Better Tasks attributes (`BT_attrDue`, `BT_attrProject`, etc.) and support filtering by due date, project, status, priority, energy, GTD context, and free text. You can create new Better Tasks from natural language ("create a better task to review the budget due next Friday for the Planning Committee project"), and the assistant will set the appropriate attributes.
 
 **Attributes recognised:** `BT_attrProject` · `BT_attrDue` · `BT_attrStart` · `BT_attrDefer` · `BT_attrRepeat` · `BT_attrGTD` · `BT_attrWaitingFor` · `BT_attrContext` · `BT_attrPriority` · `BT_attrEnergy`
 
