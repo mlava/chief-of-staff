@@ -477,6 +477,10 @@
 [data-chief-chat-input]::placeholder {
   color: var(--cos-muted);
 }
+[data-chief-textarea]::placeholder {
+  color: var(--cos-muted, #999);
+  opacity: 0.7;
+}
 
 /* --- Send Button --- */
 [data-chief-chat-send] {

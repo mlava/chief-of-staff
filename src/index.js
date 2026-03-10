@@ -7205,10 +7205,10 @@ function registerCommandPaletteCommands(extensionAPI) {
     }
   });
   extensionAPI.ui.commandPalette.addCommand({
-    label: "Chief of Staff: Generate Supergateway Script",
+    label: "Chief of Staff: Generate Supergateway Script for local MCP servers",
     callback: async () => {
       const raw = await promptTextareaWithToast({
-        title: "Paste your mcpServers config",
+        title: "Paste your mcpServers config below",
         placeholder: '{\n  "mcpServers": {\n    "filesystem": {\n      "command": "npx",\n      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path"]\n    }\n  }\n}',
         confirmLabel: "Generate",
         rows: 12
