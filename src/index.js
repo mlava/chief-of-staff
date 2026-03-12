@@ -4785,21 +4785,43 @@ async function connectComposio(extensionAPI, options = {}) {
         debugLog("Composio connect skipped — MCP URL or API key not configured.");
         return null;
       }
-      const headers = composioApiKey ? { "x-api-key": sanitizeHeaderValue(composioApiKey) } : {};
+      const safeApiKey = sanitizeHeaderValue(composioApiKey);
+      const headers = { "x-api-key": safeApiKey };
+
+      // Derive proxy base: strip any path so we can prepend it to the session MCP URL.
+      // Setting should now be just the proxy root, e.g. https://roam-mcp-proxy.foo.workers.dev
+      const proxyBase = composioMcpUrl.replace(/\/+$/, "");
+
+      // Create a tool-router session to obtain the dynamic MCP endpoint URL.
+      debugLog("[Chief flow] Creating Composio tool-router session...");
+      const sessionRes = await fetch(
+        `${proxyBase}/https://backend.composio.dev/api/v3/tool_router/session`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-api-key": safeApiKey },
+          body: JSON.stringify({ user_id: "user_roam" })
+        }
+      );
+      if (!sessionRes.ok) {
+        throw new Error(`Composio session creation failed: ${sessionRes.status} ${sessionRes.statusText}`);
+      }
+      const sessionData = await sessionRes.json();
+      const sessionMcpUrl = sessionData?.mcp?.url;
+      if (!sessionMcpUrl) {
+        throw new Error("Composio session response missing mcp.url");
+      }
+      // Route the session MCP URL through the proxy (backend.composio.dev is CORS-blocked).
+      const proxiedMcpUrl = `${proxyBase}/${sessionMcpUrl.replace(/^https?:\/\//, "https://")}`;
+      debugLog("[Chief flow] Composio session MCP URL:", proxiedMcpUrl);
+
       composioTransportAbortController = new AbortController();
 
       const transportFetch = async (input, init = {}) => {
-        const method = String(init?.method || "GET").toUpperCase();
-        const requestUrl = String(
-          typeof input === "string"
-            ? input
-            : input?.url || ""
-        );
         return fetch(input, { ...init, signal: composioTransportAbortController?.signal });
       };
 
       transport = new StreamableHTTPClientTransport(
-        new URL(composioMcpUrl),
+        new URL(proxiedMcpUrl),
         {
           fetch: transportFetch,
           requestInit: {

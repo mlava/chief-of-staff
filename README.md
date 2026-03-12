@@ -29,7 +29,7 @@ https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 | Requirement | Notes |
 |---|---|
 | At least one LLM API key (Anthropic, OpenAI, Gemini, or Mistral) | Direct browser fetch — incurs API costs at your provider's rates |
-| Composio account + MCP URL | Only required for external tool integrations. Graph and task features work without it. |
+| Composio account + API key | Only required for external tool integrations. Graph and task features work without it. |
 | [Better Tasks](https://github.com/mlava/recurring-tasks) extension | Only required for Better Tasks integration. Plain TODO search works without it. |
 
 ---
@@ -107,11 +107,12 @@ Wrangler will print your worker URL (e.g. `https://roam-mcp-proxy.<you>.workers.
 
 #### 2b. Configure the extension
 
-1. Create a [Composio](https://composio.dev) account and copy your **MCP URL** and **API key** from the Composio dashboard.
-2. In **Settings > Chief of Staff**, set **Composio MCP URL** to your proxy URL with the real Composio endpoint appended as the path:
+1. Create a [Composio](https://composio.dev) account and copy your **API key** from the Composio dashboard (Settings → API Keys — starts with `ak_`).
+2. In **Settings > Chief of Staff**, set **Composio Proxy URL** to just your proxy worker's base URL — no path required:
    ```
-   https://roam-mcp-proxy.<you>.workers.dev/https://mcp.composio.dev/<your-endpoint>
+   https://roam-mcp-proxy.<you>.workers.dev
    ```
+   The extension automatically creates a Composio tool-router session at connect time and constructs the correct endpoint URL from the session response.
 3. Enter your **Composio API Key** in the same settings panel.
 4. Run **Chief of Staff: Connect Composio** from the command palette.
 5. Run **Chief of Staff: Install Composio Tool** and enter a tool slug (e.g. `GOOGLECALENDAR`, `GMAIL`, `TODOIST`). You will be redirected to complete OAuth authentication in a new tab.
