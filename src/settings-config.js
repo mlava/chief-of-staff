@@ -147,12 +147,12 @@ export function buildSettingsConfig(extensionAPI) {
     settings.push(
       {
         id: deps.SETTINGS_KEYS.composioMcpUrl,
-        name: "Composio MCP URL",
-        description: "Full proxy URL including your Composio endpoint path. Format: https://your-proxy.workers.dev/https://mcp.composio.dev/your-endpoint — requires deploying roam-mcp-proxy (see docs). Leave blank if not using Composio.",
+        name: "Composio Proxy URL",
+        description: "Base URL of your roam-mcp-proxy Cloudflare Worker. Format: https://your-proxy.workers.dev — the Composio session endpoint is constructed automatically. Leave blank if not using Composio.",
         action: {
           type: "input",
           value: getComposioSettingOrBlank(extensionAPI, deps.SETTINGS_KEYS.composioMcpUrl),
-          placeholder: "https://your-proxy.workers.dev/https://mcp.composio.dev/..."
+          placeholder: "https://your-proxy.workers.dev"
         }
       },
       {
