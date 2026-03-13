@@ -135,7 +135,7 @@ export function buildSettingsConfig(extensionAPI) {
   settings.push({
     id: SETTINGS_SHOW_INTEGRATIONS,
     name: "Show Integration Settings",
-    description: "Composio (external tools like Gmail, Calendar, GitHub) and Local MCP server connections.",
+    description: "Composio (external tools like Gmail, Calendar, GitHub), Local MCP server connections, and Remote MCP servers.",
     action: {
       type: "switch",
       value: showIntegrations,
@@ -176,6 +176,89 @@ export function buildSettingsConfig(extensionAPI) {
         }
       }
     );
+
+    // ── Remote MCP servers — progressive disclosure ──────────────────────────
+    // Count select reveals per-server URL / name / header / token fields.
+    const MAX_REMOTE_MCP_SERVERS = 10;
+    const rawCount = extensionAPI.settings.get(deps.SETTINGS_KEYS.remoteMcpCount);
+    const remoteMcpCount = Math.min(MAX_REMOTE_MCP_SERVERS, Math.max(0, parseInt(rawCount, 10) || 0));
+
+    settings.push({
+      id: deps.SETTINGS_KEYS.remoteMcpCount,
+      name: "Remote MCP Servers",
+      description: "Number of remote StreamableHTTP MCP servers to connect. Each server's URL, display name, and authentication are configured in the fields that appear below.",
+      action: {
+        type: "select",
+        items: Array.from({ length: MAX_REMOTE_MCP_SERVERS + 1 }, (_, i) => String(i)),
+        value: String(remoteMcpCount),
+        onChange: (value) => {
+          const next = Math.min(MAX_REMOTE_MCP_SERVERS, Math.max(0, parseInt(value, 10) || 0));
+          try { extensionAPI.settings.set(deps.SETTINGS_KEYS.remoteMcpCount, next); } catch { }
+          rebuildSettingsPanel(extensionAPI);
+        }
+      }
+    });
+
+    for (let i = 1; i <= remoteMcpCount; i++) {
+      settings.push({
+        id: `remote-mcp-${i}-url`,
+        name: `Remote Server ${i} — URL`,
+        description: "Full StreamableHTTP endpoint (must be https://). The extension will connect on load and make its tools available to the agent.",
+        action: {
+          type: "input",
+          value: deps.getSettingString(extensionAPI, `remote-mcp-${i}-url`, ""),
+          placeholder: "https://my-server.example.com/mcp",
+          onChange: (evt) => {
+            const v = String(evt?.target?.value ?? evt ?? "").trim();
+            try { extensionAPI.settings.set(`remote-mcp-${i}-url`, v); } catch { }
+            if (deps.invalidateRemoteMcpToolsCache) deps.invalidateRemoteMcpToolsCache();
+          }
+        }
+      });
+      settings.push({
+        id: `remote-mcp-${i}-name`,
+        name: `Remote Server ${i} — Display name`,
+        description: "Optional friendly label shown in the system prompt and toasts. Falls back to the server's own name reported during the MCP handshake.",
+        action: {
+          type: "input",
+          value: deps.getSettingString(extensionAPI, `remote-mcp-${i}-name`, ""),
+          placeholder: "e.g. Open Brain",
+          onChange: (evt) => {
+            const v = String(evt?.target?.value ?? evt ?? "").trim();
+            try { extensionAPI.settings.set(`remote-mcp-${i}-name`, v); } catch { }
+            if (deps.invalidateRemoteMcpToolsCache) deps.invalidateRemoteMcpToolsCache();
+          }
+        }
+      });
+      settings.push({
+        id: `remote-mcp-${i}-header`,
+        name: `Remote Server ${i} — Auth header name`,
+        description: "Header name for authentication (e.g. x-brain-key, Authorization). Leave blank if the server needs no authentication.",
+        action: {
+          type: "input",
+          value: deps.getSettingString(extensionAPI, `remote-mcp-${i}-header`, ""),
+          placeholder: "x-api-key",
+          onChange: (evt) => {
+            const v = String(evt?.target?.value ?? evt ?? "").trim();
+            try { extensionAPI.settings.set(`remote-mcp-${i}-header`, v); } catch { }
+          }
+        }
+      });
+      settings.push({
+        id: `remote-mcp-${i}-token`,
+        name: `Remote Server ${i} — Auth token`,
+        description: "Token or secret value. Stored in Roam Depot (local IndexedDB only). Redacted from all debug logs and never sent to any service other than this server.",
+        action: {
+          type: "input",
+          value: deps.getSettingString(extensionAPI, `remote-mcp-${i}-token`, ""),
+          placeholder: "your-token",
+          onChange: (evt) => {
+            const v = String(evt?.target?.value ?? evt ?? "").trim();
+            try { extensionAPI.settings.set(`remote-mcp-${i}-token`, v); } catch { }
+          }
+        }
+      });
+    }
   }
 
   // --- Tier 2.5 toggle: Extension Tools --------------------------------------

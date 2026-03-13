@@ -153,6 +153,7 @@ export function resolveToolByName(toolName) {
     || deps.getCronTools().find(t => t.name === toolName)
     || deps.getExternalExtensionTools().find(t => t.name === toolName)
     || (deps.getLocalMcpToolsCache() || []).find(t => t.name === toolName)
+    || (deps.getRemoteMcpToolsCache?.() || []).find(t => t.name === toolName)
     || deps.getComposioMetaToolsForLlm().find(t => t.name === toolName)
     || null;
 }
@@ -390,8 +391,13 @@ export async function executeToolCall(toolName, args, { readOnly = false } = {})
 
   // Defence-in-depth: block tools from MCP servers whose schema has drifted
   // until the user explicitly reviews and accepts the new schema.
-  if (typeof deps.getServerKeyForTool === "function" && typeof deps.isServerSuspended === "function") {
-    const serverKey = deps.getServerKeyForTool(toolName, resolvedTool, effectiveArgs);
+  if (typeof deps.isServerSuspended === "function") {
+    let serverKey = typeof deps.getServerKeyForTool === "function"
+      ? deps.getServerKeyForTool(toolName, resolvedTool, effectiveArgs)
+      : null;
+    if (!serverKey && typeof deps.getRemoteServerKeyForTool === "function") {
+      serverKey = deps.getRemoteServerKeyForTool(toolName, resolvedTool, effectiveArgs);
+    }
     if (serverKey && deps.isServerSuspended(serverKey)) {
       return { error: `MCP server suspended (schema drift): tools from "${serverKey}" are blocked until you review the schema change. Use the command palette: "Chief of Staff: Review MCP Schema Changes".` };
     }

@@ -177,6 +177,21 @@ import {
   cleanupLocalMcp,
 } from "./local-mcp.js";
 import {
+  initRemoteMcp,
+  normalizeRemoteMcpUrl,
+  getRemoteMcpTools,
+  buildRemoteMcpRouteTool,
+  buildRemoteMcpMetaTool,
+  connectRemoteMcp,
+  disconnectAllRemoteMcp,
+  scheduleRemoteMcpAutoConnect,
+  getRemoteMcpClients,
+  getRemoteMcpToolsCache,
+  invalidateRemoteMcpToolsCache,
+  getRemoteServerKeyForTool,
+  cleanupRemoteMcp,
+} from "./remote-mcp.js";
+import {
   initInbox,
   resetInboxStaticUIDs,
   primeInboxStaticUIDs,
@@ -216,6 +231,7 @@ const SETTINGS_KEYS = {
   onboardingComplete: "onboarding-complete",
   ludicrousModeEnabled: "ludicrous-mode-enabled",
   localMcpPorts: "local-mcp-ports",
+  remoteMcpCount: "remote-mcp-count",
   piiScrubEnabled: "pii-scrub-enabled",
   costHistory: "cost-history",
   usageStats: "usage-stats",
@@ -1039,6 +1055,24 @@ function getSettingNumber(extensionAPI, key, fallbackValue = 0) {
 function getSettingBool(extensionAPI, key, fallbackValue = false) {
   const value = extensionAPI?.settings?.get?.(key);
   return typeof value === "boolean" ? value : fallbackValue;
+}
+
+function getRemoteMcpServers(extensionAPI = extensionAPIRef) {
+  const MAX = 10;
+  const rawCount = extensionAPI?.settings?.get(SETTINGS_KEYS.remoteMcpCount);
+  const count = Math.min(MAX, Math.max(0, parseInt(rawCount, 10) || 0));
+  const servers = [];
+  for (let i = 1; i <= count; i++) {
+    const url = getSettingString(extensionAPI, `remote-mcp-${i}-url`, "").trim();
+    if (!url) continue;
+    servers.push({
+      url,
+      name: getSettingString(extensionAPI, `remote-mcp-${i}-name`, "").trim(),
+      header: getSettingString(extensionAPI, `remote-mcp-${i}-header`, "").trim(),
+      token: getSettingString(extensionAPI, `remote-mcp-${i}-token`, "").trim(),
+    });
+  }
+  return servers;
 }
 
 function getLocalMcpPorts(extensionAPI = extensionAPIRef) {
@@ -2346,6 +2380,22 @@ function buildRuntimeAibomSnapshotText() {
     });
   }
 
+  const remoteServerRows = [];
+  for (const [urlKey, entry] of getRemoteMcpClients().entries()) {
+    if (!entry?.serverName) continue;
+    const serverKey = `remote:${urlKey}`;
+    const direct = Boolean(entry?.tools?.[0]?._isDirect);
+    const toolCount = Array.isArray(entry?.tools) ? entry.tools.length : 0;
+    remoteServerRows.push({
+      serverKey,
+      serverName: entry.serverName,
+      urlKey,
+      direct,
+      toolCount,
+      suspended: isServerSuspended(serverKey)
+    });
+  }
+
   const suspendedRows = Array.from(getSuspendedServers().entries()).map(([serverKey, details]) => ({
     serverKey,
     summary: details?.summary || "suspended",
@@ -2378,6 +2428,10 @@ function buildRuntimeAibomSnapshotText() {
     `${escapeHtml(row.serverName)} (${row.serverKey}) — ${row.toolCount} tool(s), ${row.direct ? "direct" : "routed"}${row.suspended ? ", suspended" : ""}`
   );
 
+  const remoteServerLines = formatAibomList(remoteServerRows, (row) =>
+    `${escapeHtml(row.serverName)} — ${row.toolCount} tool(s), ${row.direct ? "direct" : "routed"}${row.suspended ? ", suspended" : ""}`
+  );
+
   const suspendedLines = formatAibomList(suspendedRows, (row) =>
     `${escapeHtml(row.serverName)} (${row.serverKey}) — ${escapeHtml(row.summary)}`
   );
@@ -2396,6 +2450,7 @@ function buildRuntimeAibomSnapshotText() {
     `toolkits_in_registry_active=${activeToolkitEntries.length}`,
     `toolkits_in_registry_cached=${toolkitEntries.length}`,
     `local_mcp_servers=${localServerRows.length}`,
+    `remote_mcp_servers=${remoteServerRows.length}`,
     `suspended_mcp_servers=${suspendedRows.length}`
   ].join(", ");
 
@@ -2422,6 +2477,9 @@ function buildRuntimeAibomSnapshotText() {
     "",
     "## Local MCP Servers",
     localServerLines,
+    "",
+    "## Remote MCP Servers",
+    remoteServerLines,
     "",
     "## Suspended MCP Servers",
     suspendedLines,
@@ -2910,7 +2968,13 @@ async function getAvailableToolSchemas() {
   const directMcpTools = allLocalMcpTools.filter(t => t._isDirect);
   const hasMetaTargets = allLocalMcpTools.some(t => !t._isDirect);
   const localMcpMetaTool = hasMetaTargets ? [buildLocalMcpRouteTool(), buildLocalMcpMetaTool()] : [];
-  const tools = [...adjustedMetaTools, ...getRoamNativeTools(), ...getBetterTasksTools(), ...getCosIntegrationTools(), ...getCronTools(), ...getExternalExtensionTools(), ...directMcpTools, ...localMcpMetaTool];
+
+  const allRemoteMcpTools = getRemoteMcpTools();
+  const directRemoteTools = allRemoteMcpTools.filter(t => t._isDirect);
+  const hasRemoteMetaTargets = allRemoteMcpTools.some(t => !t._isDirect);
+  const remoteMcpMetaTool = hasRemoteMetaTargets ? [buildRemoteMcpRouteTool(), buildRemoteMcpMetaTool()] : [];
+
+  const tools = [...adjustedMetaTools, ...getRoamNativeTools(), ...getBetterTasksTools(), ...getCosIntegrationTools(), ...getCronTools(), ...getExternalExtensionTools(), ...directMcpTools, ...localMcpMetaTool, ...directRemoteTools, ...remoteMcpMetaTool];
   return tools;
 }
 
@@ -6536,6 +6600,24 @@ async function tryRunDeterministicAskIntent(prompt, context = {}) {
       }
     }
 
+    // Remote MCP servers
+    const remoteMcpTools = getRemoteMcpTools() || [];
+    if (remoteMcpTools.length > 0) {
+      const byServer = new Map();
+      for (const t of remoteMcpTools) {
+        const sn = t._serverName || "Unknown";
+        if (!byServer.has(sn)) byServer.set(sn, []);
+        byServer.get(sn).push(t);
+      }
+      for (const [serverName, serverTools] of byServer) {
+        if (serverTools[0]?._isDirect) {
+          sections.push(`**${serverName}** (${serverTools.length}): ${serverTools.map(t => t.name).join(", ")}`);
+        } else {
+          sections.push(`**${serverName}** (${serverTools.length} tools, via REMOTE_MCP_ROUTE)`);
+        }
+      }
+    }
+
     // Composio services
     try {
       const state = extensionAPIRef ? getToolsConfigState(extensionAPIRef) : { installedTools: [] };
@@ -6750,11 +6832,13 @@ async function askChiefOfStaff(userMessage, options = {}) {
   // Check all MCP servers for name mentions. Prefer routed (>15 tools) matches over
   // direct ones — a routed match triggers hard escalation because mini-tier models
   // struggle with the two-step LOCAL_MCP_ROUTE → LOCAL_MCP_EXECUTE pattern.
-  const mcpServerMatch = effectiveTier === "mini" && getLocalMcpClients().size > 0 && (() => {
+  const mcpServerMatch = effectiveTier === "mini" && (() => {
+    const allClients = [...getLocalMcpClients().values(), ...getRemoteMcpClients().values()];
+    if (!allClients.length) return null;
     const lower = prompt.toLowerCase();
     let matchedDirect = false;
     let matchedRouted = false;
-    for (const [, entry] of getLocalMcpClients()) {
+    for (const entry of allClients) {
       if (!entry?.serverName) continue;
       const sn = entry.serverName.toLowerCase();
       let matches = lower.includes(sn);
@@ -7169,6 +7253,48 @@ function registerCommandPaletteCommands(extensionAPI) {
       } else {
         const failedPorts = [...remaining].join(", ");
         showErrorToast("Local MCP partially failed", `Connected to ${connected}/${ports.length} server(s). Failed ports: ${failedPorts}. Check that those servers are running.`);
+      }
+    }
+  });
+  extensionAPI.ui.commandPalette.addCommand({
+    label: "Chief of Staff: Refresh Remote MCP Servers",
+    callback: async () => {
+      const servers = getRemoteMcpServers();
+      if (!servers.length) {
+        showInfoToast("No remote servers configured", "Add remote MCP servers in Settings → Integration Settings first.");
+        return;
+      }
+      showInfoToast("Refreshing…", `Reconnecting to ${servers.length} remote MCP server(s).`);
+      await disconnectAllRemoteMcp();
+      invalidateRemoteMcpToolsCache();
+
+      const MAX_REFRESH_ATTEMPTS = 3;
+      const REFRESH_RETRY_DELAY_MS = 2000;
+      let connected = 0;
+      const remaining = new Map(servers.map(s => [s.url, s]));
+
+      for (let attempt = 1; attempt <= MAX_REFRESH_ATTEMPTS && remaining.size > 0; attempt++) {
+        await new Promise(r => setTimeout(r, REFRESH_RETRY_DELAY_MS));
+        for (const [url, serverConfig] of [...remaining]) {
+          try {
+            const result = await connectRemoteMcp(serverConfig);
+            if (result) {
+              connected++;
+              remaining.delete(url);
+            }
+          } catch (e) {
+            console.warn(`[Remote MCP] Refresh attempt ${attempt} failed for ${url}:`, e?.message);
+          }
+        }
+      }
+
+      if (connected === servers.length) {
+        showInfoToast("Remote MCP refreshed", `Connected to ${connected} server(s).`);
+      } else {
+        const failedUrls = [...remaining.keys()].map(u => {
+          try { return new URL(u).hostname; } catch { return u; }
+        }).join(", ");
+        showErrorToast("Remote MCP partially failed", `Connected to ${connected}/${servers.length} server(s). Failed: ${failedUrls}. Check URLs and auth tokens, then retry.`);
       }
     }
   });
@@ -7760,6 +7886,7 @@ function onload({ extensionAPI }) {
     DEFAULT_COMPOSIO_API_KEY,
     DEFAULT_ASSISTANT_NAME,
     getResponseVerbosity,
+    invalidateRemoteMcpToolsCache,
   });
   initLlmProviders({
     debugLog,
@@ -7897,6 +8024,23 @@ function onload({ extensionAPI }) {
     isUnloadInProgress: () => unloadInProgress,
     COMPOSIO_AUTO_CONNECT_DELAY_MS,
   });
+  initRemoteMcp({
+    debugLog,
+    getExtensionAPI: () => extensionAPIRef,
+    SETTINGS_KEY_mcpSchemaHashes: SETTINGS_KEYS.mcpSchemaHashes,
+    showInfoToast,
+    showErrorToast,
+    getRemoteMcpServers,
+    getProxiedRemoteUrl: (url) => {
+      const proxy = window.roamAlphaAPI?.constants?.corsAnywhereProxyUrl;
+      return proxy ? `${proxy.replace(/\/+$/, "")}/${url}` : url;
+    },
+    scanToolDescriptions,
+    checkSchemaPin,
+    updateMcpBom,
+    isUnloadInProgress: () => unloadInProgress,
+    COMPOSIO_AUTO_CONNECT_DELAY_MS,
+  });
   initInbox({
     getRoamAlphaApi,
     escapeForDatalog,
@@ -7944,6 +8088,7 @@ function onload({ extensionAPI }) {
     getSessionUsedLocalMcp,
     setSessionUsedLocalMcp,
     getLocalMcpToolsCache,
+    getRemoteMcpToolsCache,
     getBtProjectsCache: () => btProjectsCache,
     setBtProjectsCache: (v) => { btProjectsCache = v; },
     getMcpClient: () => mcpClient,
@@ -7972,6 +8117,7 @@ function onload({ extensionAPI }) {
     wrapUntrustedWithInjectionScan,
     isServerSuspended,
     getServerKeyForTool,
+    getRemoteServerKeyForTool,
     recordUsageStat,
   });
   initSystemPrompt({
@@ -7991,6 +8137,7 @@ function onload({ extensionAPI }) {
     formatRoamDate,
     debugLog,
     getLocalMcpToolsCache,
+    getRemoteMcpToolsCache,
     getBtProjectsCache: () => btProjectsCache,
     setBtProjectsCache: (v) => { btProjectsCache = v; },
     getResponseVerbosity,
@@ -8020,6 +8167,7 @@ function onload({ extensionAPI }) {
   registerCommandPaletteCommands(extensionAPI);
   scheduleComposioAutoConnect(extensionAPI);
   scheduleLocalMcpAutoConnect();
+  scheduleRemoteMcpAutoConnect();
   // Defensive teardown in case a prior load cycle left orphan watches (e.g. hot-reload)
   try { teardownPullWatches(); } catch { /* ignore */ }
   // Register live watches on memory/skills pages for auto-invalidation
@@ -8159,12 +8307,17 @@ function onunload() {
   resetRoamNativeToolsCache();
   externalExtensionToolsCache = null;
   cleanupLocalMcp();
+  cleanupRemoteMcp();
   btProjectsCache = null;
   toolkitSchemaRegistryCache = null;
   clearSchemaPromptCache();
   _schemaHashCache.clear();
   Promise.race([
     disconnectAllLocalMcp(),
+    new Promise(resolve => setTimeout(resolve, 2000))
+  ]).catch(() => { });
+  Promise.race([
+    disconnectAllRemoteMcp(),
     new Promise(resolve => setTimeout(resolve, 2000))
   ]).catch(() => { });
   if (connectInFlightPromise) {

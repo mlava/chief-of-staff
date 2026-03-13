@@ -16,6 +16,7 @@ https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 - **Inbox as input channel** — drop blocks into `Chief of Staff/Inbox` and they are automatically processed in read-only mode (the assistant can search and read but cannot mutate your graph). Responses are nested under the inbox block and moved to your daily page.
 - **Composio tool connections** — connect Google Calendar, Gmail, Todoist, and hundreds of other apps via Composio MCP. The assistant discovers and executes tools on your behalf.
 - **Local MCP server integration** — connect to MCP servers running on your machine (e.g. Zotero, GitHub, custom tools). Servers with many tools use a two-stage routing system to keep token costs low. Connections retry automatically on failure.
+- **Remote MCP server integration** — connect to any remote MCP server on the internet via StreamableHTTP or SSE transport. Configure up to 10 remote servers with optional auth headers (including OAuth Bearer tokens). SSE connections that fail automatically fall back to StreamableHTTP. Tools are discovered at connection time and made available to the agent alongside local and Composio tools.
 - **Scheduled jobs** — create recurring or one-shot scheduled tasks (cron expressions, intervals, or specific times) that the assistant runs automatically. Multi-tab safe via leader election.
 - **Self-healing tool calls** — if the LLM claims to have done something without actually doing it, the extension detects the hallucination, retries with the correct tool, and auto-escalates to a smarter model if needed. No user intervention required.
 - **Three model tiers with automatic routing** — most requests use a fast, cheap model. Append `/power` or `/ludicrous` to your message to force a more capable tier, or let the extension auto-escalate based on request complexity. See [How tiers work](#how-tiers-work) for details.
@@ -170,6 +171,46 @@ That's it. On every subsequent Roam load, the extension auto-connects to your co
 
 A detailed operational guide for manual supergateway setup, LaunchAgent configuration, and troubleshooting is available in [`public/mcp-supergateway-playbook.md`](public/mcp-supergateway-playbook.md).
 
+### 4. Connect remote MCP servers (optional)
+
+Remote MCP servers let the assistant use tools hosted anywhere on the internet — for example, personal knowledge tools, productivity APIs, or custom cloud services that expose a StreamableHTTP or SSE MCP endpoint. No proxy setup or local processes are required.
+
+#### Setup
+
+1. In **Settings > Chief of Staff**, enable **Show Integration Settings**.
+2. Set **Remote MCP Servers** to the number of servers you want to connect (1–10).
+3. For each server, fill in the fields that appear:
+
+   | Field | Required | Example |
+   |---|---|---|
+   | **URL** | Yes | `https://my-server.example.com/mcp` or `https://my-server.example.com/sse` |
+   | **Display name** | No | `Open Brain` (falls back to the server's own name) |
+   | **Auth header name** | No | `x-brain-key`, `Authorization` |
+   | **Auth token** | No | Your API key or `Bearer <your-token>` |
+
+4. Run **Chief of Staff: Refresh Remote MCP Servers** from the command palette, or reload the extension. Connection and tool discovery happen automatically.
+
+#### How it works
+
+- **Two transports supported:** StreamableHTTP (stateless POST to `/mcp`) is preferred. SSE (browser-native `EventSource` GET to `/sse`) is also supported for legacy servers.
+- **Automatic fallback:** If an SSE connection fails (CORS, 4xx, network error), the extension automatically retries with StreamableHTTP on the same host (`/sse` → `/mcp`). No manual reconfiguration needed.
+- Tool calls use raw JSON-RPC POST requests directly — this ensures compatibility with stateless servers that close the SSE stream after each response.
+- Servers with **15 or fewer tools** are registered directly — the LLM calls them by name in a single step.
+- Servers with **more than 15 tools** use two-stage routing: `REMOTE_MCP_ROUTE` discovers available tools, then `REMOTE_MCP_EXECUTE` calls the chosen tool.
+- Auth tokens are stored in Roam Depot (browser IndexedDB) and redacted from all debug logs.
+- The same supply-chain security pipeline as local MCP applies: tool descriptions are scanned for injection patterns, schemas are pinned on first connection and compared on reconnection, and connection details are logged to `[[Chief of Staff/MCP Servers]]`.
+- Connections retry automatically with exponential backoff (up to 4 retries). Use **Chief of Staff: Refresh Remote MCP Servers** to force an immediate reconnect.
+
+#### OAuth Bearer token authentication
+
+Services like Notion, Atlassian, and Sentry require OAuth Bearer tokens. Since Roam Research has no OAuth redirect URI, tokens must be obtained externally:
+
+1. Create an **Internal Integration** in the service's developer console (e.g. Notion's "My Integrations" page).
+2. Copy the integration token.
+3. In Roam Depot settings, set the **Auth header name** to `Authorization` and the **Auth token** to `Bearer <your-token>`.
+
+> **CORS note:** Roam routes remote MCP requests through its built-in CORS proxy (`corsAnywhereProxyUrl`). If the proxy is unavailable, the extension falls back to a direct request. Some servers may require the proxy to be active for cross-origin access to work correctly.
+
 ---
 
 ## Command palette
@@ -196,6 +237,7 @@ A detailed operational guide for manual supergateway setup, LaunchAgent configur
 | **Chief of Staff: Clear Conversation Context** | Resets conversation memory and chat history. |
 | **Chief of Staff: Generate Supergateway Script** | Paste your `mcpServers` JSON and get a platform-specific install script (macOS launchd / Linux systemd / Windows Task Scheduler) with auto-assigned ports. |
 | **Chief of Staff: Refresh Local MCP Servers** | Disconnects and reconnects all configured local MCP servers. |
+| **Chief of Staff: Refresh Remote MCP Servers** | Disconnects and reconnects all configured remote MCP servers. |
 | **Chief of Staff: Show Stored Tool Config** | Logs the current tool configuration to the browser console. |
 | **Chief of Staff: Show Last Run Trace** | Logs the most recent agent run (iterations, tool calls, timing) to the browser console. |
 | **Chief of Staff: Debug Runtime Stats** | Logs current runtime state (cache sizes, connection status, conversation turns) to the browser console. |
@@ -478,6 +520,8 @@ All LLM processing happens via direct API calls from your browser to your config
 **Composio tools (Gmail, Calendar, Todoist, etc.).** When you use an external service, the assistant's tool call payload (e.g. an email search query or a calendar event body) is sent to Composio's MCP endpoint via the included CORS proxy. The proxy forwards only to allowlisted hosts and adds no tracking. Your Composio API key authenticates the request. The proxy itself stores nothing.
 
 **Local MCP servers.** If you connect a local MCP server (e.g. Zotero, GitHub), tool call payloads are sent to `localhost` on the port you configured. Nothing leaves your machine.
+
+**Remote MCP servers.** Tool call payloads are sent directly to the remote server's URL (via Roam's built-in CORS proxy when available). Auth tokens are included in request headers and are stored locally in Roam Depot — they are never sent to any other service.
 
 **What is never sent.** Your full graph is never transmitted. The assistant reads specific blocks via Roam's local API and includes only the relevant results in the LLM context. Your API keys are sent only to their respective provider endpoints, never to Composio or the CORS proxy.
 
