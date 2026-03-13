@@ -464,14 +464,25 @@ The assistant can create recurring or one-shot scheduled jobs that run automatic
 - *"Run my Daily Briefing skill every morning at 8am"*
 - *"Remind me to check my inbox every 30 minutes"*
 - *"At 5pm today, summarise what I worked on"*
+- *"Check my Open Brain stats every 2 hours between 8am and 6pm"*
 
 Supported schedule types:
 
 | Type | Schedule format | Example |
 |---|---|---|
 | `cron` | 5-field cron expression + timezone | `0 8 * * *` (daily at 8am) |
-| `interval` | Every N minutes (minimum 5) | `30` (every 30 minutes) |
+| `interval` | Every N minutes, runs 24/7 (minimum 5) | `30` (every 30 minutes) |
 | `once` | Specific timestamp | One-shot, auto-disables after execution |
+| `reminder` | Specific timestamp, sticky toast only | No agent loop — just a persistent notification |
+
+**Time-windowed recurring jobs.** To run something repeatedly but only during certain hours — e.g. *"every 2 hours between 8am and 6pm"* — use `cron` type with a range expression. The assistant translates natural language automatically:
+
+| Natural language | Cron expression |
+|---|---|
+| Every 2 hours from 8am to 6pm | `0 8-18/2 * * *` |
+| Every 30 minutes during business hours | `*/30 9-17 * * *` |
+| 9am and 5pm on weekdays | `0 9,17 * * 1-5` |
+| Weekdays at 8am | `0 8 * * 1-5` |
 
 Jobs are stored in extension settings and persist across reloads. If you have multiple Roam tabs open, only one tab executes scheduled jobs (via automatic leader election with heartbeat and cross-tab detection) to prevent duplicates.
 

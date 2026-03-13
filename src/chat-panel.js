@@ -242,12 +242,23 @@ export function syncCosTheme() {
     panel.style.setProperty("--cos-shadow", "rgba(0,0,0,0.4)");
     panel.style.setProperty("--cos-tool-preview-bg", "rgba(0,0,0,0.2)");
     panel.style.setProperty("--cos-toast-input-border", borderColor);
+    panel.style.setProperty("--cos-blockquote-border", "rgba(129, 140, 248, 0.5)");
+    panel.style.setProperty("--cos-blockquote-text", "#e2e8f0");
+    panel.style.setProperty("--cos-table-border", "rgba(100, 116, 139, 0.35)");
+    panel.style.setProperty("--cos-table-header-bg", "rgba(79, 70, 229, 0.15)");
+    panel.style.setProperty("--cos-table-stripe", "rgba(100, 116, 139, 0.08)");
+    panel.style.setProperty("--cos-table-hover", "rgba(79, 70, 229, 0.12)");
+    panel.style.setProperty("--cos-scrollbar", "rgba(148, 163, 184, 0.3)");
+    panel.style.setProperty("--cos-scrollbar-hover", "rgba(148, 163, 184, 0.5)");
   } else {
     // --- Light mode: clear all inline overrides, let CSS defaults apply ---
     const vars = [
       "--cos-panel-bg", "--cos-panel-text", "--cos-border", "--cos-border-subtle",
       "--cos-muted", "--cos-input-bg", "--cos-code-bg", "--cos-code-text",
-      "--cos-shadow", "--cos-tool-preview-bg", "--cos-toast-input-border"
+      "--cos-shadow", "--cos-tool-preview-bg", "--cos-toast-input-border",
+      "--cos-blockquote-border", "--cos-blockquote-text", "--cos-table-border",
+      "--cos-table-header-bg", "--cos-table-stripe", "--cos-table-hover",
+      "--cos-scrollbar", "--cos-scrollbar-hover"
     ];
     for (const v of vars) panel.style.removeProperty(v);
   }

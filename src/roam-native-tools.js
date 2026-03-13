@@ -1113,6 +1113,30 @@ export function getRoamNativeTools() {
       execute: async (args = {}) => deps.updateChiefMemory(args)
     },
     {
+      name: "cos_show_toast",
+      description: "Show a toast notification to the user. Use for brief, time-sensitive messages that don't need to be persisted.",
+      input_schema: {
+        type: "object",
+        properties: {
+          message: { type: "string", description: "The message to display" },
+          title: { type: "string", description: "Optional toast title" },
+          timeout: { type: "number", description: "Seconds to display (default 15)" }
+        },
+        required: ["message"]
+      },
+      execute: async (args) => {
+        const iziToast = (await import("izitoast")).default;
+        iziToast.show({
+          title: args.title || "",
+          message: args.message,
+          timeout: (args.timeout || 15) * 1000,
+          position: "topRight",
+          color: "blue"
+        });
+        return { success: true };
+      }
+    },
+    {
       name: "roam_get_backlinks",
       isMutating: false,
       description: "Get all blocks that reference a page (backlinks). Returns the referring blocks with their page context.",
@@ -2079,7 +2103,7 @@ export function getRoamNativeTools() {
           size_bytes: blob.size,
           size_human: blob.size < 1024 ? `${blob.size} B`
             : blob.size < 1024 * 1024 ? `${(blob.size / 1024).toFixed(1)} KB`
-            : `${(blob.size / 1024 / 1024).toFixed(1)} MB`
+              : `${(blob.size / 1024 / 1024).toFixed(1)} MB`
         };
       }
     }

@@ -516,13 +516,13 @@ export function getCronTools() {
     {
       name: "cos_cron_create",
       isMutating: true,
-      description: "Create a new scheduled job. Types: 'cron' (5-field expression with timezone), 'interval' (every N minutes), 'once' (one-shot at a specific time), 'reminder' (one-shot sticky toast at a specific time — no agent loop, just a persistent notification). For 'reminder' type, use 'message' instead of 'prompt'.",
+      description: "Create a new scheduled job. Types: 'cron' (5-field expression with timezone), 'interval' (every N minutes, runs around the clock), 'once' (one-shot at a specific time), 'reminder' (one-shot sticky toast at a specific time — no agent loop, just a persistent notification). For 'reminder' type, use 'message' instead of 'prompt'. IMPORTANT: For 'every N hours/minutes during a time window' (e.g. 'every 2 hours between 8am and 6pm'), always use type 'cron' with a windowed expression — 'interval' fires around the clock regardless of time of day.",
       input_schema: {
         type: "object",
         properties: {
           name: { type: "string", description: "Human-readable job name." },
           type: { type: "string", enum: ["cron", "interval", "once", "reminder"], description: "Schedule type. Use 'reminder' for a sticky toast notification at a specific time." },
-          cron: { type: "string", description: "5-field cron expression (required for type 'cron'). E.g. '0 8 * * 1-5' for weekdays at 08:00." },
+          cron: { type: "string", description: "5-field cron expression (required for type 'cron'). Examples: '0 8 * * 1-5' = weekdays at 08:00; '0 8-18/2 * * *' = every 2 hours from 8am to 6pm daily; '0 9,17 * * 1-5' = 9am and 5pm on weekdays; '*/30 9-17 * * *' = every 30 min during business hours." },
           interval_minutes: { type: "number", description: "Interval in minutes (required for type 'interval')." },
           run_at: { type: "string", description: "ISO 8601 datetime for one-shot execution (required for type 'once' or 'reminder' unless delay_minutes is provided)." },
           delay_minutes: { type: "number", description: "Minutes from now to fire (alternative to run_at for 'once'/'reminder'). E.g. 1 = one minute from now, 30 = half an hour." },
@@ -752,6 +752,7 @@ export function buildCronJobsPromptSection() {
 
 You have access to cron job tools (cos_cron_list, cos_cron_create, cos_cron_update, cos_cron_delete, cos_cron_delete_jobs).
 Use type 'reminder' with cos_cron_create to set one-shot reminders — these show a persistent sticky toast at the specified time without running the agent loop.
+For time-windowed recurring jobs (e.g. "every 2 hours between 8am and 6pm"), always use type 'cron' with a range expression such as '0 8-18/2 * * *' — type 'interval' fires around the clock.
 The user currently has ${enabledJobs.length} active scheduled job(s):
 ${deps.wrapUntrustedWithInjectionScan("cron_jobs", lines.join("\n"))}`;
 }
