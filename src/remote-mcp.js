@@ -381,17 +381,44 @@ class RemoteSSETransport {
 
 // ── Tool accessors ───────────────────────────────────────────────────────────
 
+/**
+ * Normalise a server name into a safe tool-name prefix.
+ * "Open Brain" → "open_brain", "my-server" → "my_server"
+ */
+function serverNameToPrefix(name) {
+  return (name || "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+}
+
 export function getRemoteMcpTools() {
   if (remoteMcpToolsCache) return remoteMcpToolsCache;
 
   const allTools = [];
-  const seenNames = new Set();
+  const nameToIndex = new Map();
+  const collisionNames = new Set();
+
   for (const [, entry] of remoteMcpClients) {
     if (!entry?.serverName || !Array.isArray(entry.tools)) continue;
     for (const tool of entry.tools) {
-      if (seenNames.has(tool.name)) continue;
-      seenNames.add(tool.name);
-      allTools.push(tool);
+      if (nameToIndex.has(tool.name)) {
+        if (!collisionNames.has(tool.name)) {
+          collisionNames.add(tool.name);
+          const origIdx = nameToIndex.get(tool.name);
+          const origTool = allTools[origIdx];
+          const origPrefix = serverNameToPrefix(origTool._serverName);
+          const namespacedOrigName = `${origPrefix}__${origTool.name}`;
+          origTool._originalName = origTool._originalName || origTool.name;
+          origTool.name = namespacedOrigName;
+          deps.debugLog(`[Remote MCP] Tool name collision: "${tool.name}" — renamed first occurrence to "${namespacedOrigName}" (from ${origTool._serverName})`);
+        }
+        const prefix = serverNameToPrefix(entry.serverName);
+        const namespacedName = `${prefix}__${tool.name}`;
+        const namespacedTool = { ...tool, name: namespacedName, _originalName: tool.name };
+        allTools.push(namespacedTool);
+        deps.debugLog(`[Remote MCP] Tool name collision: "${tool.name}" — renamed to "${namespacedName}" (from ${entry.serverName})`);
+      } else {
+        nameToIndex.set(tool.name, allTools.length);
+        allTools.push(tool);
+      }
     }
   }
   remoteMcpToolsCache = allTools;
@@ -481,10 +508,17 @@ export function buildRemoteMcpRouteTool() {
         const schema = t.input_schema && Object.keys(t.input_schema.properties || {}).length > 0
           ? `\n  Input: ${JSON.stringify(t.input_schema)}`
           : "";
-        return `- **${t.name}**: ${t.description || "(no description)"}${schema}`;
+        const nameLabel = t._originalName && t._originalName !== t.name
+          ? `${t.name}` + ` (originally "${t._originalName}" — renamed to avoid collision)`
+          : t.name;
+        return `- **${nameLabel}**: ${t.description || "(no description)"}${schema}`;
       });
+      const callHint = `Call these via REMOTE_MCP_EXECUTE({ "tool_name": "...", "arguments": {...} }).`;
+      const collisionHint = serverTools.some(t => t._originalName && t._originalName !== t.name)
+        ? ` Use the full namespaced tool name to avoid ambiguity.`
+        : "";
       return {
-        text: `## ${serverTools[0]._serverName} — ${serverTools.length} tools available\n\nCall these via REMOTE_MCP_EXECUTE({ "tool_name": "...", "arguments": {...} }).\n\n${lines.join("\n\n")}`
+        text: `## ${serverTools[0]._serverName} — ${serverTools.length} tools available\n\n${callHint}${collisionHint}\n\n${lines.join("\n\n")}`
       };
     }
   };
@@ -493,25 +527,63 @@ export function buildRemoteMcpRouteTool() {
 export function buildRemoteMcpMetaTool() {
   return {
     name: "REMOTE_MCP_EXECUTE",
-    description: "Execute a tool discovered via REMOTE_MCP_ROUTE. Provide the exact tool_name and its arguments.",
+    description: "Execute a tool discovered via REMOTE_MCP_ROUTE. Provide the exact tool_name and its arguments. When multiple servers have tools with the same original name, use the namespaced form (e.g. \"server_name__tool\") or provide server_name to disambiguate.",
     input_schema: {
       type: "object",
       properties: {
-        tool_name: { type: "string", description: "Exact tool name returned by REMOTE_MCP_ROUTE" },
+        tool_name: { type: "string", description: "Exact tool name returned by REMOTE_MCP_ROUTE (use namespaced name when there are collisions)" },
+        server_name: { type: "string", description: "Optional: server name to disambiguate when multiple servers have the same tool name" },
         arguments: { type: "object", description: "Arguments for the tool" }
       },
       required: ["tool_name"]
     },
     execute: async (args) => {
       const innerName = args?.tool_name;
+      const serverFilter = args?.server_name;
       if (!innerName) return { error: "tool_name is required" };
       const cache = remoteMcpToolsCache || [];
-      let tool = cache.find(t => t.name === innerName);
+
+      let tool;
+
+      // 1. If server_name is provided, find by original name within that server
+      if (serverFilter) {
+        const lowerServer = serverFilter.toLowerCase();
+        tool = cache.find(t =>
+          (t._serverName || "").toLowerCase() === lowerServer &&
+          (t.name === innerName || t._originalName === innerName)
+        );
+        if (!tool) {
+          const lowerName = innerName.toLowerCase();
+          tool = cache.find(t =>
+            (t._serverName || "").toLowerCase() === lowerServer &&
+            (t.name.toLowerCase() === lowerName || (t._originalName || "").toLowerCase() === lowerName)
+          );
+        }
+      }
+
+      // 2. Direct name match (namespaced or non-colliding)
+      if (!tool) {
+        tool = cache.find(t => t.name === innerName);
+      }
+
+      // 3. Match by _originalName — disambiguate if multiple
+      if (!tool) {
+        const origMatches = cache.filter(t => t._originalName === innerName);
+        if (origMatches.length === 1) {
+          tool = origMatches[0];
+        } else if (origMatches.length > 1) {
+          const options = origMatches.map(t => `"${t.name}" (${t._serverName})`).join(", ");
+          return { error: `Tool "${innerName}" exists on multiple servers. Use the namespaced name: ${options}` };
+        }
+      }
+
+      // 4. Case-insensitive fallback
       if (!tool) {
         const lower = innerName.toLowerCase();
         tool = cache.find(t => t.name.toLowerCase() === lower);
       }
-      if (!tool) return { error: `Tool "${innerName}" not found in remote MCP servers` };
+
+      if (!tool) return { error: `Tool "${innerName}" not found in remote MCP servers. Use REMOTE_MCP_ROUTE to discover available tools.` };
       return tool.execute(args.arguments || {});
     }
   };

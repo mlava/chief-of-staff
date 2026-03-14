@@ -202,15 +202,19 @@ test("getLocalMcpTools aggregates tools from all clients", () => {
   assert.deepEqual(tools.map(t => t.name).sort(), ["tool_a", "tool_b", "tool_c"]);
 });
 
-test("getLocalMcpTools deduplicates by tool name", () => {
+test("getLocalMcpTools namespaces colliding tool names from different servers", () => {
   const clients = getLocalMcpClients();
-  clients.set(3000, { client: null, serverName: "S1", tools: [makeTool("dup_tool")] });
-  clients.set(4000, { client: null, serverName: "S2", tools: [makeTool("dup_tool")] });
+  clients.set(3000, { client: null, serverName: "S1", tools: [makeTool("dup_tool", { serverName: "S1" })] });
+  clients.set(4000, { client: null, serverName: "S2", tools: [makeTool("dup_tool", { serverName: "S2" })] });
   invalidateLocalMcpToolsCache();
 
   const tools = getLocalMcpTools();
-  assert.equal(tools.length, 1);
-  assert.equal(tools[0].name, "dup_tool");
+  // Both tools should be present, namespaced with server prefix
+  assert.equal(tools.length, 2);
+  assert.equal(tools[0].name, "s1__dup_tool");
+  assert.equal(tools[0]._originalName, "dup_tool");
+  assert.equal(tools[1].name, "s2__dup_tool");
+  assert.equal(tools[1]._originalName, "dup_tool");
 });
 
 test("getLocalMcpTools skips entries without serverName", () => {

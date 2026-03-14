@@ -3391,16 +3391,45 @@ async function runDeterministicSkillInvocation(intent, options = {}) {
     systemPromptSuffix += `\n\nIMPORTANT: Do NOT call roam_create_blocks, roam_batch_write, or roam_get_daily_page. The system will write your output to the daily page automatically. Just produce the briefing content as structured markdown with headings (#### for sections) and FLAT bulleted lists (no indentation — every list item must start at column 0 with "- "). Indentation in your output maps directly to Roam block nesting, so indented items become children rather than siblings. Do NOT include any preamble, confirmation, or conversational text — output ONLY the structured briefing content.`;
   }
 
+  // Parse expected sources for gathering completeness guard.
+  // Include ALL MCP tools (not just direct/registered ones) so namespaced
+  // tools like "sentry_mcp__search_issues" from routed servers are recognised.
+  const toolSchemas = await getAvailableToolSchemas();
+  const knownToolNames = new Set(toolSchemas.map(t => t.name));
+  for (const t of getLocalMcpTools()) knownToolNames.add(t.name);
+  for (const t of getRemoteMcpTools()) knownToolNames.add(t.name);
+  const expectedSources = parseSkillSources(skill.content, knownToolNames);
+
+  // Pre-resolve MCP tool schemas: if a skill source references a namespaced MCP
+  // tool (e.g. "sentry_mcp__search_issues"), inject its schema into the system
+  // prompt so the LLM can call LOCAL_MCP_EXECUTE directly — skipping LOCAL_MCP_ROUTE.
+  let mcpToolHintsSection = "";
+  if (expectedSources.length > 0) {
+    const mcpToolHints = [];
+    const allLocalTools = getLocalMcpTools();
+    const allRemoteTools = getRemoteMcpTools();
+    for (const src of expectedSources) {
+      const localMatch = allLocalTools.find(t => t.name === src.tool && !t._isDirect);
+      const remoteMatch = !localMatch ? allRemoteTools.find(t => t.name === src.tool && !t._isDirect) : null;
+      const match = localMatch || remoteMatch;
+      if (match) {
+        const schemaStr = match.input_schema && Object.keys(match.input_schema.properties || {}).length > 0
+          ? JSON.stringify(match.input_schema) : "(no parameters)";
+        const metaTool = localMatch ? "LOCAL_MCP_EXECUTE" : "REMOTE_MCP_EXECUTE";
+        mcpToolHints.push(`- **${match.name}** (${match._serverName}): ${match.description || ""}\n  Schema: ${schemaStr}\n  → Call via ${metaTool}({ "tool_name": "${match.name}", "arguments": {...} }) — do NOT call ${localMatch ? "LOCAL" : "REMOTE"}_MCP_ROUTE first.`);
+      }
+    }
+    if (mcpToolHints.length > 0) {
+      mcpToolHintsSection = `\n\n## Pre-Resolved MCP Tools\nThese MCP tools are required by this skill. Their schemas are pre-loaded — call them directly via LOCAL_MCP_EXECUTE or REMOTE_MCP_EXECUTE without routing.\n\n${mcpToolHints.join("\n\n")}`;
+      debugLog(`[Chief flow] Pre-resolved ${mcpToolHints.length} MCP tool schema(s) for skill "${skill.title}"`);
+    }
+  }
+
   const systemPrompt = `${await buildDefaultSystemPrompt(skillPrompt)}
 
 ## Active Skill (Explicitly Requested)
 ${wrapUntrustedWithInjectionScan("skill_content", skill.content)}
-${systemPromptSuffix}`;
-
-  // Parse expected sources for gathering completeness guard
-  const toolSchemas = await getAvailableToolSchemas();
-  const knownToolNames = new Set(toolSchemas.map(t => t.name));
-  const expectedSources = parseSkillSources(skill.content, knownToolNames);
+${systemPromptSuffix}${mcpToolHintsSection}`;
 
   const gatheringGuard = expectedSources.length > 0 ? { expectedSources, source: "pre-loop" } : null;
   if (gatheringGuard) {
@@ -4068,6 +4097,11 @@ async function runAgentLoop(userMessage, options = {}) {
           }
         }
         gatheringCallNames.push(toolCall.name);
+        // For LOCAL/REMOTE_MCP_EXECUTE calls, also push the inner tool_name
+        // so that MCP-based skill sources (e.g. sentry_mcp__search_issues) get counted
+        if ((toolCall.name === "LOCAL_MCP_EXECUTE" || toolCall.name === "REMOTE_MCP_EXECUTE") && toolCall.arguments?.tool_name) {
+          gatheringCallNames.push(toolCall.arguments.tool_name);
+        }
         // For COMPOSIO_MULTI_EXECUTE_TOOL calls, also push individual tool slugs
         // so that Composio-based sources (e.g. GMAIL_FETCH_EMAILS) get counted
         if (toolCall.name === "COMPOSIO_MULTI_EXECUTE_TOOL") {
@@ -4274,10 +4308,13 @@ async function runAgentLoop(userMessage, options = {}) {
           debugLog("[Chief flow] Gathering guard skillText preview:", String(skillContent).slice(0, 500));
           // Use unfiltered tool schemas so category-gated tools (cos_cron_*, roam_bt_*, etc.)
           // are recognised as valid sources even when filtered out of the active tool set.
+          // Also include ALL MCP tools (routed servers) so namespaced names are recognised.
           const allToolSchemas = await getAvailableToolSchemas();
           const knownToolNames = new Set(
             (Array.isArray(allToolSchemas) ? allToolSchemas : []).map(t => t?.name).filter(Boolean)
           );
+          for (const t of getLocalMcpTools()) knownToolNames.add(t.name);
+          for (const t of getRemoteMcpTools()) knownToolNames.add(t.name);
           const expectedSources = parseSkillSources(skillContent, knownToolNames);
           debugLog("[Chief flow] Gathering guard parsed sources:", expectedSources.length, expectedSources);
           if (expectedSources.length > 0) {
