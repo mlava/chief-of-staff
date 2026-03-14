@@ -171,13 +171,17 @@ test("getRemoteMcpTools aggregates tools from multiple servers", () => {
   assert.equal(result.length, 2);
 });
 
-test("getRemoteMcpTools deduplicates tools with the same name", () => {
+test("getRemoteMcpTools namespaces colliding tool names from different servers", () => {
   resetState();
-  seedClient("https://a.example.com/mcp", "Server A", [makeRemoteTool("shared_tool")]);
-  seedClient("https://b.example.com/mcp", "Server B", [makeRemoteTool("shared_tool")]);
+  seedClient("https://a.example.com/mcp", "Server A", [makeRemoteTool("shared_tool", { serverName: "Server A" })]);
+  seedClient("https://b.example.com/mcp", "Server B", [makeRemoteTool("shared_tool", { serverName: "Server B" })]);
   const result = getRemoteMcpTools();
-  const names = result.map(t => t.name);
-  assert.equal(names.filter(n => n === "shared_tool").length, 1);
+  // Both tools present, namespaced
+  assert.equal(result.length, 2);
+  assert.equal(result[0].name, "server_a__shared_tool");
+  assert.equal(result[0]._originalName, "shared_tool");
+  assert.equal(result[1].name, "server_b__shared_tool");
+  assert.equal(result[1]._originalName, "shared_tool");
 });
 
 // ── buildRemoteMcpRouteTool ──────────────────────────────────────────────────
