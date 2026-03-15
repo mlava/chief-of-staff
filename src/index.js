@@ -247,6 +247,7 @@ const AUTH_POLL_TIMEOUT_MS = 180000;
 const MAX_AGENT_ITERATIONS = 20;
 const MAX_AGENT_ITERATIONS_SKILL = 16;    // Extended cap when gathering guard activates (skills need more iterations)
 const MAX_TOOL_CALLS_PER_ITERATION = 4;   // Caps tool calls from a single LLM response (prevents budget blowout)
+const MAX_TOOL_CALLS_PER_ITERATION_SKILL = 8; // Higher cap when gathering guard is active (skills need parallel data gathering)
 const MAX_CALLS_PER_TOOL_PER_LOOP = 10;   // Caps how many times the same tool can be called across the loop
 const MAX_TOOL_RESULT_CHARS = 12000;
 const MAX_CONVERSATION_TURNS = 12;
@@ -310,7 +311,14 @@ const SOURCE_TOOL_NAME_MAP = {
   "cos_calendar_read": "list-events",
   "cos_calendar_search": "search-events",
   // Direct MCP tools (mcp-fetch, etc.)
-  "fetch": "fetch"
+  "fetch": "fetch",
+  // Composio tool slug aliases — map skill shorthand → actual Composio slug
+  "wc_get_forecast": "WEATHERMAP_WEATHER",
+  "weather": "WEATHERMAP_WEATHER",
+  "gmail_fetch": "GMAIL_FETCH_EMAILS",
+  "gmail_fetch_emails": "GMAIL_FETCH_EMAILS",
+  "gmail_send": "GMAIL_SEND_EMAIL",
+  "gmail_send_email": "GMAIL_SEND_EMAIL"
 };
 // Write tools that trigger the gathering completeness guard
 const WRITE_TOOL_NAMES = new Set([
@@ -2964,6 +2972,25 @@ async function getAvailableToolSchemas() {
     }
   }
 
+  // Build direct tool schemas for each Composio slug in the registry.
+  // This makes slugs like WEATHERMAP_WEATHER and GMAIL_FETCH_EMAILS appear as
+  // first-class tools the LLM can call directly, instead of requiring it to
+  // know about the COMPOSIO_MULTI_EXECUTE_TOOL wrapper indirection.
+  // Execution is handled by the Composio slug interceptor in tool-execution.js.
+  const composioDirectTools = [];
+  for (const tk of Object.values(registry.toolkits || {})) {
+    for (const [slug, schema] of Object.entries(tk.tools || {})) {
+      if (!schema || !schema.input_schema) continue;
+      composioDirectTools.push({
+        name: slug,
+        description: (schema.description || `Composio tool: ${slug}`).slice(0, 200),
+        input_schema: schema.input_schema,
+        isMutating: false,
+        source: "composio-direct"
+      });
+    }
+  }
+
   const allLocalMcpTools = getLocalMcpTools();
   const directMcpTools = allLocalMcpTools.filter(t => t._isDirect);
   const hasMetaTargets = allLocalMcpTools.some(t => !t._isDirect);
@@ -2974,7 +3001,7 @@ async function getAvailableToolSchemas() {
   const hasRemoteMetaTargets = allRemoteMcpTools.some(t => !t._isDirect);
   const remoteMcpMetaTool = hasRemoteMetaTargets ? [buildRemoteMcpRouteTool(), buildRemoteMcpMetaTool()] : [];
 
-  const tools = [...adjustedMetaTools, ...getRoamNativeTools(), ...getBetterTasksTools(), ...getCosIntegrationTools(), ...getCronTools(), ...getExternalExtensionTools(), ...directMcpTools, ...localMcpMetaTool, ...directRemoteTools, ...remoteMcpMetaTool];
+  const tools = [...adjustedMetaTools, ...composioDirectTools, ...getRoamNativeTools(), ...getBetterTasksTools(), ...getCosIntegrationTools(), ...getCronTools(), ...getExternalExtensionTools(), ...directMcpTools, ...localMcpMetaTool, ...directRemoteTools, ...remoteMcpMetaTool];
   return tools;
 }
 
@@ -3391,16 +3418,78 @@ async function runDeterministicSkillInvocation(intent, options = {}) {
     systemPromptSuffix += `\n\nIMPORTANT: Do NOT call roam_create_blocks, roam_batch_write, or roam_get_daily_page. The system will write your output to the daily page automatically. Just produce the briefing content as structured markdown with headings (#### for sections) and FLAT bulleted lists (no indentation — every list item must start at column 0 with "- "). Indentation in your output maps directly to Roam block nesting, so indented items become children rather than siblings. Do NOT include any preamble, confirmation, or conversational text — output ONLY the structured briefing content.`;
   }
 
+  // Parse expected sources for gathering completeness guard.
+  // Include ALL MCP tools (not just direct/registered ones) so namespaced
+  // tools like "sentry_mcp__search_issues" from routed servers are recognised.
+  const toolSchemas = await getAvailableToolSchemas();
+  const knownToolNames = new Set(toolSchemas.map(t => t.name));
+  for (const t of getLocalMcpTools()) knownToolNames.add(t.name);
+  for (const t of getRemoteMcpTools()) knownToolNames.add(t.name);
+  // Include Composio installed tool slugs so gathering guard recognises them
+  // (e.g. GMAIL_FETCH_EMAILS, WEATHERMAP_WEATHER) — these are callable via
+  // COMPOSIO_MULTI_EXECUTE_TOOL or the slug interceptor.
+  const composioRegistry = getToolkitSchemaRegistry();
+  for (const tk of Object.values(composioRegistry.toolkits || {})) {
+    for (const slug of Object.keys(tk.tools || {})) knownToolNames.add(slug);
+  }
+  const expectedSources = parseSkillSources(skill.content, knownToolNames);
+
+  // Pre-resolve MCP tool schemas: if a skill source references a namespaced MCP
+  // tool (e.g. "sentry_mcp__search_issues"), inject its schema into the system
+  // prompt so the LLM can call LOCAL_MCP_EXECUTE directly — skipping LOCAL_MCP_ROUTE.
+  let mcpToolHintsSection = "";
+  if (expectedSources.length > 0) {
+    const mcpToolHints = [];
+    const allLocalTools = getLocalMcpTools();
+    const allRemoteTools = getRemoteMcpTools();
+    for (const src of expectedSources) {
+      const localMatch = allLocalTools.find(t => t.name === src.tool && !t._isDirect);
+      const remoteMatch = !localMatch ? allRemoteTools.find(t => t.name === src.tool && !t._isDirect) : null;
+      const match = localMatch || remoteMatch;
+      if (match) {
+        const schemaStr = match.input_schema && Object.keys(match.input_schema.properties || {}).length > 0
+          ? JSON.stringify(match.input_schema) : "(no parameters)";
+        const metaTool = localMatch ? "LOCAL_MCP_EXECUTE" : "REMOTE_MCP_EXECUTE";
+        mcpToolHints.push(`- **${match.name}** (${match._serverName}): ${match.description || ""}\n  Schema: ${schemaStr}\n  → Call via ${metaTool}({ "tool_name": "${match.name}", "arguments": {...} }) — do NOT call ${localMatch ? "LOCAL" : "REMOTE"}_MCP_ROUTE first.`);
+      }
+    }
+    // Also pre-resolve Composio tool slugs: if a skill source references a Composio
+    // slug (e.g. GMAIL_FETCH_EMAILS, WEATHERMAP_WEATHER), inject its schema so the
+    // LLM calls COMPOSIO_MULTI_EXECUTE_TOOL directly — no brave_web_search needed.
+    const composioHints = [];
+    for (const src of expectedSources) {
+      // Skip sources already matched as MCP tools
+      if (mcpToolHints.some(h => h.includes(`**${src.tool}**`))) continue;
+      const composioSchema = getToolSchema(src.tool);
+      if (composioSchema) {
+        const params = composioSchema.input_schema?.properties || {};
+        const paramList = Object.entries(params).slice(0, 8).map(([name, v]) => {
+          const type = v.type || "any";
+          const req = (composioSchema.input_schema?.required || []).includes(name) ? " (required)" : "";
+          return `    ${name}: ${type}${req}`;
+        }).join("\n");
+        composioHints.push(`- **${src.tool}**: ${(composioSchema.description || "").split(/[.\n]/)[0].slice(0, 80)}\n  Parameters:\n${paramList}\n  → Call via COMPOSIO_MULTI_EXECUTE_TOOL({ "tools": [{ "tool_slug": "${src.tool}", "arguments": {...} }] }) or call \`${src.tool}\` directly.`);
+      }
+    }
+
+    if (mcpToolHints.length > 0 || composioHints.length > 0) {
+      const sections = [];
+      if (mcpToolHints.length > 0) {
+        sections.push(`### MCP Tools\nCall directly via LOCAL_MCP_EXECUTE or REMOTE_MCP_EXECUTE without routing.\n\n${mcpToolHints.join("\n\n")}`);
+      }
+      if (composioHints.length > 0) {
+        sections.push(`### Composio Tools\nCall directly via COMPOSIO_MULTI_EXECUTE_TOOL (batch multiple in one call) or call the slug directly. Do NOT web-search for these tools.\n\n${composioHints.join("\n\n")}`);
+      }
+      mcpToolHintsSection = `\n\n## Pre-Resolved Tool Schemas\nThese tools are required by this skill. Their schemas are pre-loaded — call them directly.\n\n${sections.join("\n\n")}`;
+      debugLog(`[Chief flow] Pre-resolved ${mcpToolHints.length} MCP + ${composioHints.length} Composio tool schema(s) for skill "${skill.title}"`);
+    }
+  }
+
   const systemPrompt = `${await buildDefaultSystemPrompt(skillPrompt)}
 
 ## Active Skill (Explicitly Requested)
 ${wrapUntrustedWithInjectionScan("skill_content", skill.content)}
-${systemPromptSuffix}`;
-
-  // Parse expected sources for gathering completeness guard
-  const toolSchemas = await getAvailableToolSchemas();
-  const knownToolNames = new Set(toolSchemas.map(t => t.name));
-  const expectedSources = parseSkillSources(skill.content, knownToolNames);
+${systemPromptSuffix}${mcpToolHintsSection}`;
 
   const gatheringGuard = expectedSources.length > 0 ? { expectedSources, source: "pre-loop" } : null;
   if (gatheringGuard) {
@@ -4068,12 +4157,21 @@ async function runAgentLoop(userMessage, options = {}) {
           }
         }
         gatheringCallNames.push(toolCall.name);
+        // For LOCAL/REMOTE_MCP_EXECUTE calls, also push the inner tool_name
+        // so that MCP-based skill sources (e.g. sentry_mcp__search_issues) get counted
+        if ((toolCall.name === "LOCAL_MCP_EXECUTE" || toolCall.name === "REMOTE_MCP_EXECUTE") && toolCall.arguments?.tool_name) {
+          gatheringCallNames.push(toolCall.arguments.tool_name);
+        }
         // For COMPOSIO_MULTI_EXECUTE_TOOL calls, also push individual tool slugs
-        // so that Composio-based sources (e.g. GMAIL_FETCH_EMAILS) get counted
+        // so that Composio-based sources (e.g. GMAIL_FETCH_EMAILS) get counted.
+        // LLMs sometimes use "actions"/"action_slug" instead of "tools"/"tool_slug" —
+        // the normaliser fixes this before execution, but tracking runs on raw args.
         if (toolCall.name === "COMPOSIO_MULTI_EXECUTE_TOOL") {
-          const batchTools = Array.isArray(toolCall.arguments?.tools) ? toolCall.arguments.tools : [];
+          const batchTools = Array.isArray(toolCall.arguments?.tools) ? toolCall.arguments.tools
+            : Array.isArray(toolCall.arguments?.actions) ? toolCall.arguments.actions : [];
           for (const bt of batchTools) {
-            if (bt?.tool_slug) gatheringCallNames.push(bt.tool_slug);
+            const slug = bt?.tool_slug || bt?.action_slug;
+            if (slug) gatheringCallNames.push(slug);
           }
         }
 
@@ -4104,12 +4202,14 @@ async function runAgentLoop(userMessage, options = {}) {
           }
         }
 
-        // Per-iteration execution cap — prevents one LLM response from overwhelming the message budget
-        if (iterToolExecutionCount >= MAX_TOOL_CALLS_PER_ITERATION) {
-          debugLog("[Chief flow] Per-iteration tool cap reached:", toolCall.name, `(${iterToolExecutionCount}/${MAX_TOOL_CALLS_PER_ITERATION})`);
+        // Per-iteration execution cap — prevents one LLM response from overwhelming the message budget.
+        // Skills with a gathering guard get a higher cap so they can fetch all sources in parallel.
+        const effectiveIterCap = gatheringGuard ? MAX_TOOL_CALLS_PER_ITERATION_SKILL : MAX_TOOL_CALLS_PER_ITERATION;
+        if (iterToolExecutionCount >= effectiveIterCap) {
+          debugLog("[Chief flow] Per-iteration tool cap reached:", toolCall.name, `(${iterToolExecutionCount}/${effectiveIterCap})`);
           toolResults.push({
             toolCall,
-            result: { error: `Too many tool calls in one step (limit: ${MAX_TOOL_CALLS_PER_ITERATION}). Split your work across multiple steps.` }
+            result: { error: `Too many tool calls in one step (limit: ${effectiveIterCap}). Split your work across multiple steps.` }
           });
           trace.toolCalls.push({
             name: toolCall.name,
@@ -4274,10 +4374,18 @@ async function runAgentLoop(userMessage, options = {}) {
           debugLog("[Chief flow] Gathering guard skillText preview:", String(skillContent).slice(0, 500));
           // Use unfiltered tool schemas so category-gated tools (cos_cron_*, roam_bt_*, etc.)
           // are recognised as valid sources even when filtered out of the active tool set.
+          // Also include ALL MCP tools (routed servers) so namespaced names are recognised.
           const allToolSchemas = await getAvailableToolSchemas();
           const knownToolNames = new Set(
             (Array.isArray(allToolSchemas) ? allToolSchemas : []).map(t => t?.name).filter(Boolean)
           );
+          for (const t of getLocalMcpTools()) knownToolNames.add(t.name);
+          for (const t of getRemoteMcpTools()) knownToolNames.add(t.name);
+          // Include Composio installed tool slugs (mid-loop)
+          const midLoopRegistry = getToolkitSchemaRegistry();
+          for (const tk of Object.values(midLoopRegistry.toolkits || {})) {
+            for (const slug of Object.keys(tk.tools || {})) knownToolNames.add(slug);
+          }
           const expectedSources = parseSkillSources(skillContent, knownToolNames);
           debugLog("[Chief flow] Gathering guard parsed sources:", expectedSources.length, expectedSources);
           if (expectedSources.length > 0) {
@@ -5568,7 +5676,7 @@ async function bootstrapSkillsPage({ silent = false } = {}) {
       name: "Daily Briefing",
       steps: [
         "Trigger: user asks for a daily briefing or morning summary.",
-        "Approach: gather calendar events via the available calendar tools (Local MCP or Composio), email signals via the available email tools (Local MCP or Composio), urgent tasks via bt_search (due: today, status: TODO/DOING), overdue tasks via bt_search (due: overdue), project health via bt_get_projects (status: active, include_tasks: true), and weather via wc_get_forecast.",
+        "Approach: gather calendar events via list-events (Local MCP), email signals via GMAIL_FETCH_EMAILS (Composio), urgent tasks via bt_search (due: today, status: TODO/DOING), overdue tasks via bt_search (due: overdue), project health via bt_get_projects (status: active, include_tasks: true), and weather via WEATHERMAP_WEATHER (Composio). Do NOT call get-current-time — the current date is already in the system prompt. Batch Composio calls (WEATHERMAP_WEATHER + GMAIL_FETCH_EMAILS) into a single COMPOSIO_MULTI_EXECUTE_TOOL call when possible.",
         "Output: produce a structured briefing with sections: 'Calendar', 'Email', 'Tasks', 'Projects', 'Weather', and 'Top Priorities'. Write to today's daily page automatically. Update chat panel to confirm it has been written.",
         "Fallback: if any tool call fails, include section header with '⚠️ Could not retrieve [source] — [error reason]' rather than skipping silently.",
         "Tool availability: works best with Better Tasks + Google Calendar + Gmail. If BT unavailable, use roam_search_todos (status: TODO) for task context. If calendar/email unavailable, skip those sections and note what's missing. Never fabricate data from unavailable tools.",
@@ -8102,6 +8210,7 @@ function onload({ extensionAPI }) {
     getExtensionToolsRegistry,
     buildLocalMcpRouteTool,
     getToolSchema,
+    getToolkitSchemaRegistry,
     recordToolResponseShape,
     normaliseComposioMultiExecuteArgs,
     getComposioSafeMultiExecuteSlugAllowlist: () => COMPOSIO_SAFE_MULTI_EXECUTE_SLUG_ALLOWLIST,

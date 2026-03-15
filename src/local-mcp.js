@@ -110,17 +110,49 @@ export function getSuspendedServers() {
 
 // ── Tool discovery ──────────────────────────────────────────────────────────
 
+/**
+ * Normalise a server name into a safe tool-name prefix.
+ * "Sentry MCP" → "sentry_mcp", "github-mcp-server" → "github_mcp_server"
+ */
+function serverNameToPrefix(name) {
+  return (name || "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+}
+
 export function getLocalMcpTools() {
   if (localMcpToolsCache) return localMcpToolsCache;
 
   const allTools = [];
-  const seenNames = new Set();
+  // Map from tool name → index in allTools (for the first occurrence)
+  const nameToIndex = new Map();
+  // Track which original names have collisions (need namespacing)
+  const collisionNames = new Set();
+
   for (const [, entry] of localMcpClients) {
     if (!entry?.serverName || !Array.isArray(entry.tools)) continue;
     for (const tool of entry.tools) {
-      if (seenNames.has(tool.name)) continue;
-      seenNames.add(tool.name);
-      allTools.push(tool);
+      if (nameToIndex.has(tool.name)) {
+        // Collision detected — mark for namespacing
+        if (!collisionNames.has(tool.name)) {
+          // First collision: also namespace the original (already-added) tool
+          collisionNames.add(tool.name);
+          const origIdx = nameToIndex.get(tool.name);
+          const origTool = allTools[origIdx];
+          const origPrefix = serverNameToPrefix(origTool._serverName);
+          const namespacedOrigName = `${origPrefix}__${origTool.name}`;
+          origTool._originalName = origTool._originalName || origTool.name;
+          origTool.name = namespacedOrigName;
+          deps.debugLog(`[Local MCP] Tool name collision: "${tool.name}" — renamed first occurrence to "${namespacedOrigName}" (from ${origTool._serverName})`);
+        }
+        // Namespace the new colliding tool
+        const prefix = serverNameToPrefix(entry.serverName);
+        const namespacedName = `${prefix}__${tool.name}`;
+        const namespacedTool = { ...tool, name: namespacedName, _originalName: tool.name };
+        allTools.push(namespacedTool);
+        deps.debugLog(`[Local MCP] Tool name collision: "${tool.name}" — renamed to "${namespacedName}" (from ${entry.serverName})`);
+      } else {
+        nameToIndex.set(tool.name, allTools.length);
+        allTools.push(tool);
+      }
     }
   }
   localMcpToolsCache = allTools;
@@ -135,26 +167,74 @@ export function getLocalMcpTools() {
 export function buildLocalMcpMetaTool() {
   return {
     name: "LOCAL_MCP_EXECUTE",
-    description: "Execute a tool discovered via LOCAL_MCP_ROUTE. Provide the exact tool_name and its arguments. IMPORTANT: key/ID parameters (e.g. collection_key, item_key) take a single alphanumeric identifier like \"NADHRMVD\" — never a path like \"parent/child\" or a display name.",
+    description: "Execute a tool discovered via LOCAL_MCP_ROUTE. Provide the exact tool_name and its arguments. When multiple servers have tools with the same original name, use the namespaced form (e.g. \"sentry_mcp__search_issues\") or provide server_name to disambiguate. IMPORTANT: key/ID parameters (e.g. collection_key, item_key) take a single alphanumeric identifier like \"NADHRMVD\" — never a path like \"parent/child\" or a display name.",
     input_schema: {
       type: "object",
       properties: {
-        tool_name: { type: "string", description: "Exact tool name returned by LOCAL_MCP_ROUTE" },
+        tool_name: { type: "string", description: "Exact tool name returned by LOCAL_MCP_ROUTE (use namespaced name like \"sentry_mcp__search_issues\" when there are collisions)" },
+        server_name: { type: "string", description: "Optional: server name to disambiguate when multiple servers have the same tool name" },
         arguments: { type: "object", description: "Arguments for the tool" }
       },
       required: ["tool_name"]
     },
     execute: async (args) => {
       const innerName = args?.tool_name;
+      const serverFilter = args?.server_name;
       if (!innerName) return { error: "tool_name is required" };
       const cache = localMcpToolsCache || [];
-      let tool = cache.find(t => t.name === innerName);
-      // Case-insensitive fallback — LLMs often send differently-cased tool names
+
+      let tool;
+
+      // 1. If server_name is provided, find by original name within that server
+      if (serverFilter) {
+        const lowerServer = serverFilter.toLowerCase();
+        tool = cache.find(t =>
+          (t._serverName || "").toLowerCase() === lowerServer &&
+          (t.name === innerName || t._originalName === innerName)
+        );
+        // Case-insensitive fallback on tool name
+        if (!tool) {
+          const lowerName = innerName.toLowerCase();
+          tool = cache.find(t =>
+            (t._serverName || "").toLowerCase() === lowerServer &&
+            (t.name.toLowerCase() === lowerName || (t._originalName || "").toLowerCase() === lowerName)
+          );
+        }
+      }
+
+      // 2. Direct name match (handles both namespaced and non-colliding names)
+      if (!tool) {
+        tool = cache.find(t => t.name === innerName);
+      }
+
+      // 3. Match by _originalName (LLM used un-namespaced name for a colliding tool)
+      //    If multiple match, return an error asking for disambiguation
+      if (!tool) {
+        const origMatches = cache.filter(t => t._originalName === innerName);
+        if (origMatches.length === 1) {
+          tool = origMatches[0];
+        } else if (origMatches.length > 1) {
+          const options = origMatches.map(t => `"${t.name}" (${t._serverName})`).join(", ");
+          return { error: `Tool "${innerName}" exists on multiple servers. Use the namespaced name to disambiguate: ${options}` };
+        }
+      }
+
+      // 4. Case-insensitive fallback
       if (!tool) {
         const lower = innerName.toLowerCase();
         tool = cache.find(t => t.name.toLowerCase() === lower);
       }
-      if (!tool) return { error: `Tool "${innerName}" not found in local MCP servers` };
+
+      if (!tool) {
+        // Suggest closest namespaced match if the original name exists
+        const namespacedHints = cache
+          .filter(t => t._originalName && t._originalName === innerName)
+          .map(t => t.name);
+        if (namespacedHints.length > 0) {
+          return { error: `Tool "${innerName}" not found. Did you mean one of: ${namespacedHints.join(", ")}? Use LOCAL_MCP_ROUTE to discover available tools.` };
+        }
+        return { error: `Tool "${innerName}" not found. Use LOCAL_MCP_ROUTE to discover available tools.` };
+      }
       return tool.execute(args.arguments || {});
     }
   };
@@ -188,10 +268,18 @@ export function formatServerToolList(tools, serverName) {
     const schema = t.input_schema && Object.keys(t.input_schema.properties || {}).length > 0
       ? `\n  Input: ${JSON.stringify(t.input_schema)}`
       : "";
-    return `- **${t.name}**: ${t.description || "(no description)"}${schema}`;
+    // Show namespaced name clearly when a collision occurred
+    const nameLabel = t._originalName && t._originalName !== t.name
+      ? `${t.name}` + ` (originally "${t._originalName}" — renamed to avoid collision)`
+      : t.name;
+    return `- **${nameLabel}**: ${t.description || "(no description)"}${schema}`;
   });
+  const callHint = `Call these via LOCAL_MCP_EXECUTE({ "tool_name": "...", "arguments": {...} }).`;
+  const collisionHint = tools.some(t => t._originalName && t._originalName !== t.name)
+    ? ` Use the full namespaced tool name (e.g. "${tools.find(t => t._originalName && t._originalName !== t.name)?.name}") to avoid ambiguity.`
+    : "";
   return {
-    text: `## ${serverName} — ${tools.length} tools available\n\nCall these via LOCAL_MCP_EXECUTE({ "tool_name": "...", "arguments": {...} }).\n\n${lines.join("\n\n")}`
+    text: `## ${serverName} — ${tools.length} tools available\n\n${callHint}${collisionHint}\n\n${lines.join("\n\n")}`
   };
 }
 
@@ -620,6 +708,7 @@ export async function connectLocalMcp(port) {
                 }
                 const result = await execClient.callTool({ name: toolName, arguments: args });
                 const text = result?.content?.[0]?.text;
+                // deps.debugLog(`[Local MCP] Tool ${toolName} executed with args:`, args, "result:", result);
                 if (typeof text === "string") {
                   // If the result is a calendar error about bad IDs, retry with discovered IDs
                   if (isCalendarEventTool && /MCP error|calendar\(s\)\s*not\s*found/i.test(text)) {
