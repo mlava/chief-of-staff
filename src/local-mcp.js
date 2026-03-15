@@ -708,6 +708,7 @@ export async function connectLocalMcp(port) {
                 }
                 const result = await execClient.callTool({ name: toolName, arguments: args });
                 const text = result?.content?.[0]?.text;
+                // deps.debugLog(`[Local MCP] Tool ${toolName} executed with args:`, args, "result:", result);
                 if (typeof text === "string") {
                   // If the result is a calendar error about bad IDs, retry with discovered IDs
                   if (isCalendarEventTool && /MCP error|calendar\(s\)\s*not\s*found/i.test(text)) {
