@@ -277,6 +277,13 @@ export async function executeToolCall(toolName, args, { readOnly = false } = {})
   // Try the original name first — MCP tools use hyphens natively (e.g. "list-events").
   // Only fall back to underscore normalisation if the original name doesn't resolve.
   toolName = String(toolName || "");
+  // Strip "default_api__" prefix that Gemini sometimes hallucinate on Composio tools
+  // (e.g. "default_api__COMPOSIO_MULTI_EXECUTE_TOOL" → "COMPOSIO_MULTI_EXECUTE_TOOL")
+  if (/^default_api__/i.test(toolName)) {
+    const stripped = toolName.replace(/^default_api__/i, "");
+    deps.debugLog(`[Chief flow] Tool name normalised: "${toolName}" → "${stripped}" (stripped default_api__ prefix)`);
+    toolName = stripped;
+  }
   const hyphenNormalised = toolName.replace(/-/g, "_");
   if (hyphenNormalised !== toolName && !resolveToolByName(toolName)) {
     // Original name not found — try underscore-normalised form
@@ -358,13 +365,15 @@ export async function executeToolCall(toolName, args, { readOnly = false } = {})
   }
 
   // ── Composio slug interceptor ──────────────────────────────────────────────
-  // LLMs sometimes call Composio tool slugs (e.g. GMAIL_FETCH_EMAILS) directly
-  // instead of wrapping them in COMPOSIO_MULTI_EXECUTE_TOOL. Detect this and
-  // auto-rewrite so the call succeeds via the Composio MCP transport.
+  // Composio tool slugs (e.g. WEATHERMAP_WEATHER, GMAIL_FETCH_EMAILS) are registered
+  // as direct tools in the tool list (source: "composio-direct") so the LLM calls them
+  // naturally. This interceptor rewrites those calls to COMPOSIO_MULTI_EXECUTE_TOOL
+  // for actual execution via the Composio MCP transport.
   const preResolvedTool = resolveToolByName(toolName);
-  if (!preResolvedTool && upperToolName && /^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(upperToolName)) {
+  const isComposioDirect = preResolvedTool?.source === "composio-direct";
+  if (isComposioDirect || (!preResolvedTool && upperToolName && /^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(upperToolName))) {
     const matchedSchema = deps.getToolSchema(upperToolName);
-    if (matchedSchema) {
+    if (matchedSchema || isComposioDirect) {
       deps.debugLog(`[Chief flow] Composio slug interceptor: rewriting direct call "${toolName}" → COMPOSIO_MULTI_EXECUTE_TOOL`);
       const wrappedArgs = {
         tools: [{ tool_slug: upperToolName, arguments: effectiveArgs }]
@@ -465,6 +474,24 @@ export async function executeToolCall(toolName, args, { readOnly = false } = {})
     deps.setSessionUsedLocalMcp(true);
     const innerName = effectiveArgs?.tool_name;
     if (!innerName) return { error: "LOCAL_MCP_EXECUTE requires tool_name parameter. Call LOCAL_MCP_ROUTE first to discover available tools." };
+
+    // Intercept: LLM sometimes wraps COMPOSIO_MULTI_EXECUTE_TOOL (or a Composio slug)
+    // inside LOCAL_MCP_EXECUTE. Redirect to the correct Composio dispatch path.
+    const upperInner = innerName.toUpperCase();
+    if (upperInner === "COMPOSIO_MULTI_EXECUTE_TOOL") {
+      deps.debugLog(`[Chief flow] LOCAL_MCP_EXECUTE → Composio redirect: unwrapping ${innerName}`);
+      return executeToolCall("COMPOSIO_MULTI_EXECUTE_TOOL", effectiveArgs.arguments || {}, { readOnly });
+    }
+    // Normalise: collapse double underscores (LLMs invent "openweathermap__weather" for "WEATHERMAP_WEATHER")
+    const normInner = upperInner.replace(/__+/g, "_");
+    if (deps.getToolSchema(normInner)) {
+      deps.debugLog(`[Chief flow] LOCAL_MCP_EXECUTE → Composio slug redirect: "${innerName}" → "${normInner}"`);
+      return executeToolCall(normInner, effectiveArgs.arguments || {}, { readOnly });
+    }
+    if (normInner !== upperInner && deps.getToolSchema(upperInner)) {
+      deps.debugLog(`[Chief flow] LOCAL_MCP_EXECUTE → Composio slug redirect: ${innerName}`);
+      return executeToolCall(upperInner, effectiveArgs.arguments || {}, { readOnly });
+    }
     const cache = deps.getLocalMcpToolsCache() || [];
     // Exact match first, then try stripping server-name prefix (LLMs sometimes send "server.tool_name")
     let tool = cache.find(t => t.name === innerName);
@@ -477,7 +504,36 @@ export async function executeToolCall(toolName, args, { readOnly = false } = {})
       }
     }
     if (!tool) {
-      // Fuzzy match: find the closest tool name and suggest it in the error
+      // Before returning error, try fuzzy-matching against Composio registry.
+      // LLMs invent wrong prefixes (e.g. "openweathermap__weather" for "WEATHERMAP_WEATHER")
+      // or wrong action names (e.g. "gmail__list_messages" for "GMAIL_FETCH_EMAILS").
+      const composioRegistry = deps.getToolkitSchemaRegistry ? deps.getToolkitSchemaRegistry() : null;
+      if (composioRegistry) {
+        const allSlugs = [];
+        for (const tk of Object.values(composioRegistry.toolkits || {})) {
+          for (const slug of Object.keys(tk.tools || {})) allSlugs.push(slug);
+        }
+        if (allSlugs.length) {
+          const normParts = normInner.split("_").filter(Boolean);
+          // Suffix match: e.g. "WEATHER" from "OPENWEATHERMAP_WEATHER" → finds "WEATHERMAP_WEATHER"
+          const suffix = normParts.length > 1 ? normParts.slice(-1)[0] : "";
+          const prefix = normParts[0] || "";
+          const suffixMatches = suffix ? allSlugs.filter(s => s.endsWith("_" + suffix)) : [];
+          if (suffixMatches.length === 1) {
+            deps.debugLog(`[Chief flow] LOCAL_MCP_EXECUTE → Composio fuzzy (suffix "${suffix}"): "${innerName}" → "${suffixMatches[0]}"`);
+            return executeToolCall(suffixMatches[0], effectiveArgs.arguments || {}, { readOnly });
+          }
+          // Prefix match: e.g. "GMAIL" from "GMAIL_LIST_MESSAGES" → suggest actual GMAIL_* tools
+          const prefixMatches = allSlugs.filter(s => s.startsWith(prefix + "_"));
+          if (prefixMatches.length > 0) {
+            const available = prefixMatches.join(", ");
+            deps.debugLog(`[Chief flow] LOCAL_MCP_EXECUTE → Composio fuzzy (prefix "${prefix}"): "${innerName}" → suggestions: ${available}`);
+            return { error: `Tool "${innerName}" not found in local MCP servers. This looks like a Composio tool — available tools with prefix "${prefix}": ${available}. Call the correct slug directly or via COMPOSIO_MULTI_EXECUTE_TOOL.` };
+          }
+        }
+      }
+
+      // Fuzzy match against local MCP tools
       const allNames = cache.map(t => t.name);
       const closest = findClosestToolName(innerName, allNames);
       const suggestion = closest ? ` Did you mean "${closest}"?` : "";

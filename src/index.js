@@ -2972,6 +2972,25 @@ async function getAvailableToolSchemas() {
     }
   }
 
+  // Build direct tool schemas for each Composio slug in the registry.
+  // This makes slugs like WEATHERMAP_WEATHER and GMAIL_FETCH_EMAILS appear as
+  // first-class tools the LLM can call directly, instead of requiring it to
+  // know about the COMPOSIO_MULTI_EXECUTE_TOOL wrapper indirection.
+  // Execution is handled by the Composio slug interceptor in tool-execution.js.
+  const composioDirectTools = [];
+  for (const tk of Object.values(registry.toolkits || {})) {
+    for (const [slug, schema] of Object.entries(tk.tools || {})) {
+      if (!schema || !schema.input_schema) continue;
+      composioDirectTools.push({
+        name: slug,
+        description: (schema.description || `Composio tool: ${slug}`).slice(0, 200),
+        input_schema: schema.input_schema,
+        isMutating: false,
+        source: "composio-direct"
+      });
+    }
+  }
+
   const allLocalMcpTools = getLocalMcpTools();
   const directMcpTools = allLocalMcpTools.filter(t => t._isDirect);
   const hasMetaTargets = allLocalMcpTools.some(t => !t._isDirect);
@@ -2982,7 +3001,7 @@ async function getAvailableToolSchemas() {
   const hasRemoteMetaTargets = allRemoteMcpTools.some(t => !t._isDirect);
   const remoteMcpMetaTool = hasRemoteMetaTargets ? [buildRemoteMcpRouteTool(), buildRemoteMcpMetaTool()] : [];
 
-  const tools = [...adjustedMetaTools, ...getRoamNativeTools(), ...getBetterTasksTools(), ...getCosIntegrationTools(), ...getCronTools(), ...getExternalExtensionTools(), ...directMcpTools, ...localMcpMetaTool, ...directRemoteTools, ...remoteMcpMetaTool];
+  const tools = [...adjustedMetaTools, ...composioDirectTools, ...getRoamNativeTools(), ...getBetterTasksTools(), ...getCosIntegrationTools(), ...getCronTools(), ...getExternalExtensionTools(), ...directMcpTools, ...localMcpMetaTool, ...directRemoteTools, ...remoteMcpMetaTool];
   return tools;
 }
 
@@ -8191,6 +8210,7 @@ function onload({ extensionAPI }) {
     getExtensionToolsRegistry,
     buildLocalMcpRouteTool,
     getToolSchema,
+    getToolkitSchemaRegistry,
     recordToolResponseShape,
     normaliseComposioMultiExecuteArgs,
     getComposioSafeMultiExecuteSlugAllowlist: () => COMPOSIO_SAFE_MULTI_EXECUTE_SLUG_ALLOWLIST,

@@ -262,9 +262,29 @@ export function scrubPiiFromText(text, { skipEmail = false } = {}) {
 // email addresses in user messages should NOT be scrubbed because the LLM
 // needs them to populate recipient fields in tool calls.
 const EMAIL_TOOL_RE = /\b(GMAIL_|OUTLOOK_|email)/i;
+
+// Returns true when the active tool set includes calendar-related tools
+// (Google Calendar MCP, Composio calendar, etc.). When true, email addresses
+// should NOT be scrubbed because calendar IDs use email-format strings
+// (e.g. "user@gmail.com", "family123@group.calendar.google.com") that the
+// LLM must pass verbatim to list-events, create-event, etc.
+const CALENDAR_TOOL_RE = /\b(list-events|search-events|create-events?|delete-event|update-event|get-event|get-freebusy|list-calendars|respond-to-event|GOOGLE_CALENDAR_|COMPOSIO.*CALENDAR)/i;
+
 export function hasEmailTools(tools) {
   if (!Array.isArray(tools)) return false;
   return tools.some(t => EMAIL_TOOL_RE.test(t.name || ""));
+}
+
+export function hasCalendarTools(tools) {
+  if (!Array.isArray(tools)) return false;
+  return tools.some(t => CALENDAR_TOOL_RE.test(t.name || ""));
+}
+
+// Combined check: skip email scrubbing when email OR calendar tools are active.
+// Calendar tools use email-format IDs (e.g. "user@gmail.com",
+// "abc@group.calendar.google.com") that must be preserved.
+export function shouldSkipEmailScrub(tools) {
+  return hasEmailTools(tools) || hasCalendarTools(tools);
 }
 
 // Deep-scrubs PII from a messages array (both Anthropic and OpenAI formats).
@@ -282,7 +302,7 @@ export function hasEmailTools(tools) {
 // them as recipient addresses in compose/draft/send tool calls.
 export function scrubPiiFromMessages(messages, { tools } = {}) {
   if (!Array.isArray(messages)) return messages;
-  const skipEmail = hasEmailTools(tools);
+  const skipEmail = shouldSkipEmailScrub(tools);
   return messages.map(msg => {
     if (!msg) return msg;
 
@@ -323,8 +343,9 @@ export async function callAnthropic(apiKey, model, system, messages, tools, opti
   // Anthropic supports direct browser access via the anthropic-dangerous-direct-browser-access header,
   // so skip the CORS proxy (which returns 404 for api.anthropic.com).
   // DD-2: Defence-in-depth PII scrub — in case this function is ever called directly
+  const skipEmail = shouldSkipEmailScrub(tools);
   const scrubbed = isPiiScrubEnabled() ? scrubPiiFromMessages(messages, { tools }) : messages;
-  const safeSystem = deps.sanitiseLlmPayloadText(isPiiScrubEnabled() ? scrubPiiFromText(system) : system);
+  const safeSystem = deps.sanitiseLlmPayloadText(isPiiScrubEnabled() ? scrubPiiFromText(system, { skipEmail }) : system);
   const safeMessages = deps.sanitiseLlmMessages(scrubbed);
   return fetchLlmJsonWithRetry(
     LLM_API_ENDPOINTS.anthropic,
@@ -358,8 +379,9 @@ export async function callAnthropic(apiKey, model, system, messages, tools, opti
 
 export async function callOpenAI(apiKey, model, system, messages, tools, options = {}, provider = "openai") {
   // DD-2: Defence-in-depth PII scrub — in case this function is ever called directly
+  const skipEmail = shouldSkipEmailScrub(tools);
   const scrubbed = isPiiScrubEnabled() ? scrubPiiFromMessages(messages, { tools }) : messages;
-  const safeSystem = deps.sanitiseLlmPayloadText(isPiiScrubEnabled() ? scrubPiiFromText(system) : system);
+  const safeSystem = deps.sanitiseLlmPayloadText(isPiiScrubEnabled() ? scrubPiiFromText(system, { skipEmail }) : system);
   const safeMessages = deps.sanitiseLlmMessages(scrubbed);
   const maxTokens = options.maxOutputTokens || deps.STANDARD_MAX_OUTPUT_TOKENS;
   // OpenAI newer models (GPT-4.1, GPT-5) require max_completion_tokens; Gemini/Mistral use max_tokens
@@ -400,8 +422,9 @@ export async function callOpenAI(apiKey, model, system, messages, tools, options
  */
 export async function callOpenAIStreaming(apiKey, model, system, messages, tools, onTextChunk, options = {}, provider = "openai") {
   // DD-2: Scrub PII from content sent to external LLM APIs
-  // Pass tools so email addresses are preserved when email tools are active
-  const scrubbedSystem = isPiiScrubEnabled() ? scrubPiiFromText(system) : system;
+  // Pass tools so email addresses are preserved when email/calendar tools are active
+  const skipEmail = shouldSkipEmailScrub(tools);
+  const scrubbedSystem = isPiiScrubEnabled() ? scrubPiiFromText(system, { skipEmail }) : system;
   const scrubbedMessages = isPiiScrubEnabled() ? scrubPiiFromMessages(messages, { tools }) : messages;
   // DD-2b: Strip known LLM control strings before sending to provider
   const safeSystem = deps.sanitiseLlmPayloadText(scrubbedSystem);
@@ -592,8 +615,9 @@ export async function callOpenAIStreaming(apiKey, model, system, messages, tools
 
 export async function callLlm(provider, apiKey, model, system, messages, tools, options = {}) {
   // DD-2: Scrub PII from content sent to external LLM APIs
-  // Pass tools so email addresses are preserved when email tools are active
-  const scrubbedSystem = isPiiScrubEnabled() ? scrubPiiFromText(system) : system;
+  // Pass tools so email addresses are preserved when email/calendar tools are active
+  const skipEmail = shouldSkipEmailScrub(tools);
+  const scrubbedSystem = isPiiScrubEnabled() ? scrubPiiFromText(system, { skipEmail }) : system;
   const scrubbedMessages = isPiiScrubEnabled() ? scrubPiiFromMessages(messages, { tools }) : messages;
   if (isOpenAICompatible(provider)) return callOpenAI(apiKey, model, scrubbedSystem, scrubbedMessages, tools, options, provider);
   return callAnthropic(apiKey, model, scrubbedSystem, scrubbedMessages, tools, options);
