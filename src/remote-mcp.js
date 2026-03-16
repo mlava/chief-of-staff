@@ -887,7 +887,7 @@ export async function connectRemoteMcp(serverConfig) {
               fbTools = (fbResult?.tools || []).map(t => ({
                 ...t,
                 _serverName: fbServerName, _serverDescription: fbServerDescription,
-                _remoteUrl: urlKey, _isDirect: (fbResult?.tools || []).length <= REMOTE_MCP_DIRECT_TOOL_THRESHOLD,
+                _urlKey: urlKey, _isRemote: true, _isDirect: (fbResult?.tools || []).length <= REMOTE_MCP_DIRECT_TOOL_THRESHOLD,
                 execute: async (args) => {
                   const body = { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: t.name, arguments: args || {} } };
                   const resp = await fetch(fbProxied, {
