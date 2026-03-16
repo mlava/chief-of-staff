@@ -2106,6 +2106,98 @@ export function getRoamNativeTools() {
               : `${(blob.size / 1024 / 1024).toFixed(1)} MB`
         };
       }
+    },
+
+    // ── Web Fetch (Cloudflare Browser Rendering /markdown) ───────────────────
+    {
+      name: "roam_web_fetch",
+      isMutating: false,
+      description: "Fetch a web page and return its content as Markdown. Requires Cloudflare API token and account ID in settings. Use for reading articles, documentation, or any public URL.",
+      input_schema: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "The URL to fetch (must be http:// or https://)." }
+        },
+        required: ["url"]
+      },
+      execute: async ({ url } = {}) => {
+        // ── Validate URL ────────────────────────────────────────────────────
+        const rawUrl = String(url || "").trim();
+        if (!rawUrl) throw new Error("url is required");
+        let parsed;
+        try { parsed = new URL(rawUrl); } catch { throw new Error("Invalid URL format"); }
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+          throw new Error("Only http:// and https:// URLs are supported");
+        }
+
+        // ── Read Cloudflare credentials from settings ───────────────────────
+        const cfToken = deps.getCloudflareApiToken();
+        const cfAccountId = deps.getCloudflareAccountId();
+        if (!cfToken || !cfAccountId) {
+          throw new Error("Cloudflare API token and account ID must be configured in Chief of Staff settings (under Integration Settings) to use web fetch.");
+        }
+
+        const cfApiUrl = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(cfAccountId)}/browser-rendering/markdown`;
+        const proxy = deps.getCorsProxyUrl();
+        if (!proxy) {
+          throw new Error("Composio Proxy URL must be configured in Chief of Staff settings to use web fetch.");
+        }
+        const endpoint = `${proxy.replace(/\/+$/, "")}/${cfApiUrl}`;
+
+        deps.debugLog("[Web Fetch] Fetching:", rawUrl);
+
+        // ── Single request — synchronous markdown response ──────────────────
+        let markdown, respData;
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 60_000);
+          const resp = await fetch(endpoint, {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${cfToken}`,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ url: rawUrl }),
+            signal: controller.signal
+          });
+          clearTimeout(timeout);
+
+          if (resp.status === 429) {
+            throw new Error("Cloudflare rate limit reached. Wait a moment and try again.");
+          }
+          if (!resp.ok) {
+            const errBody = await resp.text().catch(() => "");
+            throw new Error(`Cloudflare API returned HTTP ${resp.status}: ${errBody.slice(0, 200)}`);
+          }
+
+          respData = await resp.json();
+          if (!respData.success) {
+            throw new Error(`Cloudflare API error: ${JSON.stringify(respData.errors || respData).slice(0, 200)}`);
+          }
+          markdown = respData.result || "";
+        } catch (err) {
+          if (err.name === "AbortError") throw new Error("Web fetch timed out (60s). The page may be too slow to load.");
+          throw err;
+        }
+
+        // ── Truncate if needed ──────────────────────────────────────────────
+        const MAX_CHARS = 12_000;
+        const fullLength = markdown.length;
+        let truncated = false;
+        if (fullLength > MAX_CHARS) {
+          markdown = markdown.slice(0, MAX_CHARS);
+          truncated = true;
+        }
+
+        deps.debugLog("[Web Fetch] Complete:", rawUrl, "length:", fullLength, "truncated:", truncated);
+
+        const result = { success: true, url: rawUrl, markdown };
+        if (truncated) {
+          result.truncated = true;
+          result.note = `Content truncated to ${MAX_CHARS} characters (full page: ${fullLength}).`;
+        }
+        return result;
+      }
     }
   ];
   return roamNativeToolsCache;

@@ -823,7 +823,8 @@ export function isExternalDataToolCall(toolName) {
     upper === "ROAM_BT_SEARCH_TASKS" ||
     upper === "ROAM_SEARCH_BLOCKS" ||
     upper === "LOCAL_MCP_ROUTE" ||
-    upper === "LOCAL_MCP_EXECUTE"
+    upper === "LOCAL_MCP_EXECUTE" ||
+    upper === "ROAM_WEB_FETCH"
   ) return true;
   // Direct-call local MCP tools (from servers ≤15 tools, exposed by original name)
   const localToolsCache = deps.getLocalMcpToolsCache();
