@@ -122,49 +122,24 @@ test("roam_web_fetch: rejects when no CORS proxy configured", async () => {
 
 // ── Successful Fetch Tests ───────────────────────────────────────────────────
 
-test("roam_web_fetch: successful single-page fetch", async () => {
+test("roam_web_fetch: successful single-page fetch via /markdown endpoint", async () => {
   const tool = getWebFetchTool();
   let postCalled = false;
-  let pollCount = 0;
 
   installFetchMock(async (url, opts) => {
-    if (opts?.method === "POST") {
-      postCalled = true;
-      // Verify POST body
-      const body = JSON.parse(opts.body);
-      assert.equal(body.url, "https://example.com/article");
-      assert.equal(body.limit, 1);
-      assert.equal(body.depth, 0);
-      assert.deepEqual(body.formats, ["markdown"]);
-      assert.equal(body.render, false);
-      // Verify auth header
-      assert.ok(opts.headers.Authorization.includes("test-cf-token"));
-      return {
-        ok: true,
-        json: async () => ({ success: true, result: "job-123" })
-      };
-    }
-    // GET poll
-    pollCount++;
-    if (pollCount < 2) {
-      return {
-        ok: true,
-        json: async () => ({ success: true, result: { status: "running", records: [] } })
-      };
-    }
+    postCalled = true;
+    // Verify URL goes through proxy to /markdown endpoint
+    assert.ok(String(url).startsWith("https://test-proxy.workers.dev/"), "Should use proxy");
+    assert.ok(String(url).includes("/browser-rendering/markdown"), "Should use /markdown endpoint");
+    // Verify POST body contains just the URL
+    const body = JSON.parse(opts.body);
+    assert.equal(body.url, "https://example.com/article");
+    // Verify auth header
+    assert.ok(opts.headers.Authorization.includes("test-cf-token"));
     return {
       ok: true,
-      json: async () => ({
-        success: true,
-        result: {
-          status: "completed",
-          records: [{
-            status: "completed",
-            markdown: "# Test Article\n\nThis is the content.",
-            metadata: { title: "Test Article", url: "https://example.com/article", status: 200 }
-          }]
-        }
-      })
+      status: 200,
+      json: async () => ({ success: true, result: "# Test Article\n\nThis is the content." })
     };
   });
 
@@ -173,45 +148,8 @@ test("roam_web_fetch: successful single-page fetch", async () => {
     assert.ok(postCalled, "POST should have been called");
     assert.equal(result.success, true);
     assert.equal(result.url, "https://example.com/article");
-    assert.equal(result.title, "Test Article");
     assert.equal(result.markdown, "# Test Article\n\nThis is the content.");
     assert.equal(result.truncated, undefined);
-  } finally {
-    uninstallFetchMock();
-  }
-});
-
-test("roam_web_fetch: passes render: true when specified", async () => {
-  const tool = getWebFetchTool();
-  let renderValue;
-
-  installFetchMock(async (url, opts) => {
-    if (opts?.method === "POST") {
-      renderValue = JSON.parse(opts.body).render;
-      return {
-        ok: true,
-        json: async () => ({ success: true, result: "job-456" })
-      };
-    }
-    return {
-      ok: true,
-      json: async () => ({
-        success: true,
-        result: {
-          status: "completed",
-          records: [{
-            status: "completed",
-            markdown: "# Rendered",
-            metadata: { title: "Rendered", url: "https://spa.example.com" }
-          }]
-        }
-      })
-    };
-  });
-
-  try {
-    await tool.execute({ url: "https://spa.example.com", render: true });
-    assert.equal(renderValue, true);
   } finally {
     uninstallFetchMock();
   }
@@ -223,25 +161,11 @@ test("roam_web_fetch: truncates large content", async () => {
   const tool = getWebFetchTool();
   const largeContent = "x".repeat(15000);
 
-  installFetchMock(async (url, opts) => {
-    if (opts?.method === "POST") {
-      return { ok: true, json: async () => ({ success: true, result: "job-big" }) };
-    }
-    return {
-      ok: true,
-      json: async () => ({
-        success: true,
-        result: {
-          status: "completed",
-          records: [{
-            status: "completed",
-            markdown: largeContent,
-            metadata: { title: "Big Page", url: "https://example.com/big" }
-          }]
-        }
-      })
-    };
-  });
+  installFetchMock(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ success: true, result: largeContent })
+  }));
 
   try {
     const result = await tool.execute({ url: "https://example.com/big" });
@@ -256,79 +180,33 @@ test("roam_web_fetch: truncates large content", async () => {
 
 // ── Error Status Tests ───────────────────────────────────────────────────────
 
-test("roam_web_fetch: handles robots.txt disallowed", async () => {
+test("roam_web_fetch: handles 429 rate limit", async () => {
   const tool = getWebFetchTool();
 
-  installFetchMock(async (url, opts) => {
-    if (opts?.method === "POST") {
-      return { ok: true, json: async () => ({ success: true, result: "job-blocked" }) };
-    }
-    return {
-      ok: true,
-      json: async () => ({
-        success: true,
-        result: {
-          status: "completed",
-          records: [{ status: "disallowed", markdown: "", metadata: {} }]
-        }
-      })
-    };
-  });
+  installFetchMock(async () => ({
+    ok: false,
+    status: 429,
+    text: async () => "Rate limited"
+  }));
 
   try {
     await assert.rejects(
-      () => tool.execute({ url: "https://blocked.example.com" }),
-      /robots\.txt/
+      () => tool.execute({ url: "https://example.com" }),
+      /rate limit/i
     );
   } finally {
     uninstallFetchMock();
   }
 });
 
-test("roam_web_fetch: handles errored record", async () => {
+test("roam_web_fetch: handles HTTP error", async () => {
   const tool = getWebFetchTool();
 
-  installFetchMock(async (url, opts) => {
-    if (opts?.method === "POST") {
-      return { ok: true, json: async () => ({ success: true, result: "job-err" }) };
-    }
-    return {
-      ok: true,
-      json: async () => ({
-        success: true,
-        result: {
-          status: "completed",
-          records: [{ status: "errored", markdown: "", metadata: {} }]
-        }
-      })
-    };
-  });
-
-  try {
-    await assert.rejects(
-      () => tool.execute({ url: "https://broken.example.com" }),
-      /failed to fetch this page/
-    );
-  } finally {
-    uninstallFetchMock();
-  }
-});
-
-// ── HTTP Error Tests ─────────────────────────────────────────────────────────
-
-test("roam_web_fetch: handles POST HTTP error", async () => {
-  const tool = getWebFetchTool();
-
-  installFetchMock(async (url, opts) => {
-    if (opts?.method === "POST") {
-      return {
-        ok: false,
-        status: 403,
-        text: async () => "Forbidden"
-      };
-    }
-    return { ok: true, json: async () => ({}) };
-  });
+  installFetchMock(async () => ({
+    ok: false,
+    status: 403,
+    text: async () => "Forbidden"
+  }));
 
   try {
     await assert.rejects(
@@ -340,18 +218,14 @@ test("roam_web_fetch: handles POST HTTP error", async () => {
   }
 });
 
-test("roam_web_fetch: handles POST returning unsuccessful", async () => {
+test("roam_web_fetch: handles unsuccessful API response", async () => {
   const tool = getWebFetchTool();
 
-  installFetchMock(async (url, opts) => {
-    if (opts?.method === "POST") {
-      return {
-        ok: true,
-        json: async () => ({ success: false, errors: [{ message: "Bad request" }] })
-      };
-    }
-    return { ok: true, json: async () => ({}) };
-  });
+  installFetchMock(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ success: false, errors: [{ message: "Bad request" }] })
+  }));
 
   try {
     await assert.rejects(
@@ -370,31 +244,16 @@ test("roam_web_fetch: tool metadata is correct", () => {
   assert.equal(tool.isMutating, false);
   assert.deepEqual(tool.input_schema.required, ["url"]);
   assert.ok(tool.input_schema.properties.url);
-  assert.ok(tool.input_schema.properties.render);
 });
 
 test("roam_web_fetch: accepts http:// URLs", async () => {
   const tool = getWebFetchTool();
 
-  installFetchMock(async (url, opts) => {
-    if (opts?.method === "POST") {
-      return { ok: true, json: async () => ({ success: true, result: "job-http" }) };
-    }
-    return {
-      ok: true,
-      json: async () => ({
-        success: true,
-        result: {
-          status: "completed",
-          records: [{
-            status: "completed",
-            markdown: "# HTTP Page",
-            metadata: { title: "HTTP Page", url: "http://example.com" }
-          }]
-        }
-      })
-    };
-  });
+  installFetchMock(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ success: true, result: "# HTTP Page" })
+  }));
 
   try {
     const result = await tool.execute({ url: "http://example.com" });
@@ -404,40 +263,20 @@ test("roam_web_fetch: accepts http:// URLs", async () => {
   }
 });
 
-// ── Poll Retry Tests ─────────────────────────────────────────────────────────
+// ── Network Error Tests ──────────────────────────────────────────────────────
 
-test("roam_web_fetch: retries on poll network errors", async () => {
+test("roam_web_fetch: handles network failure", async () => {
   const tool = getWebFetchTool();
-  let pollAttempts = 0;
 
-  installFetchMock(async (url, opts) => {
-    if (opts?.method === "POST") {
-      return { ok: true, json: async () => ({ success: true, result: "job-retry" }) };
-    }
-    pollAttempts++;
-    if (pollAttempts === 1) {
-      throw new Error("Network error");
-    }
-    return {
-      ok: true,
-      json: async () => ({
-        success: true,
-        result: {
-          status: "completed",
-          records: [{
-            status: "completed",
-            markdown: "# Recovered",
-            metadata: { title: "Recovered", url: "https://example.com" }
-          }]
-        }
-      })
-    };
+  installFetchMock(async () => {
+    throw new Error("Network error");
   });
 
   try {
-    const result = await tool.execute({ url: "https://example.com" });
-    assert.equal(result.success, true);
-    assert.ok(pollAttempts >= 2, "Should have retried after network error");
+    await assert.rejects(
+      () => tool.execute({ url: "https://example.com" }),
+      /Network error/
+    );
   } finally {
     uninstallFetchMock();
   }
