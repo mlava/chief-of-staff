@@ -17,6 +17,7 @@ https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 - **Composio tool connections** — connect Google Calendar, Gmail, Todoist, and hundreds of other apps via Composio MCP. The assistant discovers and executes tools on your behalf.
 - **Local MCP server integration** — connect to MCP servers running on your machine (e.g. Zotero, GitHub, custom tools). Servers with many tools use a two-stage routing system to keep token costs low. Connections retry automatically on failure.
 - **Remote MCP server integration** — connect to any remote MCP server on the internet via StreamableHTTP or SSE transport. Configure up to 10 remote servers with optional auth headers (including OAuth Bearer tokens). SSE connections that fail automatically fall back to StreamableHTTP. Tools are discovered at connection time and made available to the agent alongside local and Composio tools.
+- **Web page fetching** — fetch any public web page and return its content as Markdown using Cloudflare's Browser Rendering API. Useful for importing articles, documentation, or reference material into your graph. Requires a Cloudflare API token (free tier available).
 - **Scheduled jobs** — create recurring or one-shot scheduled tasks (cron expressions, intervals, or specific times) that the assistant runs automatically. Multi-tab safe via leader election.
 - **Self-healing tool calls** — if the LLM claims to have done something without actually doing it, the extension detects the hallucination, retries with the correct tool, and auto-escalates to a smarter model if needed. No user intervention required.
 - **Three model tiers with automatic routing** — most requests use a fast, cheap model. Append `/power` or `/ludicrous` to your message to force a more capable tier, or let the extension auto-escalate based on request complexity. See [How tiers work](#how-tiers-work) for details.
@@ -210,6 +211,29 @@ Services like Notion, Atlassian, and Sentry require OAuth Bearer tokens. Since R
 3. In Roam Depot settings, set the **Auth header name** to `Authorization` and the **Auth token** to `Bearer <your-token>`.
 
 > **CORS note:** Roam routes remote MCP requests through its built-in CORS proxy (`corsAnywhereProxyUrl`). If the proxy is unavailable, the extension falls back to a direct request. Some servers may require the proxy to be active for cross-origin access to work correctly.
+
+### 5. Web page fetching (optional)
+
+The `roam_web_fetch` tool lets the assistant fetch any public web page and return its content as Markdown. This is useful for importing articles, reading documentation, or pulling reference material into your graph. It uses Cloudflare's [Browser Rendering `/markdown` endpoint](https://developers.cloudflare.com/browser-rendering/rest-api/), which returns clean Markdown synchronously.
+
+**Requirements:**
+
+- A Cloudflare account (free tier includes Browser Rendering)
+- A Cloudflare API token with **Browser Rendering Edit** permission
+- Your CORS proxy (roam-mcp-proxy) must allow `api.cloudflare.com`
+
+**Setup:**
+
+1. Go to [dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens) and create a custom token with **Account > Browser Rendering > Edit** permission.
+2. Copy your **Account ID** from your Cloudflare dashboard overview page.
+3. In **Settings > Chief of Staff**, enable **Show Integration Settings** and fill in:
+   - **Cloudflare API Token** — the token you just created
+   - **Cloudflare Account ID** — your account ID
+4. Ensure your roam-mcp-proxy Cloudflare Worker allows requests to `api.cloudflare.com` (add it to the upstream allowlist if not already present).
+
+The tool is now available to the assistant. Ask it to "fetch https://example.com as markdown" or "summarise this article: https://...".
+
+> **Note:** Cloudflare's free tier has daily usage limits for Browser Rendering. If you hit a rate limit (HTTP 429), wait for the daily reset.
 
 ---
 
