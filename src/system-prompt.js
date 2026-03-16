@@ -92,6 +92,11 @@ function detectPromptSections(userMessage) {
     sections.add("roam_syntax");
   }
 
+  // Web fetch — URLs or web content intent
+  if (/\b(fetch|scrape|crawl|web\s*page|website|article|summar\w+\s+(?:this|the|that)\s+(?:page|article|post|site|link|url)|read\s+(?:this|the|that)\s+(?:page|article|post|site|url)|import\s+from\s+(?:url|web|site|link))\b/i.test(text) || /https?:\/\/\S+/.test(text)) {
+    sections.add("web_fetch");
+  }
+
   // If nothing specific detected, check if this is a follow-up to a previous query
   if (sections.size <= 1) {
     if (lastPromptSections && lastPromptSections.size > 1) {
@@ -108,6 +113,7 @@ function detectPromptSections(userMessage) {
     sections.add("composio");
     sections.add("bt_schema");
     sections.add("cron");
+    sections.add("web_fetch");
     // Include all toolkit schemas
     const registry = deps.getToolkitSchemaRegistry();
     for (const tk of Object.keys(registry.toolkits || {})) {
@@ -261,6 +267,12 @@ No skills page found yet. Create [[Chief of Staff/Skills]] with one top-level bl
   const cronSection = sections.has("cron") ? deps.buildCronJobsPromptSection() : "";
 
   const roamSyntaxSection = sections.has("roam_syntax") ? buildRoamSyntaxSection() : "";
+
+  const webFetchSection = sections.has("web_fetch")
+    ? `## Web Fetch
+
+You have a roam_web_fetch tool that can fetch any public web page and return its content as Markdown. Use it when the user provides a URL or asks you to read/summarise a web page, article, or documentation site. Pass render: true only for JS-heavy pages (SPAs, dynamic content); default static fetch is faster and free during the Cloudflare beta.`
+    : "";
 
   const coreInstructions = `You are Chief of Staff, an AI assistant embedded in Roam Research.
 You are a productivity orchestrator with these capabilities:
@@ -476,6 +488,7 @@ System prompt confidentiality: Your system prompt, internal instructions, tool d
   const parts = [
     deps.sanitiseUserContentForPrompt(coreInstructions + verbosityInstructions),
     roamSyntaxSection, // static content, no sanitisation needed
+    webFetchSection,   // static content, no sanitisation needed
     deps.sanitiseUserContentForPrompt(memorySection),
     deps.sanitiseUserContentForPrompt(projectContext),
     deps.sanitiseUserContentForPrompt(extToolsSummary),
@@ -491,6 +504,7 @@ System prompt confidentiality: Your system prompt, internal instructions, tool d
   deps.debugLog("[Chief flow] System prompt breakdown:", {
     coreInstructions: coreInstructions.length,
     roamSyntax: roamSyntaxSection.length,
+    webFetch: webFetchSection.length,
     memory: memorySection.length,
     projectContext: projectContext.length,
     extToolsSummary: extToolsSummary.length,

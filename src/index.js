@@ -239,7 +239,9 @@ const SETTINGS_KEYS = {
   dailySpendingCap: "daily-spending-cap",
   extensionToolsConfig: "extension-tools-config",
   auditLogRetentionDays: "audit-log-retention-days",
-  responseVerbosity: "response-verbosity"
+  responseVerbosity: "response-verbosity",
+  cloudflareApiToken: "cloudflare-api-token",
+  cloudflareAccountId: "cloudflare-account-id"
 };
 const TOOLS_SCHEMA_VERSION = 3;
 const AUTH_POLL_INTERVAL_MS = 9000;
@@ -462,7 +464,9 @@ const INBOX_READ_ONLY_TOOL_ALLOWLIST = new Set([
   "COMPOSIO_SEARCH_TOOLS",
   "COMPOSIO_GET_CONNECTED_ACCOUNTS",
   // Local MCP discovery (read-only)
-  "LOCAL_MCP_ROUTE"
+  "LOCAL_MCP_ROUTE",
+  // Web fetch (read-only)
+  "roam_web_fetch"
 ]);
 // ── Usage Tracking (stub) ── Extracted to src/usage-tracking.js ──────
 
@@ -3751,6 +3755,10 @@ async function runAgentLoop(userMessage, options = {}) {
     (m.role === "tool" && m.content && !m.content.includes('"error"')) ||
     (m.role === "user" && Array.isArray(m.content) && m.content.some(b => b.type === "tool_result" && !b.is_error))
   ));
+  // Track whether an external data tool was attempted (even if it errored).
+  // If the model called the right tool but it failed (e.g. rate limit, network error),
+  // the live data guard should let the model report that error rather than blocking.
+  let sawExternalDataToolAttempt = false;
   let liveDataGuardFired = false;
   let mcpFabricationGuardFired = false;
   let emptyResponseRetried = false;
@@ -4108,15 +4116,20 @@ async function runAgentLoop(userMessage, options = {}) {
         }
 
         if (requiresLiveDataTool && !sawSuccessfulExternalDataToolResult) {
-          if (!liveDataGuardFired) {
+          // If the model called the right tool but it errored (e.g. rate limit, network
+          // failure), let it report the error to the user rather than blocking the response.
+          if (sawExternalDataToolAttempt) {
+            debugLog("[Chief flow] runAgentLoop live-data guard skipped — external tool was attempted but errored (iteration " + (index + 1) + ").");
+          } else if (!liveDataGuardFired) {
             liveDataGuardFired = true;
             debugLog("[Chief flow] runAgentLoop live-data guard triggered — no external tool result (iteration " + (index + 1) + "), retrying with hint.");
             messages.push(formatAssistantMessage(provider, response));
             messages.push({ role: "user", content: "You responded without calling any data tool. That response was not shown to the user. You MUST call the appropriate tool (e.g. LOCAL_MCP_ROUTE, COMPOSIO_MULTI_EXECUTE_TOOL, roam_search) to fetch live data before answering." });
             continue;
+          } else {
+            finalText = "I can't answer that reliably without checking live tools first. Please retry, and I'll fetch the real data before responding.";
+            debugLog("[Chief flow] runAgentLoop text blocked: missing successful external tool result (after retry).");
           }
-          finalText = "I can't answer that reliably without checking live tools first. Please retry, and I'll fetch the real data before responding.";
-          debugLog("[Chief flow] runAgentLoop text blocked: missing successful external tool result (after retry).");
         }
         trace.finishedAt = Date.now();
         trace.resultTextPreview = String(finalText || "").slice(0, 400);
@@ -4302,6 +4315,11 @@ async function runAgentLoop(userMessage, options = {}) {
         }
 
         const isExternalToolCall = isExternalDataToolCall(toolCall.name);
+        // Track that the model attempted an external data tool (even if it errors).
+        // LOCAL_MCP_ROUTE is discovery-only — don't count it as a data attempt.
+        if (isExternalToolCall && toolCall.name !== "LOCAL_MCP_ROUTE") {
+          sawExternalDataToolAttempt = true;
+        }
         if (onToolCall) onToolCall(toolCall.name, toolCall.arguments);
         const startedAt = Date.now();
         let result;
@@ -4998,6 +5016,17 @@ async function connectComposio(extensionAPI, options = {}) {
           fetch: transportFetch,
           requestInit: {
             headers
+          },
+          // Suppress automatic SSE GET reconnection loop. The SDK opens a GET SSE
+          // listener after connect and reconnects every ~2s when the proxy closes
+          // the stream. Composio doesn't push server-initiated messages, so the
+          // listener is unnecessary. maxRetries: 0 lets the initial GET fire once
+          // (harmless) but prevents the infinite reconnection cycle.
+          reconnectionOptions: {
+            initialReconnectionDelay: 1000,
+            maxReconnectionDelay: 30000,
+            reconnectionDelayGrowFactor: 1.5,
+            maxRetries: 0
           }
         }
       );
@@ -8096,7 +8125,10 @@ function onload({ extensionAPI }) {
     debugLog,
     BLOCK_TREE_PULL_PATTERN,
     MAX_CREATE_BLOCKS_TOTAL,
-    SKILLS_PAGE_TITLE
+    SKILLS_PAGE_TITLE,
+    getCloudflareApiToken: () => getSettingString(extensionAPIRef, SETTINGS_KEYS.cloudflareApiToken, ""),
+    getCloudflareAccountId: () => getSettingString(extensionAPIRef, SETTINGS_KEYS.cloudflareAccountId, ""),
+    getCorsProxyUrl: () => getSettingString(extensionAPIRef, SETTINGS_KEYS.composioMcpUrl, "")
   });
   initComposioMcp({
     debugLog,

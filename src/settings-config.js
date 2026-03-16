@@ -259,6 +259,30 @@ export function buildSettingsConfig(extensionAPI) {
         }
       });
     }
+
+    // ── Web Fetch (Cloudflare Browser Rendering) ──────────────────────────────
+    settings.push(
+      {
+        id: deps.SETTINGS_KEYS.cloudflareApiToken,
+        name: "Cloudflare API Token",
+        description: "Optional. Enables the roam_web_fetch tool for fetching web pages as Markdown. Create a token with Browser Rendering Edit permission at dash.cloudflare.com/profile/api-tokens.",
+        action: {
+          type: "input",
+          value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.cloudflareApiToken, ""),
+          placeholder: "v1.0-..."
+        }
+      },
+      {
+        id: deps.SETTINGS_KEYS.cloudflareAccountId,
+        name: "Cloudflare Account ID",
+        description: "Required for web fetch. Found on your Cloudflare dashboard overview page.",
+        action: {
+          type: "input",
+          value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.cloudflareAccountId, ""),
+          placeholder: "abc123..."
+        }
+      }
+    );
   }
 
   // --- Tier 2.5 toggle: Extension Tools --------------------------------------
