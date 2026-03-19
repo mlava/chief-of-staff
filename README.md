@@ -20,7 +20,7 @@ https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 - **Web page fetching** — fetch any public web page and return its content as Markdown using Cloudflare's Browser Rendering API. Useful for importing articles, documentation, or reference material into your graph. Requires a Cloudflare API token (free tier available).
 - **Scheduled jobs** — create recurring or one-shot scheduled tasks (cron expressions, intervals, or specific times) that the assistant runs automatically. Multi-tab safe via leader election.
 - **Self-healing tool calls** — if the LLM claims to have done something without actually doing it, the extension detects the hallucination, retries with the correct tool, and auto-escalates to a smarter model if needed. No user intervention required.
-- **Three model tiers with automatic routing** — most requests use a fast, cheap model. Append `/power` or `/ludicrous` to your message to force a more capable tier, or let the extension auto-escalate based on request complexity. See [How tiers work](#how-tiers-work) for details.
+- **Three model tiers with automatic routing** — most requests use a fast, cheap model. Append `/power` or `/ludicrous` to your message to force a more capable tier, or let the extension auto-escalate based on request complexity. You can also force a specific provider with `/claude`, `/gemini`, `/openai`, or `/mistral`. See [How tiers work](#how-tiers-work) for details.
 - **Dry-run mode** — simulate any mutating operation before it executes. Useful for reviewing what the agent would do before committing.
 - **Guided onboarding** — first-run onboarding walks you through API key setup, memory page bootstrapping, and chat panel introduction.
 
@@ -66,7 +66,7 @@ Default models by tier:
 
 #### How tiers work
 
-By default, requests go to the **mini** tier — fast and cheap. You can force a higher tier by appending `/power` or `/ludicrous` to your message in the chat panel (e.g. "summarise my week /power"). The suffix is stripped before the message reaches the LLM.
+By default, requests go to the **mini** tier — fast and cheap. You can force a higher tier by appending `/power` or `/ludicrous` to your message in the chat panel (e.g. "summarise my week /power"). You can also force a specific provider by appending `/claude`, `/gemini`, `/openai`, or `/mistral` (e.g. "summarise my week /claude /power"). Provider and tier commands are orthogonal and can be combined freely. All command suffixes are stripped before the message reaches the LLM. When a provider is forced, automatic failover is disabled — if that provider fails, you see the error rather than a silent switch to another provider.
 
 Most of the time, you don't need to think about tiers. A composite scoring system evaluates each request across three dimensions — tool count requirements (40% weight), prompt complexity (35%), and conversation trajectory (25%) — and automatically escalates to the power tier when the score exceeds 0.45. Requests involving routed MCP servers (those with more than 15 tools) are always escalated to power regardless of score. Trivial follow-ups ("thanks", "ok") stay on mini even after complex sessions.
 
@@ -281,7 +281,7 @@ The floating chat panel (bottom-right corner by default) provides a persistent c
 - **Enter** to send, **Shift+Enter** for a new line.
 - **Arrow Up / Down** to cycle through previous messages (like a terminal).
 - `/clear` resets conversation history and context (same as the Clear button).
-- Suffix a message with `/power` or `/ludicrous` to use a more capable model for that request.
+- Suffix a message with `/power` or `/ludicrous` to use a more capable model for that request. Use `/claude`, `/gemini`, `/openai`, or `/mistral` to force a specific provider.
 - A **cost indicator** in the header shows cumulative API spend. Hover for a detailed breakdown: session cost with input/output token counts, today's cost with per-model splits (e.g. `3-flash $2.06`), and rolling 7-day and 30-day totals. Cost history is persisted across sessions. Use **Chief of Staff: Reset Token Usage Stats** to zero the session counters.
 - Each assistant response has a small pin icon at its bottom right. Click it to append the response to your daily note page.
 - **[[Page references]]** and **((block references))** in responses are clickable — click to navigate, Shift-click to open in the sidebar.
