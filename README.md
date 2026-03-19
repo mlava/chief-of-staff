@@ -89,6 +89,10 @@ If you do want external tool integrations, here is the dependency chain:
 
 In short: Cloudflare account → deploy proxy → Composio account → configure extension → connect tools. Each step is covered below.
 
+This helpful video overview was created by Maya at Roam Research for publication in *Commentarii Roamani* and shows the process in detail:
+
+https://www.youtube.com/watch?v=HD8-LOoJC84
+
 #### 2a. Deploy a CORS proxy
 
 Roam runs in the browser, so cross-origin requests to Composio's MCP endpoint are blocked by default. You need a small Cloudflare Worker that adds CORS headers. A ready-to-deploy worker lives in a separate repo: [`roam-mcp-proxy`](https://github.com/mlava/roam-mcp-proxy). It only accepts requests originating from `roamresearch.com` by default.
