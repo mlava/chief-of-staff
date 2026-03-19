@@ -91,7 +91,7 @@ In short: Cloudflare account → deploy proxy → Composio account → configure
 
 This helpful video overview was created by Maya at Roam Research for publication in *Commentarii Roamani* and shows the process in detail:
 
-https://www.youtube.com/watch?v=HD8-LOoJC84
+[![Composio MCP Setup Video](https://img.youtube.com/vi/HD8-LOoJC84/maxresdefault.jpg)](https://www.youtube.com/watch?v=HD8-LOoJC84)
 
 #### 2a. Deploy a CORS proxy
 
