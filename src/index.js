@@ -4559,8 +4559,8 @@ async function runAgentLoopWithFailover(userMessage, options = {}) {
   } else {
     primaryProvider = options.providerOverride;
   }
-  const fallbacks = extensionAPI
-    ? getFailoverProviders(primaryProvider, extensionAPI, baseTier) : [];
+  const fallbacks = (options.disableFailover || !extensionAPI)
+    ? [] : getFailoverProviders(primaryProvider, extensionAPI, baseTier);
 
   // First attempt: primary provider
   let lastError;
@@ -6012,6 +6012,7 @@ async function buildHelpSummary() {
   lines.push("- `/clear` — Clear chat history");
   lines.push("- `/power` — Use a more capable model for this message");
   lines.push("- `/ludicrous` — Use the most capable model");
+  lines.push("- `/claude`, `/gemini`, `/openai`, `/mistral` — Force a specific provider for this message");
   lines.push("");
   lines.push("**Tips:** Ask me to search your graph, manage tasks, send emails, create pages, run your daily briefing, or anything else. I'll use the right tools automatically.");
 
@@ -6924,11 +6925,24 @@ async function askChiefOfStaff(userMessage, options = {}) {
   // Detect /power and /ludicrous flags — can appear at start or end of message
   const ludicrousFlag = /(?:^|\s)\/ludicrous(?:\s|$)/i.test(rawPrompt);
   const powerFlag = /(?:^|\s)\/power(?:\s|$)/i.test(rawPrompt);
+
+  // Detect provider override — /claude, /gemini, /openai, /mistral
+  const PROVIDER_SLASH_MAP = { claude: "anthropic", gemini: "gemini", openai: "openai", mistral: "mistral" };
+  const providerSlashMatch = rawPrompt.match(/(?:^|\s)\/(claude|gemini|openai|mistral)(?:\s|$)/i);
+  const providerOverride = providerSlashMatch ? PROVIDER_SLASH_MAP[providerSlashMatch[1].toLowerCase()] : null;
+
   const prompt = rawPrompt
     .replace(/(?:^|\s)\/ludicrous(?:\s|$)/i, " ")
     .replace(/(?:^|\s)\/power(?:\s|$)/i, " ")
+    .replace(/(?:^|\s)\/(claude|gemini|openai|mistral)(?:\s|$)/gi, " ")
     .trim();
   if (!prompt) return;
+
+  // Validate API key for forced provider before any work
+  if (providerOverride && extensionAPIRef && !getApiKeyForProvider(extensionAPIRef, providerOverride)) {
+    showErrorToast("Provider override", `No API key configured for ${providerSlashMatch[1].toLowerCase()}. Check your settings.`);
+    return;
+  }
 
   // /ludicrous implies power mode; determine effective tier
   const effectiveTier = ludicrousFlag ? "ludicrous" : powerFlag ? "power" : "mini";
@@ -6941,6 +6955,7 @@ async function askChiefOfStaff(userMessage, options = {}) {
   debugLog("[Chief flow] askChiefOfStaff start:", {
     promptPreview: prompt.slice(0, 160),
     tier: effectiveTier,
+    providerOverride: providerOverride || "auto",
     offerWriteToDailyPage,
     suppressToasts
   });
@@ -7047,10 +7062,13 @@ async function askChiefOfStaff(userMessage, options = {}) {
   );
   if (ludicrousFlag) showInfoToastIfAllowed("Ludicrous Mode", "Using ludicrous model for this request.", suppressToasts);
   else if (powerFlag) showInfoToastIfAllowed("Power Mode", "Using power model for this request.", suppressToasts);
+  if (providerOverride) showInfoToastIfAllowed("Provider Override", `Using ${providerSlashMatch[1].toLowerCase()} for this request.`, suppressToasts);
   showInfoToastIfAllowed("Thinking...", prompt.slice(0, 72), suppressToasts);
   const result = await runAgentLoopWithFailover(prompt, {
     powerMode: finalPowerMode,
     tier: finalTier,
+    providerOverride: providerOverride || undefined,
+    disableFailover: !!providerOverride,
     readOnlyTools,
     onToolCall: (name) => {
       showInfoToastIfAllowed("Using tool", name, suppressToasts);
