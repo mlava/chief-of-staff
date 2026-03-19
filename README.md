@@ -89,7 +89,7 @@ If you do want external tool integrations, here is the dependency chain:
 
 In short: Cloudflare account → deploy proxy → Composio account → configure extension → connect tools. Each step is covered below.
 
-This helpful video overview was published in *Commentarii Roamani* and shows the process in detail:
+This helpful video overview was created by Maya at Roam Research for publication in *Commentarii Roamani* and shows the process in detail:
 
 https://www.youtube.com/watch?v=HD8-LOoJC84
 
