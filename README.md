@@ -1,5 +1,7 @@
 # Chief of Staff
 
+English | [简体中文](./README.zh-CN.md)
+
 An AI assistant embedded in Roam Research. Chief of Staff connects your Roam graph to large language models (Anthropic, OpenAI, Google Gemini, or Mistral) and to external tools via [Composio](https://composio.dev), letting you ask questions, search and manage tasks, and orchestrate actions across your connected apps — all without leaving Roam.
 
 https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
