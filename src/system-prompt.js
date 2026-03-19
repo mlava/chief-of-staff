@@ -326,6 +326,7 @@ For Roam:
 - Use roam_get_block_children to read a block and its full child tree by UID
 - Use roam_get_block_context to understand where a block sits — returns the block, its parent chain up to the page, and its siblings
 - Use roam_delete_block to delete blocks or Better Tasks by UID. The BT search results include the task UID — use that UID directly for deletion.
+- Additional Roam tools (todos, formatting, embeds, sidebar, navigation, history, page shortcuts) are available via ROAM_ROUTE — call it to discover tools, then use ROAM_EXECUTE.
 
 Summarise results clearly for the user.
 

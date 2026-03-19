@@ -204,6 +204,18 @@ export function isPotentiallyMutatingTool(toolName, args, toolObj) {
     return !readOnlyTokenPattern.test(innerName);
   }
 
+  // ROAM_EXECUTE: check inner tool's isMutating (fail-closed)
+  if (name === "ROAM_EXECUTE") {
+    const innerName = String(args?.tool_name || "");
+    if (!innerName) return true;
+    const allRoam = deps.getRoamNativeTools ? deps.getRoamNativeTools() : [];
+    const innerTool = allRoam.find(t => t.name === innerName);
+    if (innerTool && typeof innerTool.isMutating === "boolean") {
+      return innerTool.isMutating;
+    }
+    return true; // fail-closed for unknown tools
+  }
+
   // Priority 3: heuristic fallback for tools with isMutating undefined.
   // External extension tools now default to isMutating: true at source
   // (getExternalExtensionTools), so Priority 1 handles them. This block

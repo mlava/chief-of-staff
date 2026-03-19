@@ -18,7 +18,7 @@ import {
   refreshChatPanelElementRefs, addSaveToDailyPageButton, addModelIndicator,
   getToastTheme
 } from "./chat-panel.js";
-import { initRoamNativeTools, resetRoamNativeToolsCache, getRoamNativeTools } from "./roam-native-tools.js";
+import { initRoamNativeTools, resetRoamNativeToolsCache, getRoamNativeTools, buildRoamRouteTool, buildRoamExecuteTool } from "./roam-native-tools.js";
 import { buildSupergatewayScript } from "./supergateway-script.js";
 import {
   initComposioMcp,
@@ -465,6 +465,8 @@ const INBOX_READ_ONLY_TOOL_ALLOWLIST = new Set([
   "COMPOSIO_GET_CONNECTED_ACCOUNTS",
   // Local MCP discovery (read-only)
   "LOCAL_MCP_ROUTE",
+  // Roam extended tool discovery (read-only)
+  "ROAM_ROUTE",
   // Web fetch (read-only)
   "roam_web_fetch"
 ]);
@@ -2995,6 +2997,12 @@ async function getAvailableToolSchemas() {
     }
   }
 
+  // Roam native tools: core tools stay direct, rest go through ROAM_ROUTE/EXECUTE
+  const allRoamTools = getRoamNativeTools();
+  const directRoamTools = allRoamTools.filter(t => t._isDirect);
+  const hasRoamMetaTargets = allRoamTools.some(t => !t._isDirect);
+  const roamMetaTools = hasRoamMetaTargets ? [buildRoamRouteTool(), buildRoamExecuteTool()] : [];
+
   const allLocalMcpTools = getLocalMcpTools();
   const directMcpTools = allLocalMcpTools.filter(t => t._isDirect);
   const hasMetaTargets = allLocalMcpTools.some(t => !t._isDirect);
@@ -3005,7 +3013,7 @@ async function getAvailableToolSchemas() {
   const hasRemoteMetaTargets = allRemoteMcpTools.some(t => !t._isDirect);
   const remoteMcpMetaTool = hasRemoteMetaTargets ? [buildRemoteMcpRouteTool(), buildRemoteMcpMetaTool()] : [];
 
-  const tools = [...adjustedMetaTools, ...composioDirectTools, ...getRoamNativeTools(), ...getBetterTasksTools(), ...getCosIntegrationTools(), ...getCronTools(), ...getExternalExtensionTools(), ...directMcpTools, ...localMcpMetaTool, ...directRemoteTools, ...remoteMcpMetaTool];
+  const tools = [...adjustedMetaTools, ...composioDirectTools, ...directRoamTools, ...roamMetaTools, ...getBetterTasksTools(), ...getCosIntegrationTools(), ...getCronTools(), ...getExternalExtensionTools(), ...directMcpTools, ...localMcpMetaTool, ...directRemoteTools, ...remoteMcpMetaTool];
   return tools;
 }
 
@@ -4148,7 +4156,8 @@ async function runAgentLoop(userMessage, options = {}) {
         // Gathering completeness guard — intercept first write tool (pre-loop guards only;
         // mid-loop guards from cos_get_skill reads should not block writes since the LLM
         // may be editing/auditing a skill rather than executing it)
-        if (gatheringGuard && gatheringGuard.source !== "mid-loop" && !gatheringGuardFired && WRITE_TOOL_NAMES.has(toolCall.name)) {
+        const isWriteCall_gathering = WRITE_TOOL_NAMES.has(toolCall.name) || (toolCall.name === "ROAM_EXECUTE" && WRITE_TOOL_NAMES.has(toolCall.arguments?.tool_name));
+        if (gatheringGuard && gatheringGuard.source !== "mid-loop" && !gatheringGuardFired && isWriteCall_gathering) {
           const missed = checkGatheringCompleteness(gatheringGuard.expectedSources, gatheringCallNames);
           if (missed.length > 0) {
             gatheringGuardFired = true;
@@ -4170,9 +4179,9 @@ async function runAgentLoop(userMessage, options = {}) {
           }
         }
         gatheringCallNames.push(toolCall.name);
-        // For LOCAL/REMOTE_MCP_EXECUTE calls, also push the inner tool_name
-        // so that MCP-based skill sources (e.g. sentry_mcp__search_issues) get counted
-        if ((toolCall.name === "LOCAL_MCP_EXECUTE" || toolCall.name === "REMOTE_MCP_EXECUTE") && toolCall.arguments?.tool_name) {
+        // For LOCAL/REMOTE_MCP_EXECUTE and ROAM_EXECUTE calls, also push the inner tool_name
+        // so that MCP-based and routed Roam skill sources get counted
+        if ((toolCall.name === "LOCAL_MCP_EXECUTE" || toolCall.name === "REMOTE_MCP_EXECUTE" || toolCall.name === "ROAM_EXECUTE") && toolCall.arguments?.tool_name) {
           gatheringCallNames.push(toolCall.arguments.tool_name);
         }
         // For COMPOSIO_MULTI_EXECUTE_TOOL calls, also push individual tool slugs
@@ -4188,7 +4197,8 @@ async function runAgentLoop(userMessage, options = {}) {
           }
         }
 
-        if (carryoverWriteReplayGuard?.active && WRITE_TOOL_NAMES.has(toolCall.name)) {
+        const isWriteCall_replay = WRITE_TOOL_NAMES.has(toolCall.name) || (toolCall.name === "ROAM_EXECUTE" && WRITE_TOOL_NAMES.has(toolCall.arguments?.tool_name));
+        if (carryoverWriteReplayGuard?.active && isWriteCall_replay) {
           const fp = (() => {
             try { return `${toolCall.name}::${JSON.stringify(toolCall.arguments || {})}`; } catch { return `${toolCall.name}::{}`; }
           })();
@@ -4455,7 +4465,8 @@ async function runAgentLoop(userMessage, options = {}) {
         };
       }
       const lastToolResult = toolResults[toolResults.length - 1];
-      if (toolResults.length === 1 && WRITE_TOOL_NAMES.has(lastToolResult?.toolCall?.name) && !lastToolResult?.result?.error) {
+      const isWriteCall_last = WRITE_TOOL_NAMES.has(lastToolResult?.toolCall?.name) || (lastToolResult?.toolCall?.name === "ROAM_EXECUTE" && WRITE_TOOL_NAMES.has(lastToolResult?.toolCall?.arguments?.tool_name));
+      if (toolResults.length === 1 && isWriteCall_last && !lastToolResult?.result?.error) {
         const toolName = lastToolResult.toolCall.name;
         const resultData = lastToolResult.result;
         let finalText;

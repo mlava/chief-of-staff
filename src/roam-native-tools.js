@@ -1,8 +1,30 @@
-// roam-native-tools.js — 44 Roam tool definitions, extracted from index.js
+// roam-native-tools.js — 48 Roam tool definitions, extracted from index.js
 // All external dependencies are injected via initRoamNativeTools().
+// Tools are split into "core" (always in the LLM tool list) and "routed"
+// (discovered via ROAM_ROUTE, executed via ROAM_EXECUTE) to stay under
+// provider tool-count limits (e.g. OpenAI's 128-tool cap).
 
 let deps = {};
 let roamNativeToolsCache = null;
+
+// Core tools stay as direct, first-class tools in every LLM call.
+// Everything else is behind ROAM_ROUTE → ROAM_EXECUTE two-stage routing.
+export const ROAM_CORE_TOOLS = new Set([
+  "roam_search", "roam_create_block", "roam_update_block",
+  "roam_get_page", "roam_get_block_children", "roam_get_daily_page",
+  "roam_open_page", "roam_delete_block", "roam_create_blocks", "roam_web_fetch"
+]);
+
+const ROAM_TOOL_CATEGORIES = {
+  "Search & Query": ["roam_find_todos", "roam_search_todos", "roam_get_block_context", "roam_get_page_metadata", "roam_get_recent_changes", "roam_get_focused_block"],
+  "References": ["roam_get_backlinks", "roam_link_suggestions", "roam_link_mention"],
+  "Write & Modify": ["roam_batch_write", "roam_create_todo", "roam_modify_todo", "roam_move_block"],
+  "Sidebar": ["roam_open_right_sidebar", "roam_close_right_sidebar", "roam_open_left_sidebar", "roam_close_left_sidebar", "roam_get_right_sidebar_windows", "roam_add_right_sidebar_window", "roam_remove_right_sidebar_window"],
+  "Navigation": ["roam_open_depot", "roam_open_graph_overview", "roam_open_all_pages", "roam_open_settings", "roam_open_graph_view", "roam_open_help"],
+  "Content & Formatting": ["roam_add_blockquote", "roam_remove_blockquote", "roam_add_callout", "roam_remove_callout", "roam_mermaid_embed", "roam_excalidraw_embed", "roam_upload_file"],
+  "Page Management": ["roam_add_page_shortcut", "roam_remove_page_shortcut", "roam_share_link"],
+  "History": ["roam_undo", "roam_redo"]
+};
 
 export function initRoamNativeTools(injected) {
   deps = injected;
@@ -2200,5 +2222,115 @@ export function getRoamNativeTools() {
       }
     }
   ];
+
+  // Stamp _isDirect metadata for two-stage routing
+  for (const t of roamNativeToolsCache) {
+    t._isDirect = ROAM_CORE_TOOLS.has(t.name);
+  }
+
   return roamNativeToolsCache;
+}
+
+// ── Two-stage routing: ROAM_ROUTE + ROAM_EXECUTE ─────────────────────────────
+
+/**
+ * Build the ROAM_ROUTE discovery tool. Returns all routed (non-core) Roam
+ * tools grouped by category, with descriptions and input schemas.
+ * Mirrors buildLocalMcpRouteTool() in local-mcp.js.
+ */
+export function buildRoamRouteTool() {
+  const categoryNames = Object.keys(ROAM_TOOL_CATEGORIES);
+  const categorySummary = categoryNames.join(", ").toLowerCase();
+
+  return {
+    name: "ROAM_ROUTE",
+    isMutating: false,
+    description: `Discover additional Roam Research tools beyond the core set. Categories: ${categorySummary}. Call this FIRST, then use ROAM_EXECUTE with the specific tool.`,
+    input_schema: {
+      type: "object",
+      properties: {
+        category: { type: "string", description: `Optional filter. Categories: ${categoryNames.join(", ")}` }
+      },
+      required: []
+    },
+    execute: async (args) => {
+      const cache = roamNativeToolsCache || [];
+      let routed = cache.filter(t => !t._isDirect);
+
+      if (args?.category) {
+        const catLower = args.category.toLowerCase();
+        const matchedCat = Object.keys(ROAM_TOOL_CATEGORIES).find(
+          c => c.toLowerCase() === catLower || c.toLowerCase().includes(catLower)
+        );
+        if (matchedCat) {
+          const catTools = new Set(ROAM_TOOL_CATEGORIES[matchedCat]);
+          routed = routed.filter(t => catTools.has(t.name));
+        }
+      }
+
+      if (routed.length === 0) {
+        return { text: "No matching Roam tools found." };
+      }
+
+      // Group by category, most useful first
+      const sections = [];
+      for (const [cat, names] of Object.entries(ROAM_TOOL_CATEGORIES)) {
+        const catTools = routed.filter(t => names.includes(t.name));
+        if (catTools.length === 0) continue;
+        const lines = catTools.map(t => {
+          const schema = t.input_schema && Object.keys(t.input_schema.properties || {}).length > 0
+            ? `\n  Input: ${JSON.stringify(t.input_schema)}` : "";
+          return `- **${t.name}**: ${t.description || "(no description)"}${schema}`;
+        });
+        sections.push(`### ${cat}\n${lines.join("\n\n")}`);
+      }
+
+      return {
+        text: `## Roam Extended Tools — ${routed.length} available\n\nCall via ROAM_EXECUTE({ "tool_name": "...", "arguments": {...} }).\n\n${sections.join("\n\n")}`
+      };
+    }
+  };
+}
+
+/**
+ * Build the ROAM_EXECUTE dispatch tool. Executes a routed Roam tool by name.
+ * Mirrors buildLocalMcpMetaTool() in local-mcp.js.
+ */
+export function buildRoamExecuteTool() {
+  return {
+    name: "ROAM_EXECUTE",
+    description: "Execute a Roam tool discovered via ROAM_ROUTE. Provide the exact tool_name and its arguments.",
+    input_schema: {
+      type: "object",
+      properties: {
+        tool_name: { type: "string", description: "Exact Roam tool name from ROAM_ROUTE" },
+        arguments: { type: "object", description: "Arguments for the tool" }
+      },
+      required: ["tool_name"]
+    },
+    execute: async (args) => {
+      const innerName = args?.tool_name;
+      if (!innerName) return { error: "tool_name is required" };
+
+      const cache = roamNativeToolsCache || [];
+      let tool = cache.find(t => t.name === innerName);
+
+      // Case-insensitive fallback
+      if (!tool) {
+        const lower = innerName.toLowerCase();
+        tool = cache.find(t => t.name.toLowerCase() === lower);
+      }
+
+      if (!tool) {
+        return { error: `Roam tool "${innerName}" not found. Use ROAM_ROUTE to discover available tools.` };
+      }
+
+      // Guide LLM to call direct tools directly
+      if (tool._isDirect) {
+        return { error: `"${innerName}" is a DIRECT tool. Call it directly with its arguments — do NOT use ROAM_EXECUTE for it.` };
+      }
+
+      return tool.execute(args.arguments || {});
+    }
+  };
 }
