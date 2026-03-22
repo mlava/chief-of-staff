@@ -319,8 +319,13 @@ export function buildSettingsConfig(extensionAPI) {
         const label = String(ext.name || extKey).trim();
         const toolCount = ext.tools.filter(t => t?.name && typeof t.execute === "function").length;
         const isEnabled = !!extToolsConfig[extKey]?.enabled;
+        // Sync Roam's auto-persisted switch value with our JSON config so the
+        // toggle renders correctly. Without this, Roam may display its own stored
+        // value (which defaults to false for new switches) instead of our config.
+        const switchId = `ext-tool-${extKey}`;
+        extensionAPI.settings.set(switchId, isEnabled);
         settings.push({
-          id: `ext-tool-${extKey}`,
+          id: switchId,
           name: label,
           description: `${toolCount} tool${toolCount !== 1 ? "s" : ""}: ${ext.tools.filter(t => t?.name).map(t => t.name).join(", ")}`,
           action: {
@@ -420,7 +425,7 @@ export function buildSettingsConfig(extensionAPI) {
           value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.auditLogRetentionDays, ""),
           placeholder: "e.g. 14"
         }
-      }/*,
+      },
       {
         id: deps.SETTINGS_KEYS.evalEnabled,
         name: "Post-Run Evaluation",
@@ -449,7 +454,7 @@ export function buildSettingsConfig(extensionAPI) {
           value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.evalReviewThreshold, "2"),
           placeholder: "2"
         }
-      }*/
+      }
     );
   }
 
