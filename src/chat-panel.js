@@ -815,6 +815,23 @@ async function handleChatPanelSend() {
     return;
   }
 
+  if (/^\/compact$/i.test(message)) {
+    chatPanelInput.value = "";
+    removeEmptyStateHint();
+    if (deps.forceCompact) {
+      const result = deps.forceCompact();
+      if (result) {
+        appendChatPanelMessage("assistant", `Compacted ${result.compactedCount} earlier turns into a summary. ${result.remainingTurns} turns remaining.\n\n${result.summary}`);
+        if (deps.flushPersistConversationContext) deps.flushPersistConversationContext();
+      } else {
+        appendChatPanelMessage("assistant", "Nothing to compact — conversation is already compact or too short.");
+      }
+    } else {
+      appendChatPanelMessage("assistant", "Compaction is not available.");
+    }
+    return;
+  }
+
   if (/^\/help$/i.test(message)) {
     chatPanelInput.value = "";
     removeEmptyStateHint();
