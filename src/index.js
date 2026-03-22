@@ -547,17 +547,16 @@ const hasBetterTasksAPI = () => Boolean(getBetterTasksExtension());
 
 // --- Extension tools allowlist helpers ---
 // Persists a JSON map of { extKey: { enabled: boolean } } in Roam Depot settings.
-// On first access (empty/missing key), seeds from current registry with all enabled
-// (migration for existing users). New extensions discovered later default to disabled.
+// All extensions default to disabled — users opt in via the Extension Tools toggles.
 function getExtToolsConfig(extensionAPI = extensionAPIRef) {
   const raw = extensionAPI?.settings?.get?.(SETTINGS_KEYS.extensionToolsConfig);
   if (!raw) {
-    // Migration: seed config from current registry, all enabled
+    // Seed config from current registry, all disabled by default
     const registry = getExtensionToolsRegistry();
     const config = {};
     for (const [extKey, ext] of Object.entries(registry)) {
       if (ext && Array.isArray(ext.tools) && ext.tools.length) {
-        config[extKey] = { enabled: true };
+        config[extKey] = { enabled: false };
       }
     }
     if (Object.keys(config).length) {
@@ -3349,15 +3348,16 @@ function parseComposioInstallIntent(userMessage) {
   if (/\b(how\s+(do|can|to|does|should|would)|what\s+(is|are|does)|where\s+(is|are|do))\b/i.test(lowered)) return null;
 
   const hasComposioContext = /(composio|tool|integration|service)\b/i.test(lowered);
-  // "add" is far too ambiguous on its own — it matches "add a task", "add event to calendar", etc.
-  // Only treat "add" as a Composio install intent when it has explicit tool/integration context.
-  // The other verbs (install, connect, enable, set up) are unambiguous enough to stand alone.
+  // "install" is the only verb unambiguous enough to stand alone — nobody says "install" in
+  // casual Roam conversation unless they mean a tool. "add", "connect", "enable", and "set up"
+  // are everyday verbs ("connect my notes", "enable focus mode", "set up a weekly review") and
+  // need explicit tool/integration context to avoid false Composio install triggers.
   const verb = lowered.match(/\b(install|add|connect|enable|set\s*up)\b/i)?.[1]?.toLowerCase() || "";
-  const isAmbiguousVerb = verb === "add";
+  const isAmbiguousVerb = verb !== "install";
   if (!hasComposioContext && isAmbiguousVerb) return null;
-  // For non-ambiguous verbs, still require the verb + word pattern
+  // For "install", still require the verb + word pattern (reject bare "install" with no object)
   if (!hasComposioContext && !isAmbiguousVerb &&
-    !/\b(?:install|connect|enable|set\s*up)\s+[a-z]/i.test(lowered)) return null;
+    !/\binstall\s+[a-z]/i.test(lowered)) return null;
 
   // Try quoted slug first
   const quotedMatch = text.match(/"([^"]+)"/);
