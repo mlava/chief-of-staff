@@ -381,7 +381,7 @@ All of the above work in both the chat panel and the command palette prompt. The
 
 ## Ask about Roam, extensions, or Chief of Staff itself
 
-If you connect a remote MCP server that serves documentation — such as extension READMEs, Roam help articles, or setup guides — Chief of Staff can answer questions about Roam Research and your installed extensions directly in the chat panel. No browsing, no searching through docs. Just ask.
+Chief of Staff connects to a remote MCP server that serves documentation — such as extension READMEs, Roam help articles, or setup guides — and can answer questions about Roam Research and many of your installed extensions directly in the chat panel. No browsing, no searching through docs. Just ask.
 
 **Examples:**
 
@@ -393,7 +393,7 @@ If you connect a remote MCP server that serves documentation — such as extensi
 
 This works because COS treats the documentation server like any other remote MCP tool — it routes the question to the server, retrieves the relevant content, and synthesises a response grounded in the actual docs rather than the LLM's training data. Responses include Roam-specific syntax examples and configuration steps that are accurate to the current version.
 
-**Setup:** Connect a remote MCP server that indexes your documentation (see [Connect remote MCP servers](#4-connect-remote-mcp-servers-optional) for configuration). Once connected, questions about covered topics are answered automatically — no special syntax or commands needed.
+**Setup:** None needed. As long as you have an API key set in settings for one of the LLM providers, this feature is available.
 
 ---
 
