@@ -311,7 +311,14 @@ function ensureTodayUsageStats() {
   if (!usageStats.days[key]) {
     usageStats.days[key] = {
       agentRuns: 0, toolCalls: {}, approvalsGranted: 0, approvalsDenied: 0,
-      injectionWarnings: 0, claimedActionFires: 0, tierEscalations: 0, memoryWriteBlocks: 0
+      injectionWarnings: 0, claimedActionFires: 0, tierEscalations: 0, memoryWriteBlocks: 0,
+      evalRuns: 0, evalAvgScore: 0,
+      guardOutcomes: {
+        claimedAction: { truePositive: 0, falsePositive: 0 },
+        fabrication: { truePositive: 0, falsePositive: 0 },
+        liveData: { truePositive: 0, falsePositive: 0 },
+        gathering: { truePositive: 0, falsePositive: 0 }
+      }
     };
   }
   return usageStats.days[key];
@@ -328,6 +335,56 @@ export function recordUsageStat(stat, detail) {
     day[stat] += 1;
   }
   persistUsageStatsSettings();
+}
+
+/**
+ * Records whether a guard firing was a true positive or false positive.
+ * Called by eval-judge.js after scoring: all eval scores >= 4 → FP, any score <= 2 → TP.
+ * @param {string} guardName - "claimedAction"|"fabrication"|"liveData"|"gathering"
+ * @param {"tp"|"fp"} outcome
+ */
+export function recordGuardOutcome(guardName, outcome) {
+  const day = ensureTodayUsageStats();
+  if (!day.guardOutcomes) {
+    day.guardOutcomes = {
+      claimedAction: { truePositive: 0, falsePositive: 0 },
+      fabrication: { truePositive: 0, falsePositive: 0 },
+      liveData: { truePositive: 0, falsePositive: 0 },
+      gathering: { truePositive: 0, falsePositive: 0 }
+    };
+  }
+  if (!day.guardOutcomes[guardName]) {
+    day.guardOutcomes[guardName] = { truePositive: 0, falsePositive: 0 };
+  }
+  if (outcome === "tp") day.guardOutcomes[guardName].truePositive += 1;
+  else if (outcome === "fp") day.guardOutcomes[guardName].falsePositive += 1;
+  persistUsageStatsSettings();
+}
+
+/**
+ * Records a completed eval run and updates the running average score.
+ * @param {number} avgScore - Average of the three dimension scores (1-5)
+ */
+export function recordEvalRun(avgScore) {
+  const day = ensureTodayUsageStats();
+  if (typeof day.evalRuns !== "number") { day.evalRuns = 0; day.evalAvgScore = 0; }
+  const prevTotal = day.evalRuns * day.evalAvgScore;
+  day.evalRuns += 1;
+  day.evalAvgScore = (prevTotal + avgScore) / day.evalRuns;
+  persistUsageStatsSettings();
+}
+
+function formatGuardOutcomeSummary(guardOutcomes) {
+  if (!guardOutcomes) return "";
+  const parts = [];
+  for (const [name, counts] of Object.entries(guardOutcomes)) {
+    const total = (counts.truePositive || 0) + (counts.falsePositive || 0);
+    if (total === 0) continue;
+    const tp = counts.truePositive || 0;
+    const pct = ((tp / total) * 100).toFixed(0);
+    parts.push(`${name} ${tp}/${total} TP (${pct}%)`);
+  }
+  return parts.length > 0 ? ` | guard accuracy: ${parts.join(", ")}` : "";
 }
 
 export async function persistUsageStatsPage() {
@@ -353,12 +410,20 @@ export async function persistUsageStatsPage() {
       ? `${day.approvalsGranted}/${totalApprovals}`
       : "0";
 
+    // Eval summary
+    const evalStr = day.evalRuns > 0
+      ? ` | eval: ${day.evalRuns} runs, avg ${day.evalAvgScore.toFixed(1)}/5`
+      : "";
+    // Guard accuracy summary
+    const guardStr = formatGuardOutcomeSummary(day.guardOutcomes);
+
     const block = `[[${dateStr}]] — ${day.agentRuns} runs | ${totalToolCalls} tool calls`
       + ` | approvals ${approvalStr}`
       + ` | ${day.injectionWarnings} injection warn`
       + ` | ${day.claimedActionFires} claimed-action`
       + ` | ${day.tierEscalations} escalations`
       + ` | ${day.memoryWriteBlocks} mem blocks`
+      + evalStr + guardStr
       + (topTools ? ` | Top: ${topTools}` : "");
 
     // Find existing block for today — update in place to avoid duplicates

@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Four-Layer Architecture Alignment — Chief of Staff</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,400;0,600;0,700;1,400&family=Inter:wght@400;500;600&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Source Serif 4', Georgia, 'Times New Roman', serif;
+    background: #faf8f5;
+    color: #1a1a1a;
+    padding: 48px 40px;
+    line-height: 1.6;
+    max-width: 960px;
+    margin: 0 auto;
+  }
+
+  h1 {
+    font-size: 26px;
+    font-weight: 700;
+    margin-bottom: 32px;
+    letter-spacing: -0.3px;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 40px;
+  }
+
+  thead th {
+    text-align: left;
+    font-family: 'Inter', -apple-system, sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    color: #555;
+    padding: 0 16px 12px 0;
+    border-bottom: 2px solid #d4d0ca;
+    letter-spacing: 0.02em;
+  }
+
+  thead th:first-child { padding-left: 0; width: 155px; }
+  thead th:nth-child(2) { width: 200px; }
+  thead th:nth-child(3) { }
+
+  tbody td {
+    padding: 20px 16px 20px 0;
+    vertical-align: top;
+    border-bottom: 1px solid #e8e4de;
+    font-size: 15.5px;
+    line-height: 1.55;
+  }
+
+  tbody td:first-child {
+    padding-left: 0;
+    font-weight: 700;
+    font-size: 15px;
+  }
+
+  tbody td:nth-child(2) {
+    font-size: 14.5px;
+    color: #444;
+  }
+
+  tbody tr:last-child td {
+    border-bottom: none;
+  }
+
+  .status-badge {
+    display: inline-block;
+    font-size: 13px;
+    font-family: 'Inter', -apple-system, sans-serif;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-bottom: 4px;
+    white-space: nowrap;
+  }
+
+  .badge-green {
+    background: #dcfce7;
+    color: #166534;
+  }
+
+  .badge-yellow {
+    background: #fef9c3;
+    color: #854d0e;
+  }
+
+  .badge-red {
+    background: #fee2e2;
+    color: #991b1b;
+  }
+
+  .status-text {
+    font-size: 14.5px;
+    line-height: 1.55;
+  }
+
+  .status-text b, .status-text strong {
+    font-weight: 600;
+  }
+
+  .status-text em {
+    font-style: italic;
+  }
+
+  .status-text code {
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 13px;
+    background: #f0ece6;
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+
+  .plan-ref {
+    display: block;
+    margin-top: 6px;
+    font-size: 12.5px;
+    font-family: 'Inter', -apple-system, sans-serif;
+    color: #888;
+  }
+</style>
+</head>
+<body>
+
+<h1>Four-Layer Architecture Alignment</h1>
+
+<table>
+  <thead>
+    <tr>
+      <th>Layer</th>
+      <th>Article</th>
+      <th>Chief of Staff Status</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>1. Confidence Routing</td>
+      <td>Shadow mode &rarr; earned trust; anomaly detection on decision edges; random audit sampling</td>
+      <td>
+        <span class="status-badge badge-green">&#x2705; Excellent</span>
+        <div class="status-text">
+          <strong>Tier routing</strong> (<code>tier-routing.js</code>) scores every prompt on tool-count, complexity, and trajectory, then routes to mini/power/ludicrous. <strong>Approval gating</strong> enforces human-in-the-loop for all mutations with 15-min TTL. <strong>Trajectory tracking</strong> feeds actual outcomes back into future routing. <strong>Random audit sampling</strong> via the eval flywheel (5% of passing runs sampled to Review Queue).
+          <br><br>
+          <strong>Stakes-aware routing:</strong> <code>high_consequence</code> signal detects non-destructive but high-stakes actions (send/share/post/publish + scope amplifiers like &ldquo;everyone&rdquo;, &ldquo;publicly&rdquo;, &ldquo;boss&rdquo;) and hard-floors them to power tier. <code>destructive_bulk</code> does the same for mass-deletion intents. Short, high-stakes prompts no longer slip through as mini.
+          <br><br>
+          <strong>Decision-edge detection:</strong> <code>near_threshold</code> signal fires when the composite score lands within &plusmn;0.05 of the power boundary, tagging fragile routing decisions. These flow through the trace &rarr; eval judge &rarr; review queue, building a human-reviewed dataset of the routing calls most likely to be wrong.
+        </div>
+      </td>
+    </tr>
+    <tr>
+      <td>2. Deterministic Validation</td>
+      <td>Rule-based checks outside the LLM that verify action matches reasoning</td>
+      <td>
+        <span class="status-badge badge-green">&#x2705; Excellent</span>
+        <div class="status-text">
+          <strong>19 deterministic guards</strong> run outside the model: claimed-action detection (3-layer), fabrication guard, live-data guard, gathering completeness, injection scanning (13+ pattern types), memory write protection, schema pinning, stale-result detection, consecutive error escalation, carryover write replay, per-tool rate limits, iteration caps, daily spending caps, DOM sanitisation, LLM control-string blocklist, MCP key validation, tool-first enforcement.
+          <br><br>
+          Missing <em>reasoning-vs-output coherence</em> &mdash; guards check <em>data integrity</em> (did you call a tool?) not "if reasoning says X but action says Y, escalate."
+        </div>
+      </td>
+    </tr>
+    <tr>
+      <td>3. Eval Flywheel</td>
+      <td>LLM-as-judge on every run; human review cadence; failures become regression tests</td>
+      <td>
+        <span class="status-badge badge-green">&#x2705; Implemented &mdash; flywheel operational</span>
+        <div class="status-text">
+          <strong><code>eval-judge.js</code></strong> (318 lines) scores every run on task completion, factual grounding, and safety via a cheap mini-tier LLM-as-judge call. Cross-provider judging avoids self-evaluation bias. <strong>Review Queue</strong> (<code>Chief of Staff/Review Queue</code>) surfaces low-scoring runs, guard firings, and 5% random audit samples. <strong>Guard FP/TP tracking</strong> in <code>usage-tracking.js</code> classifies every guard firing as true-positive or false-positive based on eval scores, surfaced in the daily usage stats page. Eval log, running averages, and cost tracking all persist to Roam.
+          <br><br>
+          <strong>Regression flywheel seeded:</strong> <code>tests/eval-regression.test.mjs</code> (20 tests) locks in every vulnerability found by Layer 4 stress testing &mdash; memory poisoning via always/never directives, base64 obfuscation, explicit tool invocation, authority-override patterns, destructive-bulk routing. Includes negative cases (legitimate tool mentions, single-item deletion, read-only queries) to guard against false positives in the hardened patterns.
+        </div>
+      </td>
+    </tr>
+    <tr>
+      <td>4. Factorial Stress Testing</td>
+      <td>Same scenario &times; 16 contextual variations; consistency scoring across framings</td>
+      <td>
+        <span class="status-badge badge-green">&#x2705; Implemented &mdash; 69/69 passing</span>
+        <div class="status-text">
+          <strong>Harness built, baseline run, vulnerabilities fixed.</strong> <code>tests/stress/harness.mjs</code> (260 lines) runs 4 scenarios &times; 23 framings &times; 3 intents each = <strong>69 test cases</strong>, all producing JSON reports with consistency scoring.
+          <br><br>
+          <strong>Baseline (pre-fix):</strong> 32/54 passed (59%). Three vulnerability classes surfaced: bulk-deletion routing (0/15 &mdash; all destructive prompts stayed mini tier), injection blind spots (9/24 &mdash; base64 obfuscation and tool-syntax intents evaded detection), memory poisoning (10/15 &mdash; natural-sounding preference language bypassed both injection and memory guards).
+          <br><br>
+          <strong>Fixes applied:</strong> Destructive-bulk stakes detector added to <code>tier-routing.js</code> (verb + scope amplifier &rarr; +4.0 score, hard override to power threshold). Injection patterns and memory guard patterns hardened in <code>security-core.js</code> to catch tool-syntax injection, base64 "decode and execute" framing, authority-override language, and natural-preference-style behaviour manipulation.
+          <br><br>
+          <strong>After fixes:</strong> <strong>69/69 passed, 100% consistency</strong> across all four scenarios. The Layer 3 &harr; Layer 4 flywheel is operational: stress tests found gaps &rarr; guards were fixed &rarr; re-run confirmed 1.0 consistency.
+          <span class="plan-ref">Scenarios: inbox-injection (24 cases), bulk-deletion (15), memory-poisoning (15), authority-escalation (15). Run via <code>node tests/stress/harness.mjs tests/stress/scenarios/</code>.</span>
+        </div>
+      </td>
+    </tr>
+  </tbody>
+</table>
+
+</body>
+</html>

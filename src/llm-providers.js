@@ -631,6 +631,12 @@ export async function callLlm(provider, apiKey, model, system, messages, tools, 
  * Optional categories (BT, cron, email, calendar, composio) are ONLY included when
  * the query explicitly mentions them. Core tools are always included.
  */
+// Hard tool count cap — OpenAI enforces 128 max, Gemini has similar limits.
+// When exceeded, drop direct MCP tools from the largest servers first (they
+// contribute the most tools and can still be reached via meta-route/execute
+// if a meta-tool exists for their category).
+const MAX_TOOL_COUNT = 128;
+
 export function filterToolsByRelevance(tools, userMessage) {
   const text = String(userMessage || "").toLowerCase();
 
@@ -650,6 +656,38 @@ export function filterToolsByRelevance(tools, userMessage) {
     // Everything else (roam native, LOCAL_MCP_*, extension, direct MCP, cos_update_memory, cos_get_skill): always include
     return true;
   });
+
+  // Enforce hard cap to stay within provider limits (OpenAI: 128, Gemini: similar).
+  // If over the limit, drop direct MCP tools from the largest servers first.
+  // Core tools (roam_*, cos_*, ROAM_*, LOCAL_MCP_*, REMOTE_MCP_*) are never dropped.
+  if (filtered.length > MAX_TOOL_COUNT) {
+    const excess = filtered.length - MAX_TOOL_COUNT;
+    // Identify droppable direct MCP tools (local or remote, non-meta)
+    const droppable = [];
+    for (let i = 0; i < filtered.length; i++) {
+      const t = filtered[i];
+      const name = t.name || "";
+      const isMeta = name === "LOCAL_MCP_ROUTE" || name === "LOCAL_MCP_EXECUTE" ||
+                     name === "REMOTE_MCP_ROUTE" || name === "REMOTE_MCP_EXECUTE";
+      const isCore = name.startsWith("roam_") || name.startsWith("cos_") ||
+                     name.startsWith("ROAM_") || name.startsWith("COMPOSIO_") ||
+                     name.startsWith("roam_bt_") || isMeta;
+      if (!isCore && (t._serverName || t._isDirect !== undefined)) {
+        droppable.push({ index: i, serverName: t._serverName || "unknown" });
+      }
+    }
+    // Sort droppable tools: tools from servers contributing the most direct tools go first
+    const serverToolCounts = new Map();
+    for (const d of droppable) {
+      serverToolCounts.set(d.serverName, (serverToolCounts.get(d.serverName) || 0) + 1);
+    }
+    droppable.sort((a, b) => (serverToolCounts.get(b.serverName) || 0) - (serverToolCounts.get(a.serverName) || 0));
+    // Drop excess tools from the top of the sorted list
+    const dropIndices = new Set(droppable.slice(0, excess).map(d => d.index));
+    const capped = filtered.filter((_, i) => !dropIndices.has(i));
+    deps.debugLog("[Chief flow] Tool cap enforced:", filtered.length, "→", capped.length, `(dropped ${excess} direct MCP tools)`);
+    return capped;
+  }
 
   if (filtered.length < tools.length) {
     deps.debugLog("[Chief flow] Tool filtering:", tools.length, "→", filtered.length, "tools");

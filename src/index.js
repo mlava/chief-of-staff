@@ -97,7 +97,8 @@ import {
   isFailoverEligibleError,
   callOpenAIStreaming,
   callLlm,
-  filterToolsByRelevance
+  filterToolsByRelevance,
+  VALID_LLM_PROVIDERS
 } from "./llm-providers.js";
 import {
   initConversation,
@@ -156,6 +157,8 @@ import {
   persistUsageStatsPage,
   getCostHistorySummary,
   flushUsageTracking,
+  recordGuardOutcome,
+  recordEvalRun,
 } from "./usage-tracking.js";
 import {
   initLocalMcp,
@@ -191,6 +194,21 @@ import {
   getRemoteServerKeyForTool,
   cleanupRemoteMcp,
 } from "./remote-mcp.js";
+import {
+  initOAuthClient,
+  acquireOAuthToken,
+  getValidToken as getOAuthValidToken,
+  getAuthHeader as getOAuthAuthHeader,
+  revokeToken as revokeOAuthToken,
+  getOAuthTokenState,
+  getAllConnectedProviders,
+  getAvailableProviders as getOAuthAvailableProviders,
+  cancelOAuthPolling,
+} from "./oauth-client.js";
+import {
+  initEvalJudge,
+  evaluateAgentRun,
+} from "./eval-judge.js";
 import {
   initInbox,
   resetInboxStaticUIDs,
@@ -241,7 +259,10 @@ const SETTINGS_KEYS = {
   auditLogRetentionDays: "audit-log-retention-days",
   responseVerbosity: "response-verbosity",
   cloudflareApiToken: "cloudflare-api-token",
-  cloudflareAccountId: "cloudflare-account-id"
+  cloudflareAccountId: "cloudflare-account-id",
+  evalEnabled: "eval-enabled",
+  evalSampleRate: "eval-sample-rate",
+  evalReviewThreshold: "eval-review-threshold"
 };
 const TOOLS_SCHEMA_VERSION = 3;
 const AUTH_POLL_INTERVAL_MS = 9000;
@@ -465,6 +486,8 @@ const INBOX_READ_ONLY_TOOL_ALLOWLIST = new Set([
   "COMPOSIO_GET_CONNECTED_ACCOUNTS",
   // Local MCP discovery (read-only)
   "LOCAL_MCP_ROUTE",
+  // Extension tools discovery (read-only)
+  "EXT_ROUTE",
   // Roam extended tool discovery (read-only)
   "ROAM_ROUTE",
   // Web fetch (read-only)
@@ -556,15 +579,23 @@ function isExtensionEnabled(extensionAPI, extKey) {
 // --- Generic external extension tool discovery ---
 // Result is cached per agent loop run (set/cleared in runAgentLoop) to avoid
 // repeated registry iteration and closure allocation during tool execution.
+// Uses two-stage routing when total extension tool count exceeds threshold:
+// extensions with ≤EXT_TOOLS_DIRECT_THRESHOLD tools per extension are direct,
+// the rest go through EXT_ROUTE/EXT_EXECUTE meta-tools.
+const EXT_TOOLS_DIRECT_THRESHOLD = 15;
+
 function getExternalExtensionTools() {
   if (externalExtensionToolsCache) return externalExtensionToolsCache;
   const registry = getExtensionToolsRegistry();
   const extToolsConfig = getExtToolsConfig();
   const tools = [];
+  // First pass: collect tools per extension to decide routing
+  const extGroups = [];
   for (const [extKey, ext] of Object.entries(registry)) {
-    if (!extToolsConfig[extKey]?.enabled) continue; // extension allowlist gate
+    if (!extToolsConfig[extKey]?.enabled) continue;
     if (!ext || !Array.isArray(ext.tools)) continue;
     const extLabel = String(ext.name || extKey || "").trim();
+    const extTools = [];
     for (const t of ext.tools) {
       if (!t?.name) continue;
       if (typeof t.execute !== "function") {
@@ -573,17 +604,15 @@ function getExternalExtensionTools() {
       }
       const rawDesc = t.description || "";
       const desc = extLabel ? `[${extLabel}] ${rawDesc}` : rawDesc;
-      // Derive isMutating from explicit readOnly hint (preferred) or legacy isMutating flag.
-      // readOnly: true → isMutating: false; readOnly: false → isMutating: true.
-      // Fail-closed: no metadata → assume mutating (requires approval).
-      // Extension authors can add readOnly: true to opt out.
       const derivedMutating = typeof t.readOnly === "boolean" ? !t.readOnly
         : typeof t.isMutating === "boolean" ? t.isMutating
         : true;
-      tools.push({
+      extTools.push({
         name: t.name,
         isMutating: derivedMutating,
         _source: "extension",
+        _extensionKey: extKey,
+        _extensionName: extLabel,
         description: desc,
         input_schema: t.parameters || { type: "object", properties: {} },
         execute: async (args = {}) => {
@@ -596,9 +625,90 @@ function getExternalExtensionTools() {
         }
       });
     }
+    if (extTools.length) extGroups.push({ key: extKey, label: extLabel, tools: extTools });
+  }
+  // Decide routing: if total extension tool count is manageable, all go direct.
+  // If total exceeds threshold, route all through EXT_ROUTE/EXT_EXECUTE to save
+  // tool slots for core tools and MCP tools.
+  const totalExtTools = extGroups.reduce((sum, g) => sum + g.tools.length, 0);
+  const allDirect = totalExtTools <= EXT_TOOLS_DIRECT_THRESHOLD;
+  for (const group of extGroups) {
+    for (const t of group.tools) {
+      t._isDirect = allDirect;
+      tools.push(t);
+    }
   }
   externalExtensionToolsCache = tools;
   return tools;
+}
+
+function buildExtRouteTool() {
+  return {
+    name: "EXT_ROUTE",
+    isMutating: false,
+    description: "Discover tools from Roam extensions. Returns a list of available extension tools grouped by extension name. Call this first, then use EXT_EXECUTE with the specific tool.",
+    input_schema: {
+      type: "object",
+      properties: {
+        extension: { type: "string", description: "Optional extension name filter (partial match)" }
+      },
+      required: []
+    },
+    execute: async (args) => {
+      const allExt = externalExtensionToolsCache || getExternalExtensionTools();
+      let routed = allExt.filter(t => !t._isDirect);
+      if (args?.extension) {
+        const filter = args.extension.toLowerCase();
+        routed = routed.filter(t => (t._extensionName || "").toLowerCase().includes(filter) || (t._extensionKey || "").toLowerCase().includes(filter));
+      }
+      if (routed.length === 0) return { text: "No matching extension tools found." };
+      // Group by extension
+      const groups = new Map();
+      for (const t of routed) {
+        const key = t._extensionName || t._extensionKey || "Unknown";
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(t);
+      }
+      const sections = [];
+      for (const [name, gTools] of groups) {
+        const lines = gTools.map(t => {
+          const schema = t.input_schema && Object.keys(t.input_schema.properties || {}).length > 0
+            ? `\n  Input: ${JSON.stringify(t.input_schema)}` : "";
+          return `- **${t.name}**: ${t.description || "(no description)"}${schema}`;
+        });
+        sections.push(`### ${name}\n${lines.join("\n\n")}`);
+      }
+      return { text: `## Extension Tools — ${routed.length} available\n\nCall via EXT_EXECUTE({ "tool_name": "...", "arguments": {...} }).\n\n${sections.join("\n\n")}` };
+    }
+  };
+}
+
+function buildExtExecuteTool() {
+  return {
+    name: "EXT_EXECUTE",
+    description: "Execute an extension tool discovered via EXT_ROUTE. Provide the exact tool_name and its arguments.",
+    input_schema: {
+      type: "object",
+      properties: {
+        tool_name: { type: "string", description: "Exact tool name from EXT_ROUTE" },
+        arguments: { type: "object", description: "Arguments for the tool" }
+      },
+      required: ["tool_name"]
+    },
+    execute: async (args) => {
+      const innerName = args?.tool_name;
+      if (!innerName) return { error: "tool_name is required" };
+      const allExt = externalExtensionToolsCache || getExternalExtensionTools();
+      let tool = allExt.find(t => t.name === innerName);
+      if (!tool) {
+        const lower = innerName.toLowerCase();
+        tool = allExt.find(t => t.name.toLowerCase() === lower);
+      }
+      if (!tool) return { error: `Extension tool "${innerName}" not found. Use EXT_ROUTE to discover available tools.` };
+      if (tool._isDirect) return { error: `"${innerName}" is a DIRECT tool. Call it directly — do NOT use EXT_EXECUTE.` };
+      return tool.execute(args.arguments || {});
+    }
+  };
 }
 
 // getLocalMcpTools, buildLocalMcpMetaTool, formatToolListByServer, formatServerToolList, buildLocalMcpRouteTool — moved to local-mcp.js
@@ -1071,6 +1181,16 @@ function getSettingBool(extensionAPI, key, fallbackValue = false) {
   return typeof value === "boolean" ? value : fallbackValue;
 }
 
+// Built-in remote MCP servers (always connected, no user config required)
+const BUILTIN_REMOTE_MCP_SERVERS = [
+  {
+    url: "https://extension-docs-proxy.manus-proxy.workers.dev",
+    name: "Extension Docs",
+    header: "",
+    token: "",
+  },
+];
+
 function getRemoteMcpServers(extensionAPI = extensionAPIRef) {
   const MAX = 10;
   const rawCount = extensionAPI?.settings?.get(SETTINGS_KEYS.remoteMcpCount);
@@ -1086,7 +1206,8 @@ function getRemoteMcpServers(extensionAPI = extensionAPIRef) {
       token: getSettingString(extensionAPI, `remote-mcp-${i}-token`, "").trim(),
     });
   }
-  return servers;
+  // Append built-in servers (extension docs, etc.)
+  return [...servers, ...BUILTIN_REMOTE_MCP_SERVERS];
 }
 
 function getLocalMcpPorts(extensionAPI = extensionAPIRef) {
@@ -3013,7 +3134,51 @@ async function getAvailableToolSchemas() {
   const hasRemoteMetaTargets = allRemoteMcpTools.some(t => !t._isDirect);
   const remoteMcpMetaTool = hasRemoteMetaTargets ? [buildRemoteMcpRouteTool(), buildRemoteMcpMetaTool()] : [];
 
-  const tools = [...adjustedMetaTools, ...composioDirectTools, ...directRoamTools, ...roamMetaTools, ...getBetterTasksTools(), ...getCosIntegrationTools(), ...getCronTools(), ...getExternalExtensionTools(), ...directMcpTools, ...localMcpMetaTool, ...directRemoteTools, ...remoteMcpMetaTool];
+  // Extension Tools API: split into direct vs routed (same pattern as Roam/MCP tools)
+  const allExtTools = getExternalExtensionTools();
+  const directExtTools = allExtTools.filter(t => t._isDirect);
+  const hasExtMetaTargets = allExtTools.some(t => !t._isDirect);
+  const extMetaTools = hasExtMetaTargets ? [buildExtRouteTool(), buildExtExecuteTool()] : [];
+
+  const rawTools = [...adjustedMetaTools, ...composioDirectTools, ...directRoamTools, ...roamMetaTools, ...getBetterTasksTools(), ...getCosIntegrationTools(), ...getCronTools(), ...directExtTools, ...extMetaTools, ...directMcpTools, ...localMcpMetaTool, ...directRemoteTools, ...remoteMcpMetaTool];
+
+  // Cross-source dedup: within-source collisions are already handled by local-mcp.js
+  // and remote-mcp.js, but tools from DIFFERENT sources can still collide (e.g.
+  // "search_docs" in both a remote MCP server and a local MCP server).
+  const nameCount = new Map();
+  for (const t of rawTools) {
+    nameCount.set(t.name, (nameCount.get(t.name) || 0) + 1);
+  }
+  const tools = [];
+  const seenNames = new Map(); // name → index of first occurrence
+  for (const t of rawTools) {
+    if (nameCount.get(t.name) > 1) {
+      // Collision — namespace with server name or source
+      const source = t._serverName || t._source || "unknown";
+      const prefix = source.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+      const namespacedName = `${prefix}__${t.name}`;
+      if (seenNames.has(t.name)) {
+        // Also namespace the first occurrence (if not already namespaced)
+        const firstIdx = seenNames.get(t.name);
+        const firstTool = tools[firstIdx];
+        if (!firstTool._crossSourceRenamed) {
+          const firstSource = firstTool._serverName || firstTool._source || "unknown";
+          const firstPrefix = firstSource.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+          firstTool._originalName = firstTool._originalName || firstTool.name;
+          firstTool.name = `${firstPrefix}__${firstTool._originalName}`;
+          firstTool._crossSourceRenamed = true;
+          debugLog(`[Tool dedup] Cross-source collision: "${t.name}" — renamed first to "${firstTool.name}" (from ${firstSource})`);
+        }
+      }
+      const renamed = { ...t, _originalName: t._originalName || t.name, name: namespacedName, _crossSourceRenamed: true };
+      debugLog(`[Tool dedup] Cross-source collision: "${t.name}" — renamed to "${namespacedName}" (from ${source})`);
+      if (!seenNames.has(t.name)) seenNames.set(t.name, tools.length);
+      tools.push(renamed);
+    } else {
+      if (!seenNames.has(t.name)) seenNames.set(t.name, tools.length);
+      tools.push(t);
+    }
+  }
   return tools;
 }
 
@@ -3140,11 +3305,15 @@ function parseComposioDeregisterIntent(userMessage, options = {}) {
       .filter(Boolean)
   );
   const hasComposioContext = /(composio|tool|connection|integration|app|connected)/i.test(lowered);
+  // "uninstall" and "deregister" are unambiguous — they always mean tool removal.
+  // "remove" and "disconnect" are ambiguous ("remove this block", "disconnect from wifi")
+  // and need either Composio context words or the slug to be in the installed set.
+  const isUnambiguousVerb = /\b(uninstall|deregister)\b/i.test(lowered);
 
   const quotedMatch = text.match(/"([^"]+)"/);
   const fromQuotes = normaliseToolSlugToken(String(quotedMatch?.[1] || "").trim());
   if (fromQuotes) {
-    if (hasComposioContext || installedSet.has(fromQuotes)) {
+    if (isUnambiguousVerb || hasComposioContext || installedSet.has(fromQuotes)) {
       return { toolSlug: fromQuotes };
     }
     return null;
@@ -3161,7 +3330,7 @@ function parseComposioDeregisterIntent(userMessage, options = {}) {
   if (slugWords.some(w => slugStopWords.test(w))) return null;
   const directSlug = normaliseToolSlugToken(rawSlug.replace(/\s+/g, ""));
   if (!directSlug) return null;
-  if (!hasComposioContext && !installedSet.has(directSlug)) return null;
+  if (!isUnambiguousVerb && !hasComposioContext && !installedSet.has(directSlug)) return null;
   return { toolSlug: directSlug };
 }
 
@@ -3172,6 +3341,12 @@ function parseComposioInstallIntent(userMessage) {
   if (!/(install|add|connect|enable|set\s*up)\b/i.test(lowered)) return null;
   // Exclude deregister-style phrases
   if (/(deregister|uninstall|remove|disconnect)\b/i.test(lowered)) return null;
+
+  // Exclude help / how-to questions — "how do I connect a remote MCP server?" is asking for
+  // guidance, not requesting a Composio install. Only block "how" and "what/where" question
+  // patterns (unambiguously instructional). "Can I connect todoist?" is a polite install request
+  // so "can I" is intentionally NOT excluded.
+  if (/\b(how\s+(do|can|to|does|should|would)|what\s+(is|are|does)|where\s+(is|are|do))\b/i.test(lowered)) return null;
 
   const hasComposioContext = /(composio|tool|integration|service)\b/i.test(lowered);
   // "add" is far too ambiguous on its own — it matches "add a task", "add event to calendar", etc.
@@ -3804,7 +3979,8 @@ async function runAgentLoop(userMessage, options = {}) {
     iterations: 0,
     toolCalls: [],
     resultTextPreview: "",
-    error: null
+    error: null,
+    guardsFired: []
   };
   lastAgentRunTrace = trace;
   let gatheringGuardFired = false;
@@ -4028,6 +4204,7 @@ async function runAgentLoop(userMessage, options = {}) {
           const missed = checkGatheringCompleteness(gatheringGuard.expectedSources, gatheringCallNames);
           if (missed.length > 0) {
             gatheringGuardFired = true;
+            trace.guardsFired.push("gathering");
             debugLog("[Chief flow] Gathering guard fired (no-tool exit):", missed);
             messages.push(formatAssistantMessage(provider, response));
             messages.push({
@@ -4088,6 +4265,7 @@ async function runAgentLoop(userMessage, options = {}) {
           if (claimCheck.detected) {
             incrementSessionClaimedActionCount();
             recordUsageStat("claimedActionFires");
+            trace.guardsFired.push("claimedAction");
             const toolHint = claimCheck.matchedToolHint ? ` (expected tool: ${claimCheck.matchedToolHint})` : "";
             debugLog("[Chief flow] runAgentLoop hallucination guard triggered — model claimed action with 0 successful tool calls" + toolHint + " (iteration " + (index + 1) + ", session count: " + getSessionClaimedActionCount() + "), retrying.");
 
@@ -4117,6 +4295,7 @@ async function runAgentLoop(userMessage, options = {}) {
         // This catches cases where isLikelyLiveDataReadIntent misses terse follow-ups like "the powerpoint".
         if (getSessionUsedLocalMcp() && successfulToolCalls.length === 0 && !mcpFabricationGuardFired && finalText.length > 1500) {
           mcpFabricationGuardFired = true;
+          trace.guardsFired.push("fabrication");
           debugLog("[Chief flow] runAgentLoop MCP fabrication guard triggered — long response (" + finalText.length + " chars) with 0 tool calls in MCP session (iteration " + (index + 1) + "), retrying.");
           messages.push(formatAssistantMessage(provider, response));
           messages.push({ role: "user", content: "You produced a detailed response without calling any tool. That response was not shown to the user. In this session you have access to external tools — you MUST call LOCAL_MCP_ROUTE then LOCAL_MCP_EXECUTE to fetch real data before answering. Never fabricate or infer data." });
@@ -4130,6 +4309,7 @@ async function runAgentLoop(userMessage, options = {}) {
             debugLog("[Chief flow] runAgentLoop live-data guard skipped — external tool was attempted but errored (iteration " + (index + 1) + ").");
           } else if (!liveDataGuardFired) {
             liveDataGuardFired = true;
+            trace.guardsFired.push("liveData");
             debugLog("[Chief flow] runAgentLoop live-data guard triggered — no external tool result (iteration " + (index + 1) + "), retrying with hint.");
             messages.push(formatAssistantMessage(provider, response));
             messages.push({ role: "user", content: "You responded without calling any data tool. That response was not shown to the user. You MUST call the appropriate tool (e.g. LOCAL_MCP_ROUTE, COMPOSIO_MULTI_EXECUTE_TOOL, roam_search) to fetch live data before answering." });
@@ -4161,6 +4341,7 @@ async function runAgentLoop(userMessage, options = {}) {
           const missed = checkGatheringCompleteness(gatheringGuard.expectedSources, gatheringCallNames);
           if (missed.length > 0) {
             gatheringGuardFired = true;
+            trace.guardsFired.push("gathering");
             debugLog("[Chief flow] Gathering guard fired (write intercepted):", toolCall.name, missed);
             toolResults.push({
               toolCall,
@@ -4181,7 +4362,7 @@ async function runAgentLoop(userMessage, options = {}) {
         gatheringCallNames.push(toolCall.name);
         // For LOCAL/REMOTE_MCP_EXECUTE and ROAM_EXECUTE calls, also push the inner tool_name
         // so that MCP-based and routed Roam skill sources get counted
-        if ((toolCall.name === "LOCAL_MCP_EXECUTE" || toolCall.name === "REMOTE_MCP_EXECUTE" || toolCall.name === "ROAM_EXECUTE") && toolCall.arguments?.tool_name) {
+        if ((toolCall.name === "LOCAL_MCP_EXECUTE" || toolCall.name === "REMOTE_MCP_EXECUTE" || toolCall.name === "ROAM_EXECUTE" || toolCall.name === "EXT_EXECUTE") && toolCall.arguments?.tool_name) {
           gatheringCallNames.push(toolCall.arguments.tool_name);
         }
         // For COMPOSIO_MULTI_EXECUTE_TOOL calls, also push individual tool slugs
@@ -7126,6 +7307,9 @@ async function askChiefOfStaff(userMessage, options = {}) {
   recordUsageStat("agentRuns");
   persistUsageStatsPage();
 
+  // Non-blocking eval (opt-in, non-fatal)
+  evaluateAgentRun(lastAgentRunTrace, prompt, responseText).catch(() => {});
+
   if (offerWriteToDailyPage) {
     const shouldWrite = await promptWriteToDailyPage();
     if (shouldWrite) {
@@ -7269,6 +7453,10 @@ function registerCommandPaletteCommands(extensionAPI) {
   extensionAPI.ui.commandPalette.addCommand({
     label: "Chief of Staff: Deregister Composio Tool",
     callback: () => promptDeregisterComposioTool(extensionAPI)
+  });
+  extensionAPI.ui.commandPalette.addCommand({
+    label: "Chief of Staff: Open Review Queue",
+    callback: () => openRoamPageByTitle("Chief of Staff/Review Queue")
   });
   extensionAPI.ui.commandPalette.addCommand({
     label: "Chief of Staff: Test Composio Tool Connection",
@@ -8015,6 +8203,28 @@ function onload({ extensionAPI }) {
     debugLog,
     getUnloadInProgress: () => unloadInProgress,
   });
+  initEvalJudge({
+    callLlm,
+    getApiKeyForProvider,
+    getLlmModel,
+    getModelCostRates,
+    recordCostEntry,
+    accumulateSessionTokens,
+    ensurePageUidByTitle,
+    createRoamBlock,
+    formatRoamDate,
+    debugLog,
+    getSettingString,
+    getSettingBool,
+    getExtensionAPIRef: () => extensionAPIRef,
+    SETTINGS_KEYS,
+    VALID_LLM_PROVIDERS,
+    isOpenAICompatible,
+    isProviderCoolingDown,
+    recordUsageStat,
+    recordGuardOutcome,
+    recordEvalRun,
+  });
   initSecurity({
     debugLog,
     recordUsageStat,
@@ -8201,6 +8411,9 @@ function onload({ extensionAPI }) {
     showErrorToast,
     getRemoteMcpServers,
     getProxiedRemoteUrl: (url) => {
+      // Built-in servers have proper CORS headers — skip the proxy for lower latency
+      const isBuiltIn = BUILTIN_REMOTE_MCP_SERVERS.some(s => url.startsWith(s.url));
+      if (isBuiltIn) return url;
       const proxy = window.roamAlphaAPI?.constants?.corsAnywhereProxyUrl;
       return proxy ? `${proxy.replace(/\/+$/, "")}/${url}` : url;
     },
@@ -8209,6 +8422,14 @@ function onload({ extensionAPI }) {
     updateMcpBom,
     isUnloadInProgress: () => unloadInProgress,
     COMPOSIO_AUTO_CONNECT_DELAY_MS,
+  });
+  initOAuthClient({
+    extensionAPI,
+    debugLog,
+    redactForLog,
+    showInfoToast,
+    showErrorToast,
+    sanitizeHeaderValue,
   });
   initInbox({
     getRoamAlphaApi,
@@ -8308,6 +8529,7 @@ function onload({ extensionAPI }) {
     debugLog,
     getLocalMcpToolsCache,
     getRemoteMcpToolsCache,
+    getExternalExtensionToolsCache: () => externalExtensionToolsCache,
     getBtProjectsCache: () => btProjectsCache,
     setBtProjectsCache: (v) => { btProjectsCache = v; },
     getResponseVerbosity,
@@ -8427,6 +8649,7 @@ function onload({ extensionAPI }) {
       launchOnboarding(extensionAPI, buildOnboardingDeps(extensionAPI));
     }
   }, 1500);
+
 }
 
 function onunload() {
@@ -8478,6 +8701,7 @@ function onunload() {
   externalExtensionToolsCache = null;
   cleanupLocalMcp();
   cleanupRemoteMcp();
+  cancelOAuthPolling();
   btProjectsCache = null;
   toolkitSchemaRegistryCache = null;
   clearSchemaPromptCache();

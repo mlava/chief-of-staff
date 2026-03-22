@@ -190,6 +190,27 @@ function scorePromptComplexity(prompt) {
     rawScore += 1.0; signals.push("explicit_depth");
   }
 
+  // 9. Destructive intent — bulk mutations need a smarter model to confirm scope,
+  //    check safety, and handle edge cases. Even short casual prompts like
+  //    "just delete all the archive pages" should escalate.
+  const destructiveVerb = /\b(delet|remov|wip|purg|destroy|nuk|drop|clean\s*up|clear\s*out|erase|strip\s*out)/i.test(lower);
+  const scopeAmplifier = /\b(all|every|everything|entire|each|whole|bulk|batch|mass|recursive|multiple|many)\b/i.test(lower);
+  if (destructiveVerb && scopeAmplifier) {
+    rawScore += 4.0; signals.push("destructive_bulk");
+  } else if (destructiveVerb) {
+    rawScore += 1.0; signals.push("destructive_verb");
+  }
+
+  // 10. High-consequence non-destructive actions — not bulk deletions, but still
+  //     carry serious real-world impact. A smarter model is better at confirming
+  //     intent and suggesting safeguards. These are gated by approval anyway,
+  //     but power-tier models produce better confirmation prompts.
+  const consequenceVerb = /\b(send|share|post|publish|broadcast|forward|grant|revoke|transfer|export|submit|announce)\b/i.test(lower);
+  const consequenceAmplifier = /\b(all|every|everyone|public(?:ly)?|external(?:ly)?|boss|manager|team|company|client|customer)\b/i.test(lower);
+  if (consequenceVerb && consequenceAmplifier) {
+    rawScore += 3.0; signals.push("high_consequence");
+  }
+
   // Normalise to 0–1 (ceiling at rawScore 10)
   const score = Math.min(1.0, rawScore / 10);
 
@@ -404,6 +425,13 @@ function computeRoutingScore(prompt, options = {}) {
     compositeScore = Math.min(1.0, compositeScore + 0.15);
   }
 
+  // Stakes override: high-stakes prompts MUST reach power tier regardless of prompt
+  // length. Mini-tier models are more likely to proceed without confirming scope
+  // or suggesting safeguards.
+  if (pc.signals.includes("destructive_bulk") || pc.signals.includes("high_consequence")) {
+    compositeScore = Math.max(compositeScore, TIER_THRESHOLDS.power);
+  }
+
   // Trajectory override: when a short follow-up clearly continues a complex turn,
   // the trajectory score alone should be sufficient to reach power threshold,
   // regardless of how simple the prompt text looks. Without this, "now apply those
@@ -413,12 +441,20 @@ function computeRoutingScore(prompt, options = {}) {
     compositeScore = Math.max(compositeScore, TIER_THRESHOLDS.power);
   }
 
+  // Decision-edge detection: flag when the composite score falls within ±0.05
+  // of the power threshold. These borderline decisions are fragile — minor
+  // rephrasing could flip the tier. The signal is logged for the eval judge
+  // and review queue to track which prompts land on the boundary.
+  const EDGE_MARGIN = 0.05;
+  const nearPowerEdge = Math.abs(compositeScore - TIER_THRESHOLDS.power) <= EDGE_MARGIN;
+
   // Collect all signals
   const allSignals = [
     ...(tc.matchedSkill ? [`skill:${tc.matchedSkill}`] : []),
     ...pc.signals,
     ...tr.signals,
-    ...(isMcpFollowUp ? ["mcp_session_followup"] : [])
+    ...(isMcpFollowUp ? ["mcp_session_followup"] : []),
+    ...(nearPowerEdge ? ["near_threshold"] : [])
   ];
 
   // Determine tier

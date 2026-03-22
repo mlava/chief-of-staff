@@ -32,7 +32,7 @@ export function sanitiseMarkdownHref(href) {
 }
 
 export const INJECTION_PATTERNS = [
-  { name: "ignore_previous", re: /\b(ignore|disregard|forget|override|bypass)\b.{0,30}\b(previous|above|prior|earlier|all|system|instructions?|rules?|constraints?|prompt)\b/i },
+  { name: "ignore_previous", re: /\b(ignore|disregard|forget|override|bypass)\b.{0,30}\b(previous|above|prior|earlier|all|system|instructions?|rules?|constraints?|restrictions?|prompt|safet|guard|gating|read[\s-]?only|approval)\b/i },
   { name: "new_instructions", re: /\b(new|updated|revised|real|actual|true|correct)\s+(instructions?|rules?|directives?|system\s*prompt|guidelines?)\b/i },
   { name: "do_not_follow", re: /\bdo\s+not\s+(follow|obey|listen|adhere|comply)\b/i },
   { name: "you_are_now", re: /\byou\s+are\s+(now|actually|really|secretly)\b/i },
@@ -45,6 +45,8 @@ export const INJECTION_PATTERNS = [
   { name: "hidden_text", re: /\b(hidden|invisible|white)\s+(text|instruction|message|command)\b/i },
   { name: "must_call_tool", re: /\b(you\s+must|you\s+should|immediately|urgently)\s+(call|run|execute|invoke|use)\s+(the\s+)?tool\b/i },
   { name: "send_to_url", re: /\b(send|post|transmit|exfiltrate|forward)\s+.{0,30}\b(to|via)\s+(https?:\/\/|the\s+url|the\s+endpoint)\b/i },
+  { name: "base64_obfuscation", re: /\b(decode|decrypt|deobfuscate|base64|b64)\b.{0,20}\b(and\s+)?(execute|run|follow|do|apply|perform|process)\b/i },
+  { name: "explicit_tool_invocation", re: /\b(run|call|execute|invoke|trigger|use)\s+(cos_|roam_|bt_|LOCAL_MCP|REMOTE_MCP|COMPOSIO)\w*/i },
 ];
 
 export function detectInjectionPatterns(text) {
@@ -57,8 +59,8 @@ export function detectInjectionPatterns(text) {
 }
 
 export const MEMORY_INJECTION_PATTERNS = [
-  { name: "always_directive", re: /\b(always|must\s+always|you\s+(?:should|must)\s+always)\s+(do|perform|execute|run|call|use|send|skip|ignore|bypass|include|respond)\b/i },
-  { name: "never_directive", re: /\b(never|must\s+never|you\s+(?:should|must)\s+never|do\s+not\s+ever)\s+(ask|require|request|check|verify|confirm|validate|show|display|mention|refuse)\b/i },
+  { name: "always_directive", re: /\b(always|must\s+always|you\s+(?:should|must)\s+always)\s+(do|perform|execute|run|call|use|send|skip|ignore|bypass|include|respond|start|begin|prefix|prepend|append|add|insert|output|reply|answer|return|generate|produce|write|format)\b/i },
+  { name: "never_directive", re: /\b(never|must\s+never|you\s+(?:should|must)\s+never|do\s+not\s+ever)\s+(ask|require|request|check|verify|confirm|validate|show|display|mention|refuse|use|call|invoke|run|execute|trigger|access|report|log|record|flag|warn|alert|block|deny|reject)\b/i },
   { name: "default_behaviour", re: /\b(default\s+behavio(?:u?r)|default\s+mode|default\s+action|standard\s+procedure|standing\s+order)\s*(is|should\s+be|:|=)\b/i },
   { name: "skip_approval", re: /\b(skip|bypass|disable|suppress|auto[\s-]?approve|no\s+need\s+for)\s+(approval|confirmation|consent|verification|checking|gating|safety)\b/i },
   { name: "pre_approved", re: /\b(pre[\s-]?approved?|whitelisted?|allowed?\s+without|trusted?\s+(?:action|tool|operation))\b/i },
