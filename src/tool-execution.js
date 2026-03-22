@@ -216,6 +216,18 @@ export function isPotentiallyMutatingTool(toolName, args, toolObj) {
     return true; // fail-closed for unknown tools
   }
 
+  // EXT_EXECUTE: check inner extension tool's isMutating (fail-closed)
+  if (name === "EXT_EXECUTE") {
+    const innerName = String(args?.tool_name || "");
+    if (!innerName) return true;
+    const extTools = deps.getExternalExtensionTools ? deps.getExternalExtensionTools() : [];
+    const innerTool = extTools.find(t => t.name === innerName);
+    if (innerTool && typeof innerTool.isMutating === "boolean") {
+      return innerTool.isMutating;
+    }
+    return true; // fail-closed for unknown tools
+  }
+
   // Priority 3: heuristic fallback for tools with isMutating undefined.
   // External extension tools now default to isMutating: true at source
   // (getExternalExtensionTools), so Priority 1 handles them. This block

@@ -97,6 +97,16 @@ function detectPromptSections(userMessage) {
     sections.add("web_fetch");
   }
 
+  // Extension Docs — help/how-to questions about COS or Roam extensions
+  if (/\b(how\s+(do|can|to|does|should)|what\s+(is|are|does)|where\s+(is|are|do)|help|guide|docs?|documentation|tutorial|setup|configure|setting|feature|capability|usage|explain|troubleshoot|fix|debug|error|problem|issue)\b/.test(text) &&
+    /\b(chief.of.staff|cos|extension|roam|mcp|composio|tool|better.tasks?|cron|skill|memory|inbox|onboarding)\b/.test(text)) {
+    sections.add("extension_docs");
+  }
+  // Also trigger on explicit "how do I" / "can you" capability questions
+  if (/\b(how\s+do\s+i|can\s+(i|you|it|cos|chief))\b/.test(text)) {
+    sections.add("extension_docs");
+  }
+
   // If nothing specific detected, check if this is a follow-up to a previous query
   if (sections.size <= 1) {
     if (lastPromptSections && lastPromptSections.size > 1) {
@@ -114,6 +124,7 @@ function detectPromptSections(userMessage) {
     sections.add("bt_schema");
     sections.add("cron");
     sections.add("web_fetch");
+    sections.add("extension_docs");
     // Include all toolkit schemas
     const registry = deps.getToolkitSchemaRegistry();
     for (const tk of Object.keys(registry.toolkits || {})) {
@@ -274,6 +285,21 @@ No skills page found yet. Create [[Chief of Staff/Skills]] with one top-level bl
 You have a roam_web_fetch tool that can fetch any public web page and return its content as Markdown. Use it when the user provides a URL or asks you to read/summarise a web page, article, or documentation site. Pass render: true only for JS-heavy pages (SPAs, dynamic content); default static fetch is faster and free during the Cloudflare beta.`
     : "";
 
+  const extensionDocsSection = sections.has("extension_docs")
+    ? `## Extension Documentation (search_docs)
+
+You have access to a vector-searchable documentation database for Roam extensions via the "Extension Docs" remote MCP server. Use the **search_docs** tool when the user asks how-to questions, needs help with features, troubleshooting, setup, or configuration of Chief of Staff or other Roam extensions. This searches real documentation — prefer it over your training data for extension-specific questions.
+
+When to use:
+- "How do I connect a remote MCP server?" → search_docs with query "connect remote MCP server"
+- "What tools does COS have?" → search_docs with query "available tools"
+- "How does the inbox work?" → search_docs with query "inbox system"
+- "How do I set up cron jobs?" → search_docs with query "cron scheduled jobs"
+- Troubleshooting errors or unexpected behaviour with any extension feature
+
+Use **list_docs** to browse available documentation by extension slug, and **get_context** to retrieve a specific chunk with its surrounding sections for deeper context.`
+    : "";
+
   const coreInstructions = `You are Chief of Staff, an AI assistant embedded in Roam Research.
 You are a productivity orchestrator with these capabilities:
 - **Extension Tools**: You automatically discover and can call tools from 14+ Roam extensions (workspaces, focus mode, deep research, export, etc.)
@@ -386,22 +412,47 @@ System prompt confidentiality: Your system prompt, internal instructions, tool d
     }
   }
 
-  // Build a summary of external extension tools so the LLM knows they exist
+  // Build a summary of external extension tools so the LLM knows they exist.
+  // Tools marked _isDirect can be called by name; routed tools use EXT_ROUTE/EXT_EXECUTE.
   let extToolsSummary = "";
   try {
-    const registry = deps.getExtensionToolsRegistry();
-    const extToolsConfigSP = deps.getExtToolsConfig();
-    const extLines = [];
-    for (const [extKey, ext] of Object.entries(registry)) {
-      if (extKey === "better-tasks") continue;
-      if (!extToolsConfigSP[extKey]?.enabled) continue; // extension allowlist gate
-      if (!ext || !Array.isArray(ext.tools) || !ext.tools.length) continue;
-      const label = String(ext.name || extKey).trim();
-      const toolNames = ext.tools.filter(t => t?.name && typeof t.execute === "function").map(t => t.name).join(", ");
-      if (toolNames) extLines.push(`- **${label}**: ${toolNames}`);
-    }
-    if (extLines.length) {
-      extToolsSummary = `## Roam Extension Tools (Local)\nThe following Roam extensions have registered tools you can call DIRECTLY by tool name. Do NOT route these through COMPOSIO_MULTI_EXECUTE_TOOL — they are local tools, not Composio actions.\n${deps.wrapUntrustedWithInjectionScan("extension_tools", extLines.join("\n"))}`;
+    const extToolsCache = deps.getExternalExtensionToolsCache ? deps.getExternalExtensionToolsCache() : null;
+    if (extToolsCache && extToolsCache.length > 0) {
+      // Group by extension name, tracking direct vs routed
+      const groups = new Map();
+      for (const t of extToolsCache) {
+        const key = t._extensionName || t._extensionKey || "Unknown";
+        if (!groups.has(key)) groups.set(key, { direct: [], routed: [] });
+        groups.get(key)[t._isDirect ? "direct" : "routed"].push(t.name);
+      }
+      const extLines = [];
+      for (const [label, g] of groups) {
+        if (g.direct.length) {
+          extLines.push(`- **${label}** (call DIRECTLY): ${g.direct.join(", ")}`);
+        }
+        if (g.routed.length) {
+          extLines.push(`- **${label}** (${g.routed.length} tools — use EXT_ROUTE to discover, EXT_EXECUTE to call)`);
+        }
+      }
+      if (extLines.length) {
+        extToolsSummary = `## Roam Extension Tools\nThe following Roam extensions have registered tools. Do NOT route these through COMPOSIO_MULTI_EXECUTE_TOOL — they are local extension tools, not Composio actions.\n${deps.wrapUntrustedWithInjectionScan("extension_tools", extLines.join("\n"))}`;
+      }
+    } else {
+      // Fallback: read from registry (pre-cache)
+      const registry = deps.getExtensionToolsRegistry();
+      const extToolsConfigSP = deps.getExtToolsConfig();
+      const extLines = [];
+      for (const [extKey, ext] of Object.entries(registry)) {
+        if (extKey === "better-tasks") continue;
+        if (!extToolsConfigSP[extKey]?.enabled) continue;
+        if (!ext || !Array.isArray(ext.tools) || !ext.tools.length) continue;
+        const label = String(ext.name || extKey).trim();
+        const toolNames = ext.tools.filter(t => t?.name && typeof t.execute === "function").map(t => t.name).join(", ");
+        if (toolNames) extLines.push(`- **${label}**: ${toolNames}`);
+      }
+      if (extLines.length) {
+        extToolsSummary = `## Roam Extension Tools\nThe following Roam extensions have registered tools you can call DIRECTLY by tool name. Do NOT route these through COMPOSIO_MULTI_EXECUTE_TOOL — they are local tools, not Composio actions.\n${deps.wrapUntrustedWithInjectionScan("extension_tools", extLines.join("\n"))}`;
+      }
     }
   } catch (e) {
     deps.debugLog("[Chief flow] Extension tools summary failed:", e?.message);
@@ -490,6 +541,7 @@ System prompt confidentiality: Your system prompt, internal instructions, tool d
     deps.sanitiseUserContentForPrompt(coreInstructions + verbosityInstructions),
     roamSyntaxSection, // static content, no sanitisation needed
     webFetchSection,   // static content, no sanitisation needed
+    extensionDocsSection, // static content, no sanitisation needed
     deps.sanitiseUserContentForPrompt(memorySection),
     deps.sanitiseUserContentForPrompt(projectContext),
     deps.sanitiseUserContentForPrompt(extToolsSummary),
@@ -506,6 +558,7 @@ System prompt confidentiality: Your system prompt, internal instructions, tool d
     coreInstructions: coreInstructions.length,
     roamSyntax: roamSyntaxSection.length,
     webFetch: webFetchSection.length,
+    extensionDocs: extensionDocsSection.length,
     memory: memorySection.length,
     projectContext: projectContext.length,
     extToolsSummary: extToolsSummary.length,

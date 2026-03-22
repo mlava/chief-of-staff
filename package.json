@@ -9,6 +9,8 @@
     "build": "webpack",
     "test": "node --test tests/*.test.mjs",
     "test:security": "node --test tests/security-core.test.mjs",
+    "test:eval": "node --test tests/eval-regression.test.mjs",
+    "test:stress": "node tests/stress/harness.mjs tests/stress/scenarios/",
     "aibom:generate": "node scripts/generate-static-aibom.mjs",
     "build:secure": "npm test && npm run build && npm run aibom:generate",
     "ci": "npm run build:secure"

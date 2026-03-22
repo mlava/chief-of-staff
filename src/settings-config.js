@@ -420,7 +420,36 @@ export function buildSettingsConfig(extensionAPI) {
           value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.auditLogRetentionDays, ""),
           placeholder: "e.g. 14"
         }
-      }
+      }/*,
+      {
+        id: deps.SETTINGS_KEYS.evalEnabled,
+        name: "Post-Run Evaluation",
+        description: "Enable automatic quality scoring after each agent interaction using an LLM judge. Adds roughly $0.001–0.003 per evaluated run.",
+        action: {
+          type: "switch",
+          value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.evalEnabled, false)
+        }
+      },
+      {
+        id: deps.SETTINGS_KEYS.evalSampleRate,
+        name: "Evaluation Sample Rate",
+        description: "Fraction of runs to evaluate (0.0–1.0). Use 1.0 to evaluate every run, 0.1 for 10% random sampling. Only relevant when Post-Run Evaluation is enabled.",
+        action: {
+          type: "input",
+          value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.evalSampleRate, "1.0"),
+          placeholder: "1.0"
+        }
+      },
+      {
+        id: deps.SETTINGS_KEYS.evalReviewThreshold,
+        name: "Evaluation Review Threshold",
+        description: "Score at or below this value (1–5) triggers the review queue. Default 2 means only clearly problematic interactions are flagged.",
+        action: {
+          type: "input",
+          value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.evalReviewThreshold, "2"),
+          placeholder: "2"
+        }
+      }*/
     );
   }
 

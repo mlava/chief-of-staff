@@ -24,3 +24,6 @@ extension.js
 mcp-install.sh
 test.sh
 AGENTS.md
+
+# Stress test reports (generated)
+tests/stress/reports/
