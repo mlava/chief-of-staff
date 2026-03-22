@@ -379,6 +379,24 @@ All of the above work in both the chat panel and the command palette prompt. The
 
 ---
 
+## Ask about Roam, extensions, or Chief of Staff itself
+
+Chief of Staff connects to a remote MCP server that serves documentation — such as extension READMEs, Roam help articles, or setup guides — and can answer questions about Roam Research and many of your installed extensions directly in the chat panel. No browsing, no searching through docs. Just ask.
+
+**Examples:**
+
+- *"How do I create a Kanban board in Roam?"* — explains the `{{[[kanban]]}}` syntax, column/card hierarchy, and drag-and-drop behaviour.
+- *"How do I set up remote MCP servers?"* — walks you through settings, transport types, auth configuration, and troubleshooting.
+- *"How do I set up Better Tasks?"* — covers installation, dashboard access, task creation (including via natural language through COS), recurring tasks, and attributes.
+- *"What keyboard shortcuts does Roam have?"* — pulls from Roam's help documentation.
+- *"How does the inbox work in Chief of Staff?"* — explains the read-only processing model, auto-move to daily page, and how to use it.
+
+This works because COS treats the documentation server like any other remote MCP tool — it routes the question to the server, retrieves the relevant content, and synthesises a response grounded in the actual docs rather than the LLM's training data. Responses include Roam-specific syntax examples and configuration steps that are accurate to the current version.
+
+**Setup:** None needed. As long as you have an API key set in settings for one of the LLM providers, this feature is available.
+
+---
+
 ## Task integration
 
 Chief of Staff recognises natural language task queries and routes them to dedicated handlers — no LLM call required for common patterns:
