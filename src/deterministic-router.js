@@ -696,6 +696,7 @@ export async function buildHelpSummary() {
   lines.push("- `/help` — This summary");
   lines.push("- `/clear` — Clear chat history");
   lines.push("- `/compact` — Compress older turns into a summary to free up context");
+  lines.push("- `/lesson` — Record lessons learned from this conversation");
   lines.push("- `/power` — Use a more capable model for this message");
   lines.push("- `/ludicrous` — Use the most capable model");
   lines.push("- `/claude`, `/gemini`, `/openai`, `/mistral` — Force a specific provider for this message");

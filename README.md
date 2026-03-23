@@ -281,6 +281,7 @@ The floating chat panel (bottom-right corner by default) provides a persistent c
 - **Enter** to send, **Shift+Enter** for a new line.
 - **Arrow Up / Down** to cycle through previous messages (like a terminal).
 - `/clear` resets conversation history and context (same as the Clear button).
+- `/lesson` reviews the conversation and records lessons learned to `[[Chief of Staff/Lessons Learned]]`. Add a topic to focus the reflection (e.g. `/lesson error handling`).
 - Suffix a message with `/power` or `/ludicrous` to use a more capable model for that request. Use `/claude`, `/gemini`, `/openai`, or `/mistral` to force a specific provider.
 - A **cost indicator** in the header shows cumulative API spend. Hover for a detailed breakdown: session cost with input/output token counts, today's cost with per-model splits (e.g. `3-flash $2.06`), and rolling 7-day and 30-day totals. Cost history is persisted across sessions. Use **Chief of Staff: Reset Token Usage Stats** to zero the session counters.
 - Each assistant response has a small pin icon at its bottom right. Click it to append the response to your daily note page.
