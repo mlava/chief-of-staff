@@ -47,7 +47,7 @@ Open **Settings > Chief of Staff** and fill in:
 - **LLM Provider** — `anthropic` (default), `openai`, `gemini`, or `mistral`
 - **API Keys** — separate fields for each provider. Only the key for your selected provider is required; configure additional keys to enable automatic failover.
   - Anthropic API Key (`sk-ant-...`)
-  - OpenAI API Key (`sk-...`) — also required for voice dictation (Whisper)
+  - OpenAI API Key (`sk-...`)
   - Google Gemini API Key (`AIza...`)
   - Mistral API Key
 - **LLM Model** — leave blank to use the default for your provider, or enter any model ID supported by that provider
