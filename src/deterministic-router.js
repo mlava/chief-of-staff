@@ -1,0 +1,1594 @@
+/**
+ * deterministic-router.js — Fast-path intent matching for Chief of Staff.
+ *
+ * Handles common intents (search, navigation, memory saves, skill invocations,
+ * tool listings, Composio install/deregister, undo/redo, etc.) without an LLM call.
+ * Extracted from index.js — pure move-and-wire refactoring, no behaviour changes.
+ *
+ * DI pattern: call initDeterministicRouter(deps) once from onload().
+ */
+
+// ── Direct imports from already-extracted modules ──────────────────────────────
+
+import { normaliseToolSlugToken, getToolsConfigState, getToolkitSchemaRegistry, getToolSchema } from "./composio-mcp.js";
+import { installComposioTool, deregisterComposioTool, connectComposio, reconcileInstalledToolsWithComposio } from "./composio-ui.js";
+import { getLocalMcpTools, formatToolListByServer } from "./local-mcp.js";
+import { getRemoteMcpTools } from "./remote-mcp.js";
+import { getLatestWorkflowSuggestionsFromConversation, promptLooksLikeWorkflowDraftFollowUp, extractWorkflowSuggestionIndex } from "./conversation.js";
+import { showInfoToastIfAllowed, promptWriteToDailyPage, promptToolExecutionApproval } from "./chat-panel.js";
+import { loadCronJobs } from "./cron-scheduler.js";
+import { buildDefaultSystemPrompt } from "./system-prompt.js";
+import { wrapUntrustedWithInjectionScan } from "./security.js";
+
+// ── Dependency injection ───────────────────────────────────────────────────────
+
+let deps = {};
+
+export function initDeterministicRouter(injected) {
+  deps = injected;
+}
+
+// ── Intent parsers ─────────────────────────────────────────────────────────────
+
+export function isConnectionStatusIntent(userMessage) {
+  const text = String(userMessage || "").toLowerCase();
+  if (!text) return false;
+
+  const patterns = [
+    "connected tools",
+    "tool connections",
+    "active connections",
+    "connected apps",
+    "composio apps",
+    "apps from composio",
+    "apps in composio",
+    "apps do i have from composio",
+    "what composio apps",
+    "what apps do i have",
+    "what is connected",
+    "what's connected",
+    "what tools are connected",
+    "summarise my current connected tools",
+    "summarize my current connected tools",
+    "list my connected tools",
+    "show my connected tools",
+    "connection status"
+  ];
+  return patterns.some((pattern) => text.includes(pattern));
+}
+
+export function parseMemorySaveIntent(userMessage) {
+  const text = String(userMessage || "").trim();
+  if (!text) return null;
+
+  const inboxDirectMatch = text.match(/^(?:note|capture|idea)\s*[:\-]\s*(.+)$/i);
+  if (inboxDirectMatch) {
+    const content = String(inboxDirectMatch[1] || "").trim();
+    if (!content) return null;
+    return { page: "inbox", content };
+  }
+
+  const saveIdeaMatch = text.match(/^(?:save|remember|record)\s+(?:this\s+)?idea\s*[:\-]\s*(.+)$/i);
+  if (saveIdeaMatch) {
+    const content = String(saveIdeaMatch[1] || "").trim();
+    if (!content) return null;
+    return { page: "inbox", content };
+  }
+
+  const saveNoteMatch = text.match(/^(?:save|remember|record)\s+(?:this\s+)?note\s*[:\-]\s*(.+)$/i);
+  if (saveNoteMatch) {
+    const content = String(saveNoteMatch[1] || "").trim();
+    if (!content) return null;
+    return { page: "inbox", content };
+  }
+
+  const lessonMatch = text.match(/^(?:remember|save|note|record)\s+(?:this\s+)?lesson\s*[:\-]\s*(.+)$/i);
+  if (lessonMatch) {
+    const content = String(lessonMatch[1] || "").trim();
+    if (!content) return null;
+    return { page: "lessons", content };
+  }
+
+  const decisionMatch = text.match(/^(?:remember|save|note|record)\s+(?:this\s+)?decision\s*[:\-]\s*(.+)$/i);
+  if (decisionMatch) {
+    const content = String(decisionMatch[1] || "").trim();
+    if (!content) return null;
+    return { page: "decisions", content };
+  }
+
+  const projectMatch = text.match(/^(?:remember|save|note|record)\s+(?:this\s+)?project(?:\s+update)?\s*[:\-]\s*(.+)$/i);
+  if (projectMatch) {
+    const content = String(projectMatch[1] || "").trim();
+    if (!content) return null;
+    return { page: "projects", content };
+  }
+
+  const genericRememberMatch = text.match(/^(?:remember|save|note|record)\s+(?:this|that)\s*[:\-]\s*(.+)$/i);
+  if (genericRememberMatch) {
+    const content = String(genericRememberMatch[1] || "").trim();
+    if (!content) return null;
+    return { page: "memory", content };
+  }
+
+  return null;
+}
+
+export function parseSkillInvocationIntent(userMessage) {
+  const text = String(userMessage || "").trim();
+  if (!text) return null;
+
+  const explicitMatch = text.match(/^(?:please\s+)?(?:use|apply|run)\s+(?:the\s+)?skill\s+["\u201C\u201D\u2018\u2019']?([^"\u201C\u201D\u2018\u2019']+?)["\u201C\u201D\u2018\u2019']?(?:\s+(?:on|for)\s+(.+))?$/i);
+  if (explicitMatch) {
+    return {
+      skillName: String(explicitMatch[1] || "").trim(),
+      targetText: String(explicitMatch[2] || "").trim(),
+      originalPrompt: text
+    };
+  }
+
+  const inverseMatch = text.match(/^(?:please\s+)?(?:use|apply|run)\s+(.+?)\s+skill(?:\s+(?:on|for)\s+(.+))?$/i);
+  if (inverseMatch) {
+    return {
+      skillName: String(inverseMatch[1] || "").trim(),
+      targetText: String(inverseMatch[2] || "").trim(),
+      originalPrompt: text
+    };
+  }
+  return null;
+}
+
+export function parseComposioDeregisterIntent(userMessage, options = {}) {
+  const { installedSlugs = [] } = options;
+  const text = String(userMessage || "").trim();
+  if (!text) return null;
+  const lowered = text.toLowerCase();
+  if (!/(deregister|uninstall|remove|disconnect)/i.test(lowered)) return null;
+  const installedSet = new Set(
+    (Array.isArray(installedSlugs) ? installedSlugs : [])
+      .map((value) => normaliseToolSlugToken(value))
+      .filter(Boolean)
+  );
+  const hasComposioContext = /(composio|tool|connection|integration|app|connected)/i.test(lowered);
+  // "uninstall" and "deregister" are unambiguous — they always mean tool removal.
+  // "remove" and "disconnect" are ambiguous ("remove this block", "disconnect from wifi")
+  // and need either Composio context words or the slug to be in the installed set.
+  const isUnambiguousVerb = /\b(uninstall|deregister)\b/i.test(lowered);
+
+  const quotedMatch = text.match(/"([^"]+)"/);
+  const fromQuotes = normaliseToolSlugToken(String(quotedMatch?.[1] || "").trim());
+  if (fromQuotes) {
+    if (isUnambiguousVerb || hasComposioContext || installedSet.has(fromQuotes)) {
+      return { toolSlug: fromQuotes };
+    }
+    return null;
+  }
+
+  const directMatch = text.match(/\b(?:deregister|uninstall|remove|disconnect)\s+(?:(?:the|a|an)\s+)?(?:composio\s+)?(?:tool\s+)?([a-z][a-z0-9_ -]*)/i);
+  const rawSlug = String(directMatch?.[1] || "").trim()
+    .replace(/\s*tools?\s*$/i, "")  // strip trailing "tool"
+  // Real tool slugs are 1–3 words max
+  const slugWords = rawSlug.split(/\s+/).filter(Boolean);
+  if (slugWords.length > 3) return null;
+  // Reject if any word is a common English word — real Composio slugs are product/service names
+  const slugStopWords = /^(a|an|the|my|some|any|this|that|it|its|from|to|in|on|for|with|about|at|by|of|random|please|just|here|there|all|every|each|no|not|but|or|and|so|yet)$/i;
+  if (slugWords.some(w => slugStopWords.test(w))) return null;
+  const directSlug = normaliseToolSlugToken(rawSlug.replace(/\s+/g, ""));
+  if (!directSlug) return null;
+  if (!isUnambiguousVerb && !hasComposioContext && !installedSet.has(directSlug)) return null;
+  return { toolSlug: directSlug };
+}
+
+export function parseComposioInstallIntent(userMessage) {
+  const text = String(userMessage || "").trim();
+  if (!text) return null;
+  const lowered = text.toLowerCase();
+  if (!/(install|add|connect|enable|set\s*up)\b/i.test(lowered)) return null;
+  // Exclude deregister-style phrases
+  if (/(deregister|uninstall|remove|disconnect)\b/i.test(lowered)) return null;
+
+  // Exclude help / how-to questions — "how do I connect a remote MCP server?" is asking for
+  // guidance, not requesting a Composio install. Only block "how" and "what/where" question
+  // patterns (unambiguously instructional). "Can I connect todoist?" is a polite install request
+  // so "can I" is intentionally NOT excluded.
+  if (/\b(how\s+(do|can|to|does|should|would)|what\s+(is|are|does)|where\s+(is|are|do))\b/i.test(lowered)) return null;
+
+  const hasComposioContext = /(composio|tool|integration|service)\b/i.test(lowered);
+  // "install" is the only verb unambiguous enough to stand alone — nobody says "install" in
+  // casual Roam conversation unless they mean a tool. "add", "connect", "enable", and "set up"
+  // are everyday verbs ("connect my notes", "enable focus mode", "set up a weekly review") and
+  // need explicit tool/integration context to avoid false Composio install triggers.
+  const verb = lowered.match(/\b(install|add|connect|enable|set\s*up)\b/i)?.[1]?.toLowerCase() || "";
+  const isAmbiguousVerb = verb !== "install";
+  if (!hasComposioContext && isAmbiguousVerb) return null;
+  // For "install", still require the verb + word pattern (reject bare "install" with no object)
+  if (!hasComposioContext && !isAmbiguousVerb &&
+    !/\binstall\s+[a-z]/i.test(lowered)) return null;
+
+  // Try quoted slug first
+  const quotedMatch = text.match(/"([^"]+)"/);
+  if (quotedMatch) {
+    const slug = normaliseToolSlugToken(String(quotedMatch[1]).trim());
+    if (slug) return { toolSlug: slug };
+  }
+
+  // Direct match: "install todoist", "add the gmail tool", "connect google calendar"
+  const directMatch = text.match(/\b(?:install|add|connect|enable|set\s*up)\s+(?:(?:the|a|an)\s+)?(?:composio\s+)?(?:tool\s+)?([a-z][a-z0-9_ -]*)/i);
+  const rawSlug = String(directMatch?.[1] || "").trim()
+    .replace(/\s*tools?\s*$/i, "") // strip trailing "tool"
+  // Real tool slugs are 1–3 words max (e.g. "gmail", "google calendar", "semantic scholar")
+  const slugWords = rawSlug.split(/\s+/).filter(Boolean);
+  if (slugWords.length > 3) return null;
+  // Reject if any word is a common English word or a common noun that clashes with natural prompts.
+  // Real Composio slugs are product/service names (gmail, todoist, notion, google calendar).
+  const slugStopWords = /^(a|an|the|my|some|any|this|that|it|its|from|to|in|on|for|with|about|at|by|of|random|please|just|here|there|all|every|each|no|not|but|or|and|so|yet|new|event|events?|task|tasks?|meeting|meetings?|note|notes?|reminder|reminders?|item|items?|entry|entries|block|blocks?|page|pages?|calendar|email|message|contact|file|link|date|time|appointment)$/i;
+  // Reject only if ALL words are stopwords. Multi-word product names like
+  // "google calendar" should pass because "google" is not a stopword.
+  if (slugWords.every(w => slugStopWords.test(w))) return null;
+  const slug = normaliseToolSlugToken(rawSlug.replace(/\s+/g, ""));
+  if (!slug) return null;
+  return { toolSlug: slug };
+}
+
+function collectObjectRecordsDeep(value, maxRecords = 300) {
+  const queue = [value];
+  const seen = new Set();
+  const records = [];
+  while (queue.length && records.length < maxRecords) {
+    const current = queue.shift();
+    if (!current || typeof current !== "object") continue;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    if (!Array.isArray(current)) {
+      records.push(current);
+    }
+    Object.values(current).forEach((next) => {
+      if (next && typeof next === "object") queue.push(next);
+    });
+  }
+  return records;
+}
+
+function firstNonEmptyString(record, keys = []) {
+  for (const key of keys) {
+    const value = record?.[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+// ── Calendar/email deterministic helpers removed — now using Local MCP tool discovery ──
+
+async function runDeterministicMemorySave(intent) {
+  const pageKey = String(intent?.page || "memory").toLowerCase();
+  const content = String(intent?.content || "").trim();
+  if (!content) throw new Error("No memory content to save.");
+  const result = await deps.updateChiefMemory({
+    page: pageKey,
+    action: "append",
+    content
+  });
+  const pageNameByKey = {
+    memory: "Chief of Staff/Memory",
+    inbox: "Chief of Staff/Inbox",
+    skills: "Chief of Staff/Skills",
+    projects: "Chief of Staff/Projects",
+    decisions: "Chief of Staff/Decisions",
+    lessons: "Chief of Staff/Lessons Learned",
+    improvements: "Chief of Staff/Improvement Requests"
+  };
+  const label = pageNameByKey[pageKey] || String(result?.page || "Chief of Staff/Memory");
+  return `Saved to [[${label}]]${result?.uid ? ` (uid: ${result.uid})` : ""}.`;
+}
+
+// ── Skill parsing ──────────────────────────────────────────────────────────────
+
+export function parseSkillSources(skillContent, knownToolNames = null) {
+  const lines = String(skillContent || "").split("\n");
+
+  // Phase 1: find the "Sources" header and collect its child lines
+  let inSources = false;
+  let sourceIndent = -1;
+  const sourceLines = [];
+
+  for (const line of lines) {
+    if (!inSources) {
+      if (/^\s*-?\s*Sources\s*(?:—|:)/i.test(line)) {
+        inSources = true;
+        sourceIndent = (line.match(/^(\s*)/)?.[1] || "").length;
+      }
+      continue;
+    }
+    const indent = (line.match(/^(\s*)/)?.[1] || "").length;
+    if (indent > sourceIndent && line.trim()) {
+      sourceLines.push(line.trim().replace(/^-\s*/, ""));
+    } else if (line.trim()) {
+      break; // back to same or lower indent = end of sources
+    }
+  }
+
+  if (!sourceLines.length) return [];
+
+  // COS memory pages already loaded in system prompt — skip these
+  const preloadedPages = new Set([
+    ...deps.MEMORY_PAGE_TITLES_BASE,
+    "Chief of Staff/Skills",
+    "Chief of Staff/Projects"
+  ]);
+
+  // Phase 2: parse each child line into a source entry
+  const sources = [];
+  for (const seg of sourceLines) {
+    const pageRefs = [...seg.matchAll(/\[\[([^\]]+)\]\]/g)].map(m => m[1]);
+
+    // Strip markdown formatting (backticks) before tool name matching
+    const cleanSeg = seg.replace(/`/g, "");
+
+    // Check for known tool name prefix (try longest match first)
+    // Support both underscore (roam_get_page) and hyphen (list-events) separators
+    const toolThreeWord = cleanSeg.match(/^([\w]+[-_][\w]+[-_][\w]+)/)?.[1] || "";
+    const toolTwoWord = cleanSeg.match(/^([\w]+[-_][\w]+)/)?.[1] || "";
+    const toolOneWord = cleanSeg.match(/^([\w]+)/)?.[1] || "";
+    const SOURCE_TOOL_NAME_MAP = deps.SOURCE_TOOL_NAME_MAP;
+    const resolvedTool = SOURCE_TOOL_NAME_MAP[toolThreeWord]
+      || SOURCE_TOOL_NAME_MAP[toolTwoWord]
+      || SOURCE_TOOL_NAME_MAP[toolOneWord];
+
+    if (resolvedTool) {
+      sources.push({ tool: resolvedTool, description: seg });
+      continue;
+    }
+
+    // Fallback: check live tool registry for extension tools not in the static map
+    if (knownToolNames) {
+      const directMatch = knownToolNames.has(toolThreeWord) ? toolThreeWord
+        : knownToolNames.has(toolTwoWord) ? toolTwoWord
+          : knownToolNames.has(toolOneWord) ? toolOneWord
+            : null;
+      if (directMatch) {
+        sources.push({ tool: directMatch, description: seg });
+        continue;
+      }
+    }
+
+    // Pure page references (no tool prefix)
+    if (pageRefs.length > 0) {
+      for (const title of pageRefs) {
+        if (preloadedPages.has(title)) continue;
+        sources.push({ tool: "roam_get_page", description: `[[${title}]]` });
+      }
+      continue;
+    }
+    // Unrecognised source — log warning so skill authors can fix tool names
+    console.warn(`[Chief flow] Gathering guard: unrecognised source "${seg}" — not enforced. Update skill to use a known tool name.`);
+  }
+  return sources;
+}
+
+async function runDeterministicSkillInvocation(intent, options = {}) {
+  const { suppressToasts = false } = options;
+  const skillName = String(intent?.skillName || "").trim();
+  if (!skillName) {
+    return "Please provide a skill name, for example: use skill Weekly Planning on my next two weeks.";
+  }
+  const skill = await deps.findSkillEntryByName(skillName, { force: true });
+  if (!skill) {
+    const available = (await deps.getSkillEntries({ force: true }))
+      .map((entry) => entry.title)
+      .slice(0, 12);
+    const suffix = available.length ? ` Available skills: ${available.join(", ")}` : " No skills are currently loaded.";
+    return `I couldn't find a skill named "${skillName}".${suffix}`;
+  }
+
+  const skillPrompt = String(intent?.targetText || "").trim() || `Apply the "${skill.title}" skill to this request: ${intent?.originalPrompt || ""}`;
+  showInfoToastIfAllowed("Skill", `Applying: ${skill.title}`, suppressToasts);
+
+  // Detect daily-page-write skills by name or content
+  const skillNameLower = String(skill.title || "").toLowerCase();
+  const skillContentLower = String(skill.content || "").toLowerCase();
+  const isDailyPageWriteSkill =
+    /daily.briefing/.test(skillNameLower) ||
+    /daily.page|daily.briefing/.test(skillContentLower);
+
+  let systemPromptSuffix = `\n\nYou must prioritize this skill for this turn.`;
+  if (isDailyPageWriteSkill) {
+    systemPromptSuffix += `\n\nIMPORTANT: Do NOT call roam_create_blocks, roam_batch_write, or roam_get_daily_page. The system will write your output to the daily page automatically. Just produce the briefing content as structured markdown with headings (#### for sections) and FLAT bulleted lists (no indentation — every list item must start at column 0 with "- "). Indentation in your output maps directly to Roam block nesting, so indented items become children rather than siblings. Do NOT include any preamble, confirmation, or conversational text — output ONLY the structured briefing content.`;
+  }
+
+  // Parse expected sources for gathering completeness guard.
+  // Include ALL MCP tools (not just direct/registered ones) so namespaced
+  // tools like "sentry_mcp__search_issues" from routed servers are recognised.
+  const toolSchemas = await deps.getAvailableToolSchemas();
+  const knownToolNames = new Set(toolSchemas.map(t => t.name));
+  for (const t of getLocalMcpTools()) knownToolNames.add(t.name);
+  for (const t of getRemoteMcpTools()) knownToolNames.add(t.name);
+  // Include Composio installed tool slugs so gathering guard recognises them
+  // (e.g. GMAIL_FETCH_EMAILS, WEATHERMAP_WEATHER) — these are callable via
+  // COMPOSIO_MULTI_EXECUTE_TOOL or the slug interceptor.
+  const composioRegistry = getToolkitSchemaRegistry();
+  for (const tk of Object.values(composioRegistry.toolkits || {})) {
+    for (const slug of Object.keys(tk.tools || {})) knownToolNames.add(slug);
+  }
+  const expectedSources = parseSkillSources(skill.content, knownToolNames);
+
+  // Pre-resolve MCP tool schemas: if a skill source references a namespaced MCP
+  // tool (e.g. "sentry_mcp__search_issues"), inject its schema into the system
+  // prompt so the LLM can call LOCAL_MCP_EXECUTE directly — skipping LOCAL_MCP_ROUTE.
+  let mcpToolHintsSection = "";
+  if (expectedSources.length > 0) {
+    const mcpToolHints = [];
+    const allLocalTools = getLocalMcpTools();
+    const allRemoteTools = getRemoteMcpTools();
+    for (const src of expectedSources) {
+      const localMatch = allLocalTools.find(t => t.name === src.tool && !t._isDirect);
+      const remoteMatch = !localMatch ? allRemoteTools.find(t => t.name === src.tool && !t._isDirect) : null;
+      const match = localMatch || remoteMatch;
+      if (match) {
+        const schemaStr = match.input_schema && Object.keys(match.input_schema.properties || {}).length > 0
+          ? JSON.stringify(match.input_schema) : "(no parameters)";
+        const metaTool = localMatch ? "LOCAL_MCP_EXECUTE" : "REMOTE_MCP_EXECUTE";
+        mcpToolHints.push(`- **${match.name}** (${match._serverName}): ${match.description || ""}\n  Schema: ${schemaStr}\n  → Call via ${metaTool}({ "tool_name": "${match.name}", "arguments": {...} }) — do NOT call ${localMatch ? "LOCAL" : "REMOTE"}_MCP_ROUTE first.`);
+      }
+    }
+    // Also pre-resolve Composio tool slugs: if a skill source references a Composio
+    // slug (e.g. GMAIL_FETCH_EMAILS, WEATHERMAP_WEATHER), inject its schema so the
+    // LLM calls COMPOSIO_MULTI_EXECUTE_TOOL directly — no brave_web_search needed.
+    const composioHints = [];
+    for (const src of expectedSources) {
+      // Skip sources already matched as MCP tools
+      if (mcpToolHints.some(h => h.includes(`**${src.tool}**`))) continue;
+      const composioSchema = getToolSchema(src.tool);
+      if (composioSchema) {
+        const params = composioSchema.input_schema?.properties || {};
+        const paramList = Object.entries(params).slice(0, 8).map(([name, v]) => {
+          const type = v.type || "any";
+          const req = (composioSchema.input_schema?.required || []).includes(name) ? " (required)" : "";
+          return `    ${name}: ${type}${req}`;
+        }).join("\n");
+        composioHints.push(`- **${src.tool}**: ${(composioSchema.description || "").split(/[.\n]/)[0].slice(0, 80)}\n  Parameters:\n${paramList}\n  → Call via COMPOSIO_MULTI_EXECUTE_TOOL({ "tools": [{ "tool_slug": "${src.tool}", "arguments": {...} }] }) or call \`${src.tool}\` directly.`);
+      }
+    }
+
+    if (mcpToolHints.length > 0 || composioHints.length > 0) {
+      const sections = [];
+      if (mcpToolHints.length > 0) {
+        sections.push(`### MCP Tools\nCall directly via LOCAL_MCP_EXECUTE or REMOTE_MCP_EXECUTE without routing.\n\n${mcpToolHints.join("\n\n")}`);
+      }
+      if (composioHints.length > 0) {
+        sections.push(`### Composio Tools\nCall directly via COMPOSIO_MULTI_EXECUTE_TOOL (batch multiple in one call) or call the slug directly. Do NOT web-search for these tools.\n\n${composioHints.join("\n\n")}`);
+      }
+      mcpToolHintsSection = `\n\n## Pre-Resolved Tool Schemas\nThese tools are required by this skill. Their schemas are pre-loaded — call them directly.\n\n${sections.join("\n\n")}`;
+      deps.debugLog(`[Chief flow] Pre-resolved ${mcpToolHints.length} MCP + ${composioHints.length} Composio tool schema(s) for skill "${skill.title}"`);
+    }
+  }
+
+  const systemPrompt = `${await buildDefaultSystemPrompt(skillPrompt)}
+
+## Active Skill (Explicitly Requested)
+${wrapUntrustedWithInjectionScan("skill_content", skill.content)}
+${systemPromptSuffix}${mcpToolHintsSection}`;
+
+  const gatheringGuard = expectedSources.length > 0 ? { expectedSources, source: "pre-loop" } : null;
+  if (gatheringGuard) {
+    deps.debugLog(`[Chief flow] Gathering guard active: ${expectedSources.length} expected sources for "${skill.title}"`);
+  }
+
+  // Boost iteration cap for skills with many sources (need sources + skill fetch + time + synthesis + buffer)
+  const skillMaxIterations = gatheringGuard
+    ? Math.min(expectedSources.length + 4, deps.MAX_AGENT_ITERATIONS_SKILL)
+    : undefined;
+
+  const result = await deps.runAgentLoopWithFailover(skillPrompt, {
+    systemPrompt,
+    powerMode: true,
+    gatheringGuard,
+    ...(skillMaxIterations ? { maxIterations: skillMaxIterations } : {}),
+    onToolCall: (name) => {
+      showInfoToastIfAllowed("Using tool", name, suppressToasts);
+    }
+  });
+  const responseText = String(result?.text || "").trim().replace(/\[Key reference:[^\]]*\]\s*/g, "").trim() || "No response generated.";
+
+  // If it's a daily-page-write skill, write the output to the DNP from code.
+  if (isDailyPageWriteSkill) {
+    // Strip LLM preamble/postamble — keep only lines starting with #, -, *, or digit
+    const contentLines = responseText.split("\n");
+    const firstStructuredLine = contentLines.findIndex(l => /^#{1,6}\s|^[-*]\s|^\d+[.)]\s/.test(l.trim()));
+    const lastStructuredLine = (() => {
+      for (let j = contentLines.length - 1; j >= 0; j--) {
+        if (/^#{1,6}\s|^[-*]\s|^\d+[.)]\s|^\s+[-*]\s/.test(contentLines[j].trim())) return j;
+      }
+      return -1;
+    })();
+    let cleanedText = firstStructuredLine >= 0 && lastStructuredLine >= firstStructuredLine
+      ? contentLines.slice(firstStructuredLine, lastStructuredLine + 1).join("\n").trim()
+      : responseText;
+
+    // Flatten accidental LLM indentation on list items so they become siblings
+    // under their heading rather than progressively nested children.
+    // Headings and non-list lines are preserved as-is.
+    cleanedText = cleanedText.split("\n").map(line => {
+      // If the line is an indented list item, strip leading whitespace
+      if (/^\s+([-*]|\d+[.)]) /.test(line)) return line.trimStart();
+      return line;
+    }).join("\n");
+
+    if (cleanedText.length > 40) {
+      try {
+        const heading = `[[Chief of Staff Daily Briefing]]`;
+        const writeResult = await deps.writeStructuredResponseToTodayDailyPage(heading, cleanedText);
+        showInfoToastIfAllowed("Saved to Roam", `Added under ${writeResult.pageTitle}.`, suppressToasts);
+        return `Briefing written to today's daily page under ${heading}.`;
+      } catch (error) {
+        deps.debugLog("[Chief flow] Skill auto-write to DNP failed:", error?.message || error);
+      }
+    } else {
+      deps.debugLog("[Chief flow] Skill response doesn't look like briefing content, skipping DNP write:", responseText.slice(0, 200));
+    }
+  }
+
+  return responseText;
+}
+
+// ── Connection summary ─────────────────────────────────────────────────────────
+
+async function getDeterministicConnectionSummary(extensionAPI) {
+  const client = await connectComposio(extensionAPI, { suppressConnectedToast: true });
+  if (client?.callTool) {
+    await reconcileInstalledToolsWithComposio(extensionAPI);
+  }
+
+  const state = getToolsConfigState(extensionAPI);
+  const installed = state.installedTools.filter((tool) => tool.installState === "installed");
+  const pending = state.installedTools.filter((tool) => tool.installState === "pending_auth");
+  const failed = state.installedTools.filter((tool) => tool.installState === "failed");
+
+  if (!installed.length && !pending.length && !failed.length) {
+    return "No Composio tools are currently tracked as connected. Install a tool from the command palette to get started.";
+  }
+
+  const formatToolList = (tools) =>
+    tools.map((tool) => String(tool.label || tool.slug || "").trim()).filter(Boolean).join(", ");
+
+  const lines = [];
+  if (installed.length) lines.push(`Connected: ${formatToolList(installed)}`);
+  if (pending.length) lines.push(`Pending auth: ${formatToolList(pending)}`);
+  if (failed.length) lines.push(`Failed: ${formatToolList(failed)}`);
+  return lines.join("\n");
+}
+
+// ── Help summary ───────────────────────────────────────────────────────────────
+
+/**
+ * Build a context-aware capability summary for /help.
+ * Gathers live state from every integration surface and returns markdown.
+ */
+export async function buildHelpSummary() {
+  const lines = [];
+  const extensionAPIRef = deps.getExtensionAPIRef();
+  const provider = extensionAPIRef ? deps.getLlmProvider(extensionAPIRef) : "unknown";
+  const providerLabel = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Google Gemini", mistral: "Mistral" }[provider] || provider;
+  const assistantName = deps.getAssistantDisplayName();
+
+  lines.push(`## ${assistantName}`);
+  lines.push("");
+  lines.push(`I'm your AI assistant inside Roam Research. Here's what I can do right now:\n`);
+
+  // ── AI provider ──
+  lines.push(`**AI provider:** ${providerLabel}`);
+  lines.push(`- Default model tier: mini · Type \`/power\` before a message for a stronger model, or \`/ludicrous\` for the strongest`);
+
+  // Provider key count + fallback nudge
+  if (extensionAPIRef) {
+    const providerKeyMap = {
+      anthropic: { key: deps.SETTINGS_KEYS.anthropicApiKey, label: "Anthropic" },
+      openai: { key: deps.SETTINGS_KEYS.openaiApiKey, label: "OpenAI" },
+      gemini: { key: deps.SETTINGS_KEYS.geminiApiKey, label: "Gemini" },
+      mistral: { key: deps.SETTINGS_KEYS.mistralApiKey, label: "Mistral" }
+    };
+    const configured = [];
+    for (const [prov, { key, label }] of Object.entries(providerKeyMap)) {
+      if (deps.getSettingString(extensionAPIRef, key, "")) configured.push(label);
+    }
+    if (configured.length >= 2) {
+      lines.push(`- API keys configured: ${configured.join(", ")} · Automatic failover is active for rate limits and outages`);
+    } else if (configured.length === 1) {
+      lines.push(`- API key configured: ${configured[0]} only · Add keys for other providers in Settings to enable automatic failover on rate limits`);
+    }
+  }
+  lines.push("");
+
+  // ── Roam tools ──
+  const roamTools = deps.getRoamNativeTools() || [];
+  lines.push(`**Roam tools** (${roamTools.length}): Search, create, update, move, and delete blocks and pages; query your graph; build outlines`);
+  lines.push("");
+
+  // ── Extension tools ──
+  try {
+    const registry = deps.getExtensionToolsRegistry();
+    const extToolsConfig = deps.getExtToolsConfig();
+    const extNames = [];
+    for (const [extKey, ext] of Object.entries(registry)) {
+      if (!extToolsConfig[extKey]?.enabled) continue;
+      if (!ext || !Array.isArray(ext.tools) || !ext.tools.length) continue;
+      const label = String(ext.name || extKey).trim();
+      const count = ext.tools.filter(t => t?.name && typeof t.execute === "function").length;
+      if (count) extNames.push(`${label} (${count})`);
+    }
+    if (extNames.length) {
+      lines.push(`**Extension tools:** ${extNames.join(", ")}`);
+      lines.push("");
+    }
+  } catch { /* ignore */ }
+
+  // ── Local MCP ──
+  const localMcpTools = getLocalMcpTools() || [];
+  if (localMcpTools.length > 0) {
+    const byServer = new Map();
+    for (const t of localMcpTools) {
+      const sn = t._serverName || "Unknown";
+      if (!byServer.has(sn)) byServer.set(sn, 0);
+      byServer.set(sn, byServer.get(sn) + 1);
+    }
+    const serverSummaries = [];
+    for (const [name, count] of byServer) serverSummaries.push(`${name} (${count})`);
+    lines.push(`**Local MCP servers:** ${serverSummaries.join(", ")}`);
+  } else {
+    lines.push("**Local MCP servers:** Not connected · Configure in Settings → Local MCP Server Ports · [Setup guide](https://github.com/mlava/chief-of-staff#3-connect-local-mcp-servers-optional)");
+  }
+  lines.push("");
+
+  // ── Composio ──
+  try {
+    const state = extensionAPIRef ? getToolsConfigState(extensionAPIRef) : { installedTools: [] };
+    const connected = state.installedTools.filter(t => t.installState === "installed");
+    if (connected.length > 0) {
+      lines.push(`**External services** (Composio): ${connected.map(t => t.label || t.slug).join(", ")}`);
+    } else {
+      lines.push("**External services:** None connected · Use the command palette to connect Gmail, Calendar, Todoist, etc. · [Setup guide](https://github.com/mlava/chief-of-staff#2-connect-composio-optional)");
+    }
+  } catch { /* ignore */ }
+  lines.push("");
+
+  // ── Memory ──
+  const memoryPromptCache = deps.getMemoryPromptCache();
+  const hasMemory = memoryPromptCache.content && memoryPromptCache.content.length > 20;
+  if (hasMemory) {
+    lines.push("**Memory:** Active · I remember your preferences, projects, and decisions across sessions · See `[[Chief of Staff/Memory]]`");
+  } else {
+    // Check if the memory page exists even though cache is empty
+    const memPageUid = window.roamAlphaAPI?.pull?.("[:block/uid]", [":node/title", "Chief of Staff/Memory"]);
+    if (memPageUid) {
+      lines.push("**Memory:** Page exists but is light on content · Tell me things to remember, or run memory bootstrap from the command palette · See `[[Chief of Staff/Memory]]`");
+    } else {
+      lines.push("**Memory:** Not yet populated · Tell me things to remember, or run memory bootstrap from the command palette");
+    }
+  }
+  lines.push("");
+
+  // ── Skills ──
+  // Ensure skills cache is populated (it may be empty if no agent loop has run yet)
+  const skillsPromptCache = deps.getSkillsPromptCache();
+  let skillEntries = skillsPromptCache.entries;
+  if (!skillEntries || skillEntries.length === 0) {
+    try {
+      skillEntries = await deps.getSkillEntries();
+    } catch { skillEntries = []; }
+  }
+  const hasSkills = skillEntries && skillEntries.length > 0;
+  lines.push(hasSkills
+    ? `**Skills:** ${skillEntries.length} skill${skillEntries.length > 1 ? "s" : ""} loaded · Custom workflows you've taught me`
+    : "**Skills:** None defined yet · Create skills on the Chief of Staff/Skills page"
+  );
+  lines.push("");
+
+  // ── Cron ──
+  try {
+    const jobs = loadCronJobs();
+    const enabled = jobs.filter(j => j.enabled !== false);
+    if (enabled.length > 0) {
+      lines.push(`**Scheduled jobs:** ${enabled.length} active · Automated tasks running on a schedule`);
+      lines.push("");
+    }
+  } catch { /* ignore */ }
+
+  // ── Commands ──
+  lines.push("**Chat commands:**");
+  lines.push("- `/help` — This summary");
+  lines.push("- `/clear` — Clear chat history");
+  lines.push("- `/compact` — Compress older turns into a summary to free up context");
+  lines.push("- `/power` — Use a more capable model for this message");
+  lines.push("- `/ludicrous` — Use the most capable model");
+  lines.push("- `/claude`, `/gemini`, `/openai`, `/mistral` — Force a specific provider for this message");
+  lines.push("");
+  lines.push("**Tips:** Ask me to search your graph, manage tasks, send emails, create pages, run your daily briefing, or anything else. I'll use the right tools automatically.");
+
+  return lines.join("\n");
+}
+
+// ── Main router ────────────────────────────────────────────────────────────────
+
+export async function tryRunDeterministicAskIntent(prompt, context = {}) {
+  const {
+    suppressToasts = false,
+    assistantName = deps.getAssistantDisplayName(),
+    installedToolSlugsForIntents = [],
+    offerWriteToDailyPage = false
+  } = context;
+  deps.debugLog("[Chief flow] Deterministic router: evaluating.");
+
+  // Mark trace as "local" so the chat panel shows the correct badge
+  // instead of the stale model from the previous LLM turn.
+  // If no deterministic route matches and the function returns null,
+  // the agent loop overwrites lastAgentRunTrace with the real trace.
+  deps.setLastAgentRunTrace({ model: "local", iterations: 0, toolCalls: [] });
+
+  // /help — context-aware capability summary
+  if (/^\/help\s*$/i.test(prompt) || /^\bhelp\b\s*$/i.test(prompt)) {
+    deps.debugLog("[Chief flow] Deterministic route matched: help");
+    const helpText = await buildHelpSummary();
+    return deps.publishAskResponse(prompt, helpText, assistantName, suppressToasts);
+  }
+
+  const extensionAPIRef = deps.getExtensionAPIRef();
+
+  if (extensionAPIRef && isConnectionStatusIntent(prompt)) {
+    deps.debugLog("[Chief flow] Deterministic route matched: connection_status");
+    const summaryText = await getDeterministicConnectionSummary(extensionAPIRef);
+    return deps.publishAskResponse(prompt, summaryText, assistantName, suppressToasts);
+  }
+
+  // ── Undo ──────────────────────────────────────────────────────────
+  // "undo", "undo that", "oops", "revert", "revert that"
+  if (/^(?:undo|oops!?|whoops!?|revert)\s*(?:that|the last|my last|it)?\s*(?:change|action|edit|operation)?[.!?]?\s*$/i.test(prompt)) {
+    deps.debugLog("[Chief flow] Deterministic route matched: undo");
+    const roamTools = deps.getRoamNativeTools() || [];
+    const undoTool = roamTools.find(t => t.name === "roam_undo");
+    if (undoTool && typeof undoTool.execute === "function") {
+      try {
+        await undoTool.execute({});
+        return deps.publishAskResponse(prompt, "Done — last action undone.", assistantName, suppressToasts);
+      } catch (e) {
+        return deps.publishAskResponse(prompt, `Undo failed: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+      }
+    }
+  }
+
+  // ── Redo ──────────────────────────────────────────────────────────
+  // "redo", "redo that", "redo the last change"
+  if (/^redo\s*(?:that|the last|my last|it)?\s*(?:change|action|edit|operation)?[.!?]?\s*$/i.test(prompt)) {
+    deps.debugLog("[Chief flow] Deterministic route matched: redo");
+    const roamTools = deps.getRoamNativeTools() || [];
+    const redoTool = roamTools.find(t => t.name === "roam_redo");
+    if (redoTool && typeof redoTool.execute === "function") {
+      try {
+        await redoTool.execute({});
+        return deps.publishAskResponse(prompt, "Done — last action redone.", assistantName, suppressToasts);
+      } catch (e) {
+        return deps.publishAskResponse(prompt, `Redo failed: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+      }
+    }
+  }
+
+  // ── Deterministic search ─────────────────────────────────────────
+  // "search for X", "find X in my graph", "search X", "look up X", "search roam for X"
+  const searchMatch = prompt.match(/^(?:search\s+(?:for|roam\s+for|my\s+(?:graph|roam)\s+for)?|find|look\s*up)\s+(.+?)(?:\s+in\s+(?:my\s+)?(?:graph|roam))?\s*[?.!]*$/i);
+  if (searchMatch) {
+    const query = searchMatch[1].replace(/^["']|["']$/g, "").trim();
+    if (query && query.length >= 2) {
+      deps.debugLog("[Chief flow] Deterministic route matched: search", query);
+      const roamTools = deps.getRoamNativeTools() || [];
+      const tool = roamTools.find(t => t.name === "roam_search");
+      if (tool && typeof tool.execute === "function") {
+        try {
+          const results = await tool.execute({ query, max_results: 20 });
+          if (!Array.isArray(results) || results.length === 0) {
+            return deps.publishAskResponse(prompt, `No results found for "${query}".`, assistantName, suppressToasts);
+          }
+          const lines = [`**Search results for "${query}"** (${results.length} match${results.length === 1 ? "" : "es"}):\n`];
+          for (const r of results) {
+            const pageRef = r.page ? `[[${r.page}]]` : "";
+            const text = String(r.text || "").slice(0, 200);
+            lines.push(`- ${pageRef}: ${text}`);
+          }
+          return deps.publishAskResponse(prompt, lines.join("\n"), assistantName, suppressToasts);
+        } catch (e) {
+          return deps.publishAskResponse(prompt, `Search failed: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+        }
+      }
+    }
+  }
+
+  // ── Get page by [[title]] ──────────────────────────────────────
+  // "what's on [[Page]]", "show me [[Page]]", "get [[Page]]", "read [[Page]]", "contents of [[Page]]"
+  const getPageMatch = prompt.match(/^(?:what(?:'s| is)\s+on|show\s+me\s+(?:the\s+(?:contents?\s+of|page)\s+)?|get|read|display|contents?\s+of)\s+\[\[([^\]]+)\]\]\s*[?.!]*$/i);
+  if (getPageMatch) {
+    const pageTitle = getPageMatch[1].trim();
+    deps.debugLog("[Chief flow] Deterministic route matched: get_page", pageTitle);
+    const roamTools = deps.getRoamNativeTools() || [];
+    const tool = roamTools.find(t => t.name === "roam_get_page");
+    if (tool && typeof tool.execute === "function") {
+      try {
+        const tree = await tool.execute({ title: pageTitle });
+        if (!tree || (Array.isArray(tree) && tree.length === 0) || tree?.notFound) {
+          return deps.publishAskResponse(prompt, `Page **[[${pageTitle}]]** not found or is empty.`, assistantName, suppressToasts);
+        }
+        const formatted = deps.formatBlockTreeForDisplay(tree, pageTitle);
+        return deps.publishAskResponse(prompt, formatted, assistantName, suppressToasts);
+      } catch (e) {
+        return deps.publishAskResponse(prompt, `Could not get page: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+      }
+    }
+  }
+
+  // ── TODOs ──────────────────────────────────────────────────────
+  // "show my todos", "what are my open tasks", "list todos", "pending tasks", "my todos"
+  const todoMatch = prompt.match(/^(?:show\s+(?:me\s+)?(?:my\s+)?|list\s+(?:my\s+)?|what\s+are\s+(?:my\s+)?|get\s+(?:my\s+)?|find\s+(?:my\s+)?)?(?:(?:open|pending|incomplete|outstanding)\s+)?(?:todos?|tasks?|to-?dos?|action\s*items?)\s*[?.!]*$/i);
+  if (todoMatch) {
+    deps.debugLog("[Chief flow] Deterministic route matched: todos");
+    // Prefer Better Tasks search if available
+    const extTools = deps.getExternalExtensionTools() || [];
+    const btSearch = extTools.find(t => t.name === "bt_search");
+    if (btSearch && typeof btSearch.execute === "function") {
+      try {
+        const results = await btSearch.execute({ status: "TODO" });
+        const tasks = Array.isArray(results) ? results : results?.tasks || [];
+        if (tasks.length === 0) {
+          return deps.publishAskResponse(prompt, "No open tasks found.", assistantName, suppressToasts);
+        }
+        const lines = [`**Open tasks** (${tasks.length}):\n`];
+        for (const t of tasks.slice(0, 30)) {
+          const text = t.text || t.title || t.name || JSON.stringify(t);
+          const page = t.page ? ` — [[${t.page}]]` : "";
+          lines.push(`- ${text}${page}`);
+        }
+        if (tasks.length > 30) lines.push(`\n…and ${tasks.length - 30} more.`);
+        return deps.publishAskResponse(prompt, lines.join("\n"), assistantName, suppressToasts);
+      } catch (e) {
+        deps.debugLog("[Chief flow] bt_search failed, falling back to roam_find_todos:", e?.message);
+      }
+    }
+    // Fallback to roam_find_todos
+    const roamTools = deps.getRoamNativeTools() || [];
+    const todoTool = roamTools.find(t => t.name === "roam_find_todos");
+    if (todoTool && typeof todoTool.execute === "function") {
+      try {
+        const result = await todoTool.execute({ status: "TODO", max_results: 30 });
+        const todos = result?.todos || [];
+        if (todos.length === 0) {
+          return deps.publishAskResponse(prompt, "No open TODOs found.", assistantName, suppressToasts);
+        }
+        const lines = [`**Open TODOs** (${result.count}${result.total > result.count ? ` of ${result.total}` : ""}):\n`];
+        for (const t of todos) {
+          const page = t.page ? ` — [[${t.page}]]` : "";
+          lines.push(`- ${t.text}${page}`);
+        }
+        return deps.publishAskResponse(prompt, lines.join("\n"), assistantName, suppressToasts);
+      } catch (e) {
+        return deps.publishAskResponse(prompt, `Could not fetch TODOs: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+      }
+    }
+  }
+
+  // ── DONE / completed tasks ──────────────────────────────────────
+  // "show done tasks", "completed tasks", "what did I finish", "show finished tasks"
+  const doneMatch = prompt.match(/^(?:show\s+(?:me\s+)?(?:my\s+)?|list\s+(?:my\s+)?|what\s+(?:did\s+I\s+(?:finish|complete|do)|are\s+(?:my\s+)?)|get\s+(?:my\s+)?|find\s+(?:my\s+)?)?(?:(?:done|completed?|finished)\s+)?(?:todos?|tasks?|to-?dos?|action\s*items?|items?)(?:\s+(?:done|completed?|finished))?\s*[?.!]*$/i);
+  if (doneMatch && /\b(?:done|complet|finish|did\s+I)\b/i.test(prompt)) {
+    deps.debugLog("[Chief flow] Deterministic route matched: done_tasks");
+    const extTools = deps.getExternalExtensionTools() || [];
+    const btSearch = extTools.find(t => t.name === "bt_search");
+    if (btSearch && typeof btSearch.execute === "function") {
+      try {
+        const results = await btSearch.execute({ status: "DONE" });
+        const tasks = Array.isArray(results) ? results : results?.tasks || [];
+        if (tasks.length === 0) {
+          return deps.publishAskResponse(prompt, "No completed tasks found.", assistantName, suppressToasts);
+        }
+        const lines = [`**Completed tasks** (${tasks.length}):\n`];
+        for (const t of tasks.slice(0, 30)) {
+          const text = t.text || t.title || t.name || JSON.stringify(t);
+          const page = t.page ? ` — [[${t.page}]]` : "";
+          lines.push(`- ${text}${page}`);
+        }
+        if (tasks.length > 30) lines.push(`\n…and ${tasks.length - 30} more.`);
+        return deps.publishAskResponse(prompt, lines.join("\n"), assistantName, suppressToasts);
+      } catch (e) {
+        deps.debugLog("[Chief flow] bt_search DONE failed, falling back to roam_find_todos:", e?.message);
+      }
+    }
+    const roamTools = deps.getRoamNativeTools() || [];
+    const todoTool = roamTools.find(t => t.name === "roam_find_todos");
+    if (todoTool && typeof todoTool.execute === "function") {
+      try {
+        const result = await todoTool.execute({ status: "DONE", max_results: 30 });
+        const todos = result?.todos || [];
+        if (todos.length === 0) {
+          return deps.publishAskResponse(prompt, "No completed TODOs found.", assistantName, suppressToasts);
+        }
+        const lines = [`**Completed TODOs** (${result.count}${result.total > result.count ? ` of ${result.total}` : ""}):\n`];
+        for (const t of todos) {
+          const page = t.page ? ` — [[${t.page}]]` : "";
+          lines.push(`- ${t.text}${page}`);
+        }
+        return deps.publishAskResponse(prompt, lines.join("\n"), assistantName, suppressToasts);
+      } catch (e) {
+        return deps.publishAskResponse(prompt, `Could not fetch completed TODOs: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+      }
+    }
+  }
+
+  // ── Today's page content ───────────────────────────────────────
+  // "what's on today's page", "show today's page content", "today's notes", "what did I write today"
+  // NOTE: "what's on today?" must NOT match — that's a calendar/schedule question.
+  // We require explicit mention of "page", "note", "daily page", or "did I write" so that
+  // bare "what's on today" falls through to the agent loop.
+  const todayContentMatch = /^(?:what(?:'s| is)\s+on\s+(?:today(?:'s)?\s+(?:daily\s*)?(?:page|notes?)|(?:my\s+)?(?:the\s+)?daily\s*(?:page|note))|what\s+did\s+I\s+write\s+(?:on\s+)?today|show\s+(?:me\s+)?today(?:'s)?\s+(?:page\s+)?(?:content|notes?)|today(?:'s)?\s+(?:page\s+)?(?:content|notes?))\s*[?.!]*$/i.test(prompt);
+  if (todayContentMatch) {
+    deps.debugLog("[Chief flow] Deterministic route matched: today_content");
+    const roamTools = deps.getRoamNativeTools() || [];
+    const tool = roamTools.find(t => t.name === "roam_get_daily_page");
+    if (tool && typeof tool.execute === "function") {
+      try {
+        const tree = await tool.execute({});
+        const todayTitle = deps.formatRoamDate(new Date());
+        if (!tree || (Array.isArray(tree) && tree.length === 0)) {
+          return deps.publishAskResponse(prompt, `Today's page (**[[${todayTitle}]]**) is empty.`, assistantName, suppressToasts);
+        }
+        const formatted = deps.formatBlockTreeForDisplay(tree, todayTitle);
+        return deps.publishAskResponse(prompt, formatted, assistantName, suppressToasts);
+      } catch (e) {
+        return deps.publishAskResponse(prompt, `Could not fetch today's page: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+      }
+    }
+  }
+
+  // ── Add to today's page ────────────────────────────────────────
+  // "add X to today's page", "add X to today", "add X to the daily page", "note X"
+  // This is a WRITE operation — uses roam_create_block (isMutating: true).
+  // Approval gating is enforced here to match the published security contract
+  // ("every mutating operation requires explicit approval").
+  const addTodayMatch = prompt.match(/^(?:add|put|write|note|log|jot(?:\s+down)?|capture)\s+(?:(?:"|')(.+?)(?:"|')|(.+?))\s+(?:to|on|in)\s+(?:my\s+)?(?:today(?:'s)?(?:\s+(?:daily\s*)?(?:page|note))?|the\s+daily\s*(?:page|note)?|DNP)\s*[.!?]*$/i)
+    || prompt.match(/^(?:note|log|jot(?:\s+down)?|capture)\s+(?:(?:"|')(.+?)(?:"|')|(.+?))\s*[.!?]*$/i);
+  if (addTodayMatch) {
+    const blockText = (addTodayMatch[1] || addTodayMatch[2] || "").trim();
+    if (blockText && blockText.length >= 2) {
+      deps.debugLog("[Chief flow] Deterministic route matched: add_to_today", blockText);
+      const roamTools = deps.getRoamNativeTools() || [];
+      const createTool = roamTools.find(t => t.name === "roam_create_block");
+      if (createTool && typeof createTool.execute === "function") {
+        try {
+          const todayTitle = deps.formatRoamDate(new Date());
+          const pageUid = deps.getPageUidByTitle(todayTitle);
+          if (!pageUid) {
+            return deps.publishAskResponse(prompt, `Could not find today's page (**${todayTitle}**). Navigate to it first so Roam creates it.`, assistantName, suppressToasts);
+          }
+          const writeArgs = { parent_uid: pageUid, text: blockText, order: "last" };
+          const approved = await promptToolExecutionApproval("roam_create_block", writeArgs);
+          if (!approved) {
+            return deps.publishAskResponse(prompt, "Cancelled — block was not added.", assistantName, suppressToasts);
+          }
+          const result = await createTool.execute(writeArgs);
+          return deps.publishAskResponse(prompt, `Added to **[[${todayTitle}]]**: "${blockText}"`, assistantName, suppressToasts);
+        } catch (e) {
+          return deps.publishAskResponse(prompt, `Could not add to today's page: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+        }
+      }
+    }
+  }
+
+  // ── Recent changes ─────────────────────────────────────────────
+  // "what changed today", "recent edits", "recent changes", "what's been modified"
+  const recentMatch = /^(?:what(?:'s|\s+has)?\s+(?:been\s+)?(?:changed|modified|edited|updated)|recent\s+(?:changes?|edits?|modifications?)|what\s+changed\s+(?:today|recently|this\s+(?:morning|afternoon|evening)))\s*[?.!]*$/i.test(prompt);
+  if (recentMatch) {
+    deps.debugLog("[Chief flow] Deterministic route matched: recent_changes");
+    const roamTools = deps.getRoamNativeTools() || [];
+    const tool = roamTools.find(t => t.name === "roam_get_recent_changes");
+    if (tool && typeof tool.execute === "function") {
+      try {
+        const result = await tool.execute({ hours: 24, limit: 20 });
+        const pages = result?.pages || [];
+        if (pages.length === 0) {
+          return deps.publishAskResponse(prompt, "No pages modified in the last 24 hours.", assistantName, suppressToasts);
+        }
+        const lines = [`**Recently modified pages** (${result.count}${result.total > result.count ? ` of ${result.total}` : ""}, last 24h):\n`];
+        for (const p of pages) {
+          const time = p.edited ? new Date(p.edited).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+          lines.push(`- [[${p.title}]]${time ? ` — ${time}` : ""}`);
+        }
+        return deps.publishAskResponse(prompt, lines.join("\n"), assistantName, suppressToasts);
+      } catch (e) {
+        return deps.publishAskResponse(prompt, `Could not fetch recent changes: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+      }
+    }
+  }
+
+  // ── Sidebar open/close ─────────────────────────────────────────
+  // "open sidebar", "open left sidebar", "open right sidebar", "show sidebar"
+  const openSidebarMatch = prompt.match(/^(?:open|show|display|toggle)\s+(?:the\s+)?(?:(left|right)\s+)?sidebar\s*[.!?]*$/i);
+  if (openSidebarMatch) {
+    const side = (openSidebarMatch[1] || "right").toLowerCase();
+    const toolName = side === "left" ? "roam_open_left_sidebar" : "roam_open_right_sidebar";
+    deps.debugLog(`[Chief flow] Deterministic route matched: open_${side}_sidebar`);
+    const roamTools = deps.getRoamNativeTools() || [];
+    const tool = roamTools.find(t => t.name === toolName);
+    if (tool && typeof tool.execute === "function") {
+      try {
+        await tool.execute({});
+        return deps.publishAskResponse(prompt, `${side.charAt(0).toUpperCase() + side.slice(1)} sidebar opened.`, assistantName, suppressToasts);
+      } catch (e) {
+        return deps.publishAskResponse(prompt, `Could not open ${side} sidebar: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+      }
+    }
+  }
+  // "close sidebar", "close left sidebar", "hide sidebar"
+  const closeSidebarMatch = prompt.match(/^(?:close|hide|dismiss)\s+(?:the\s+)?(?:(left|right)\s+)?sidebar\s*[.!?]*$/i);
+  if (closeSidebarMatch) {
+    const side = (closeSidebarMatch[1] || "right").toLowerCase();
+    const toolName = side === "left" ? "roam_close_left_sidebar" : "roam_close_right_sidebar";
+    deps.debugLog(`[Chief flow] Deterministic route matched: close_${side}_sidebar`);
+    const roamTools = deps.getRoamNativeTools() || [];
+    const tool = roamTools.find(t => t.name === toolName);
+    if (tool && typeof tool.execute === "function") {
+      try {
+        await tool.execute({});
+        return deps.publishAskResponse(prompt, `${side.charAt(0).toUpperCase() + side.slice(1)} sidebar closed.`, assistantName, suppressToasts);
+      } catch (e) {
+        return deps.publishAskResponse(prompt, `Could not close ${side} sidebar: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+      }
+    }
+  }
+
+  // ── UI panel shortcuts ─────────────────────────────────────────
+  // "open roam depot", "open graph overview", "open all pages", "open settings", "open help", "open graph view", "share link"
+  const uiPanelRoutes = [
+    { pattern: /^(?:open|show)\s+(?:the\s+)?(?:roam\s+)?depot\s*[.!?]*$/i,       tool: "roam_open_depot",          label: "Roam Depot" },
+    { pattern: /^(?:open|show)\s+(?:the\s+)?graph(?:\s+overview)?\s*[.!?]*$/i,    tool: "roam_open_graph_overview", label: "Graph Overview" },
+    { pattern: /^(?:open|show|list)\s+(?:the\s+)?all\s+pages?\s*[.!?]*$/i,        tool: "roam_open_all_pages",      label: "All Pages" },
+    { pattern: /^(?:open|show)\s+(?:the\s+)?(?:roam\s+)?settings?\s*[.!?]*$/i,    tool: "roam_open_settings",       label: "Settings" },
+    { pattern: /^(?:open|show)\s+(?:the\s+)?graph\s+view\s*[.!?]*$/i,            tool: "roam_open_graph_view",     label: "Graph View" },
+    { pattern: /^(?:share|copy)\s+(?:the\s+)?(?:page\s+)?link\s*[.!?]*$/i,       tool: "roam_share_link",          label: "Share Link" },
+    { pattern: /^(?:open|show)\s+(?:the\s+)?(?:roam\s+)?help(?:\s+menu)?\s*[.!?]*$/i, tool: "roam_open_help",       label: "Help" },
+  ];
+  for (const route of uiPanelRoutes) {
+    if (route.pattern.test(prompt)) {
+      deps.debugLog(`[Chief flow] Deterministic route matched: ${route.tool}`);
+      const roamTools = deps.getRoamNativeTools() || [];
+      const tool = roamTools.find(t => t.name === route.tool);
+      if (tool && typeof tool.execute === "function") {
+        try {
+          const result = await tool.execute({});
+          if (result?.success === false) {
+            return deps.publishAskResponse(prompt, `Could not open ${route.label}: ${result.error || "Unknown error"}`, assistantName, suppressToasts);
+          }
+          return deps.publishAskResponse(prompt, `${route.label} opened.`, assistantName, suppressToasts);
+        } catch (e) {
+          return deps.publishAskResponse(prompt, `Could not open ${route.label}: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+        }
+      }
+    }
+  }
+
+  // ── Backlinks ──────────────────────────────────────────────────
+  // "what links to [[Page]]", "backlinks for [[Page]]", "references to [[Page]]"
+  const backlinksMatch = prompt.match(/^(?:what\s+(?:links?\s+to|references?)|backlinks?\s+(?:for|of|to)|references?\s+(?:for|to|of)|(?:show|get|find|list)\s+(?:me\s+)?(?:backlinks?|references?)\s+(?:for|to|of))\s+\[\[([^\]]+)\]\]\s*[?.!]*$/i);
+  if (backlinksMatch) {
+    const pageTitle = backlinksMatch[1].trim();
+    deps.debugLog("[Chief flow] Deterministic route matched: backlinks", pageTitle);
+    const roamTools = deps.getRoamNativeTools() || [];
+    const tool = roamTools.find(t => t.name === "roam_get_backlinks");
+    if (tool && typeof tool.execute === "function") {
+      try {
+        const result = await tool.execute({ title: pageTitle, max_results: 30 });
+        const backlinks = result?.backlinks || [];
+        if (backlinks.length === 0) {
+          return deps.publishAskResponse(prompt, `No backlinks found for **[[${pageTitle}]]**.`, assistantName, suppressToasts);
+        }
+        const lines = [`**Backlinks for [[${pageTitle}]]** (${result.count}${result.total > result.count ? ` of ${result.total}` : ""}):\n`];
+        for (const bl of backlinks) {
+          const text = String(bl.text || "").slice(0, 150);
+          lines.push(`- [[${bl.page}]]: ${text}`);
+        }
+        return deps.publishAskResponse(prompt, lines.join("\n"), assistantName, suppressToasts);
+      } catch (e) {
+        return deps.publishAskResponse(prompt, `Could not get backlinks: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+      }
+    }
+  }
+
+  // ── Page metadata / stats ──────────────────────────────────────
+  // "stats for [[Page]]", "metadata for [[Page]]", "page info for [[Page]]"
+  const metadataMatch = prompt.match(/^(?:(?:stats?|statistics?|metadata|page\s*info|info)\s+(?:for|of|on|about)|(?:show|get)\s+(?:me\s+)?(?:stats?|metadata|info)\s+(?:for|of|on|about))\s+\[\[([^\]]+)\]\]\s*[?.!]*$/i);
+  if (metadataMatch) {
+    const pageTitle = metadataMatch[1].trim();
+    deps.debugLog("[Chief flow] Deterministic route matched: page_metadata", pageTitle);
+    const roamTools = deps.getRoamNativeTools() || [];
+    const tool = roamTools.find(t => t.name === "roam_get_page_metadata");
+    if (tool && typeof tool.execute === "function") {
+      try {
+        const meta = await tool.execute({ title: pageTitle });
+        if (!meta || meta.found === false) {
+          return deps.publishAskResponse(prompt, `Page **[[${pageTitle}]]** not found.`, assistantName, suppressToasts);
+        }
+        const lines = [`**[[${meta.title}]]** — page stats:\n`];
+        if (meta.created) lines.push(`- Created: ${new Date(meta.created).toLocaleDateString()}`);
+        if (meta.edited) lines.push(`- Last edited: ${new Date(meta.edited).toLocaleDateString()}`);
+        lines.push(`- Blocks: ${meta.block_count || 0}`);
+        lines.push(`- Words: ${meta.word_count || 0}`);
+        lines.push(`- References: ${meta.reference_count || 0}`);
+        return deps.publishAskResponse(prompt, lines.join("\n"), assistantName, suppressToasts);
+      } catch (e) {
+        return deps.publishAskResponse(prompt, `Could not get page metadata: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+      }
+    }
+  }
+
+  // ── Graph stats / overview ──────────────────────────────────────
+  // "how big is my graph", "graph stats", "graph overview", "how many pages do I have"
+  const graphStatsMatch = /^(?:(?:how\s+(?:big|large)\s+is\s+(?:my\s+)?(?:graph|roam|database))|(?:graph|roam|database)\s+(?:stats?|statistics?|overview|info|summary)|(?:how\s+many\s+(?:pages?|blocks?|notes?)\s+(?:do\s+I\s+have|are\s+there|in\s+my\s+graph)))\s*[?.!]*$/i.test(prompt);
+  if (graphStatsMatch) {
+    deps.debugLog("[Chief flow] Deterministic route matched: graph_stats");
+    try {
+      const api = deps.getRoamAlphaApi();
+      const queryApi = deps.requireRoamQueryApi(api);
+      const pageCountResult = queryApi.q("[:find (count ?p) :where [?p :node/title]]");
+      const blockCountResult = queryApi.q("[:find (count ?b) :where [?b :block/string]]");
+      const pageCount = (Array.isArray(pageCountResult) && pageCountResult[0]) ? pageCountResult[0][0] : 0;
+      const blockCount = (Array.isArray(blockCountResult) && blockCountResult[0]) ? blockCountResult[0][0] : 0;
+      const lines = ["**Graph overview**\n"];
+      lines.push(`- Pages: ${pageCount.toLocaleString()}`);
+      lines.push(`- Blocks: ${blockCount.toLocaleString()}`);
+      // Recent activity
+      const roamTools = deps.getRoamNativeTools() || [];
+      const recentTool = roamTools.find(t => t.name === "roam_get_recent_changes");
+      if (recentTool && typeof recentTool.execute === "function") {
+        try {
+          const recent = await recentTool.execute({ hours: 24, limit: 5 });
+          const recentPages = recent?.pages || [];
+          if (recentPages.length > 0) {
+            lines.push(`- Pages modified (last 24h): ${recent.total || recentPages.length}`);
+          }
+        } catch { /* ignore */ }
+      }
+      // Today's page word count
+      try {
+        const todayTitle = deps.formatRoamDate(new Date());
+        const metaTool = roamTools.find(t => t.name === "roam_get_page_metadata");
+        if (metaTool && typeof metaTool.execute === "function") {
+          const todayMeta = await metaTool.execute({ title: todayTitle });
+          if (todayMeta && todayMeta.found !== false) {
+            lines.push(`- Today's page: ${todayMeta.block_count || 0} blocks, ${todayMeta.word_count || 0} words`);
+          }
+        }
+      } catch { /* ignore */ }
+      return deps.publishAskResponse(prompt, lines.join("\n"), assistantName, suppressToasts);
+    } catch (e) {
+      return deps.publishAskResponse(prompt, `Could not get graph stats: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+    }
+  }
+
+  // ── Open in sidebar ────────────────────────────────────────────
+  // "open [[Page]] in sidebar", "add [[Page]] to sidebar", "sidebar [[Page]]"
+  // Must come BEFORE the navigation route to avoid "open [[X]]" matching nav first
+  const sidebarOpenMatch = prompt.match(/^(?:(?:open|add|show|pin)\s+\[\[([^\]]+)\]\]\s+(?:in|to)\s+(?:the\s+)?(?:right\s+)?sidebar|sidebar\s+\[\[([^\]]+)\]\])\s*[.!?]*$/i);
+  if (sidebarOpenMatch) {
+    const pageTitle = (sidebarOpenMatch[1] || sidebarOpenMatch[2]).trim();
+    deps.debugLog("[Chief flow] Deterministic route matched: open_in_sidebar", pageTitle);
+    const roamTools = deps.getRoamNativeTools() || [];
+    const tool = roamTools.find(t => t.name === "roam_add_right_sidebar_window");
+    if (tool && typeof tool.execute === "function") {
+      try {
+        await tool.execute({ type: "outline", block_uid: pageTitle });
+        return deps.publishAskResponse(prompt, `Opened **[[${pageTitle}]]** in the sidebar.`, assistantName, suppressToasts);
+      } catch (e) {
+        return deps.publishAskResponse(prompt, `Could not open in sidebar: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+      }
+    }
+  }
+
+  // ── Time / date queries ───────────────────────────────────────────
+  // "what time is it?", "what's today's date?", "what day is it?"
+  if (/^(?:what(?:'s| is)?\s+(?:the\s+)?(?:time|date|day)\s*(?:is it|today|now|right now)?|what\s+(?:day|date)\s+is\s+(?:it|today)|what time)\s*[?.!]*\s*$/i.test(prompt)) {
+    deps.debugLog("[Chief flow] Deterministic route matched: time_query");
+    const roamTools = deps.getRoamNativeTools() || [];
+    const timeTool = roamTools.find(t => t.name === "cos_get_current_time");
+    if (timeTool && typeof timeTool.execute === "function") {
+      try {
+        const result = await timeTool.execute({});
+        const responseText = `**${result.currentTime}**\nTimezone: ${result.timezone}\nToday's daily page: [[${result.today}]]`;
+        return deps.publishAskResponse(prompt, responseText, assistantName, suppressToasts);
+      } catch (e) {
+        return deps.publishAskResponse(prompt, `Could not get current time: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+      }
+    }
+  }
+
+  // ── Relative date navigation ────────────────────────────────────
+  // "go to yesterday", "open tomorrow", "show last Monday", "last Friday's page"
+  const relativeDateNav = prompt.match(/^(?:open|go\s+to|show|navigate\s+to|view)\s+(?:my\s+)?(?:(yesterday|tomorrow)(?:(?:'s)?\s+(?:page|notes?))?\s*[.!?]*$|(last|next|this)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?:(?:'s)?\s+(?:page|notes?))?\s*[.!?]*$)/i)
+    || prompt.match(/^(yesterday|tomorrow)(?:(?:'s)?\s+(?:page|notes?))?\s*[.!?]*$/i);
+  if (relativeDateNav) {
+    const keyword = (relativeDateNav[1] || "").toLowerCase();
+    const modifier = (relativeDateNav[2] || "").toLowerCase();
+    const dayName = (relativeDateNav[3] || "").toLowerCase();
+    let targetDate = new Date();
+
+    if (keyword === "yesterday") {
+      targetDate.setDate(targetDate.getDate() - 1);
+    } else if (keyword === "tomorrow") {
+      targetDate.setDate(targetDate.getDate() + 1);
+    } else if (dayName) {
+      const dayMap = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
+      const targetDay = dayMap[dayName];
+      const currentDay = targetDate.getDay();
+      if (modifier === "last") {
+        let diff = currentDay - targetDay;
+        if (diff <= 0) diff += 7;
+        targetDate.setDate(targetDate.getDate() - diff);
+      } else if (modifier === "next") {
+        let diff = targetDay - currentDay;
+        if (diff <= 0) diff += 7;
+        targetDate.setDate(targetDate.getDate() + diff);
+      } else {
+        // "this Monday" — closest upcoming or today
+        let diff = targetDay - currentDay;
+        if (diff < 0) diff += 7;
+        targetDate.setDate(targetDate.getDate() + diff);
+      }
+    }
+
+    const pageTitle = deps.formatRoamDate(targetDate);
+    deps.debugLog("[Chief flow] Deterministic route matched: relative_date_nav", pageTitle);
+    const roamTools = deps.getRoamNativeTools() || [];
+    const openTool = roamTools.find(t => t.name === "roam_open_page");
+    if (openTool && typeof openTool.execute === "function") {
+      try {
+        await openTool.execute({ title: pageTitle });
+        const label = keyword || `${modifier} ${dayName}`;
+        return deps.publishAskResponse(prompt, `Opened **[[${pageTitle}]]** (${label}).`, assistantName, suppressToasts);
+      } catch (e) {
+        return deps.publishAskResponse(prompt, `Could not navigate: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+      }
+    }
+  }
+
+  // ── Navigation — daily page, system pages, [[page]] ───────────────
+  const navDailyMatch = prompt.match(/^(?:open|go\s+to|show|navigate\s+to|view)\s+(?:my\s+)?(?:today(?:'s)?|daily\s*(?:page|note)?|DNP)\s*[.!?]*\s*$/i);
+  const navSystemMatch = prompt.match(/^(?:open|go\s+to|show|navigate\s+to|view)\s+(?:my\s+)?(?:the\s+)?(inbox|decisions|memory|lessons\s*learned|skills|roadmap|improvement\s*requests)\s*(?:page)?\s*[.!?]*\s*$/i);
+  const navBracketMatch = prompt.match(/^(?:open|go\s+to|show|navigate\s+to|view)\s+\[\[([^\]]+)\]\]\s*[.!?]*\s*$/i);
+  if (navDailyMatch || navSystemMatch || navBracketMatch) {
+    const roamTools = deps.getRoamNativeTools() || [];
+    const openTool = roamTools.find(t => t.name === "roam_open_page");
+    if (openTool && typeof openTool.execute === "function") {
+      let pageTitle;
+      let label;
+      if (navDailyMatch) {
+        pageTitle = deps.formatRoamDate(new Date());
+        label = "today's daily page";
+        deps.debugLog("[Chief flow] Deterministic route matched: navigate_daily");
+      } else if (navSystemMatch) {
+        const systemName = navSystemMatch[1].toLowerCase().replace(/\s+/g, " ").trim();
+        const systemPages = {
+          "inbox": "Chief of Staff/Inbox",
+          "decisions": "Chief of Staff/Decisions",
+          "memory": "Chief of Staff/Memory",
+          "lessons learned": "Chief of Staff/Lessons Learned",
+          "skills": "Chief of Staff/Skills",
+          "roadmap": "Chief of Staff/Roadmap",
+          "improvement requests": "Chief of Staff/Improvement Requests"
+        };
+        pageTitle = systemPages[systemName];
+        label = systemName;
+        deps.debugLog("[Chief flow] Deterministic route matched: navigate_system", systemName);
+      } else {
+        pageTitle = navBracketMatch[1].trim();
+        label = pageTitle;
+        deps.debugLog("[Chief flow] Deterministic route matched: navigate_page", pageTitle);
+      }
+      if (pageTitle) {
+        try {
+          await openTool.execute({ title: pageTitle });
+          return deps.publishAskResponse(prompt, `Opened **${label}**.`, assistantName, suppressToasts);
+        } catch (e) {
+          return deps.publishAskResponse(prompt, `Could not open page: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+        }
+      }
+    }
+  }
+
+  // "what github tools do I have?", "list zotero tools", "show my better tasks tools"
+  // Category-specific listing checked BEFORE generic listing so "what workspaces tools" doesn't
+  // get caught by the broader "what ... tools ... do you have" generic pattern.
+  const toolListMatch = prompt.match(/\b(?:what|which|list|show)\b.*?\b([\w][\w.\s-]*?)\s+tools\b/i)
+    || prompt.match(/\btools\s+(?:for|from|on|in)\s+([\w][\w.\s-]*)\b/i);
+  if (toolListMatch) {
+    const queryName = toolListMatch[1].toLowerCase().trim();
+    // Skip generic qualifiers — these should fall through to the generic tool list below
+    const isGenericQualifier = /^(all|your|my|available|the|every)$/.test(queryName);
+    if (!isGenericQualifier) {
+
+      // 1. Check Local MCP servers by server name
+      const mcpTools = getLocalMcpTools();
+      if (mcpTools.length > 0) {
+        const serverTools = mcpTools.filter(t => {
+          const sn = (t._serverName || "").toLowerCase();
+          return sn === queryName || sn.includes(queryName);
+        });
+        if (serverTools.length > 0) {
+          deps.debugLog("[Chief flow] Deterministic route matched: local_mcp_tool_list", queryName);
+          const responseText = formatToolListByServer(serverTools);
+          return deps.publishAskResponse(prompt, responseText, assistantName, suppressToasts);
+        }
+      }
+
+      // 2. Check extension tools by extension name/key
+      try {
+        const registry = deps.getExtensionToolsRegistry();
+        const extToolsConfig = deps.getExtToolsConfig();
+        for (const [extKey, ext] of Object.entries(registry)) {
+          if (!extToolsConfig[extKey]?.enabled) continue;
+          if (!ext || !Array.isArray(ext.tools) || !ext.tools.length) continue;
+          const label = String(ext.name || extKey || "").toLowerCase();
+          const key = String(extKey).toLowerCase();
+          if (label.includes(queryName) || key.includes(queryName) || queryName.includes(label) || queryName.includes(key)) {
+            const validTools = ext.tools.filter(t => t?.name && typeof t.execute === "function");
+            if (validTools.length > 0) {
+              deps.debugLog("[Chief flow] Deterministic route matched: extension_tool_list", queryName);
+              const extLabel = ext.name || extKey;
+              const responseText = `**${extLabel}** (${validTools.length} tools):\n\n` +
+                validTools.map(t => `- **${t.name}**: ${t.description || "No description"}`).join("\n");
+              return deps.publishAskResponse(prompt, responseText, assistantName, suppressToasts);
+            }
+          }
+        }
+      } catch (e) { /* ignore */ }
+
+      // 3. Check Roam native tools by prefix match (e.g. "roam tools")
+      if (queryName === "roam" || queryName === "native" || queryName === "roam native") {
+        const roamTools = deps.getRoamNativeTools() || [];
+        if (roamTools.length > 0) {
+          deps.debugLog("[Chief flow] Deterministic route matched: roam_native_tool_list");
+          const filtered = roamTools.filter(t => t.name.startsWith("roam_"));
+          const responseText = `**Roam native tools** (${filtered.length}):\n\n` +
+            filtered.map(t => `- **${t.name}**: ${t.description || "No description"}`).join("\n");
+          return deps.publishAskResponse(prompt, responseText, assistantName, suppressToasts);
+        }
+      }
+
+      // 4. Check COS tools (e.g. "assistant tools", "cos tools", "memory tools")
+      if (queryName === "cos" || queryName === "assistant" || queryName === "memory" || queryName === "cron") {
+        const cosTools = [...deps.getCosIntegrationTools(), ...deps.getCronTools()];
+        // Also include cos_ prefixed tools from roam-native-tools that are really COS tools
+        const roamTools = deps.getRoamNativeTools() || [];
+        const cosFromRoam = roamTools.filter(t => t.name.startsWith("cos_"));
+        const allCos = [...cosTools, ...cosFromRoam.filter(t => !cosTools.some(c => c.name === t.name))];
+        if (allCos.length > 0) {
+          deps.debugLog("[Chief flow] Deterministic route matched: cos_tool_list");
+          const responseText = `**Assistant tools** (${allCos.length}):\n\n` +
+            allCos.map(t => `- **${t.name}**: ${t.description || "No description"}`).join("\n");
+          return deps.publishAskResponse(prompt, responseText, assistantName, suppressToasts);
+        }
+      }
+    }
+    // If queryName was generic or no category matched, fall through to generic tool list
+  }
+
+  // Generic "what tools do you have?", "list all tools", "what can you do?", "show capabilities"
+  const isGenericToolListQuery = /\b(?:what|which|list|show)\b.*?\b(?:tools|capabilities)\b.*?\b(?:do you have|available|are there|you have|can you)\b/i.test(prompt)
+    || /\b(?:what|which|list|show)\b.*?\b(?:all|your|my)\s+tools\b/i.test(prompt)
+    || /\b(?:what can you do|what are your capabilities|your capabilities)\b/i.test(prompt)
+    || /^(?:tools|list tools|show tools|my tools)\s*[?!.]?\s*$/i.test(prompt);
+  if (isGenericToolListQuery) {
+    deps.debugLog("[Chief flow] Deterministic route matched: generic_tool_list");
+    const sections = [];
+
+    // Roam native tools (filter to roam_ prefix only for accurate count)
+    const roamTools = deps.getRoamNativeTools() || [];
+    const roamOnly = roamTools.filter(t => t.name.startsWith("roam_"));
+    if (roamOnly.length > 0) {
+      sections.push(`**Roam tools** (${roamOnly.length}): ${roamOnly.map(t => t.name).join(", ")}`);
+    }
+
+    // Extension tools
+    try {
+      const registry = deps.getExtensionToolsRegistry();
+      const extToolsConfig = deps.getExtToolsConfig();
+      for (const [extKey, ext] of Object.entries(registry)) {
+        if (!extToolsConfig[extKey]?.enabled) continue;
+        if (!ext || !Array.isArray(ext.tools) || !ext.tools.length) continue;
+        const label = String(ext.name || extKey).trim();
+        const validTools = ext.tools.filter(t => t?.name && typeof t.execute === "function");
+        if (validTools.length) {
+          sections.push(`**${label}** (${validTools.length}): ${validTools.map(t => t.name).join(", ")}`);
+        }
+      }
+    } catch (e) { /* ignore */ }
+
+    // COS tools (merge cos_ tools from roam-native-tools + dedicated COS tools)
+    const cosToolsDedicated = [...deps.getCosIntegrationTools(), ...deps.getCronTools()];
+    const cosFromRoamGeneric = roamTools.filter(t => t.name.startsWith("cos_"));
+    const allCosGeneric = [...cosToolsDedicated, ...cosFromRoamGeneric.filter(t => !cosToolsDedicated.some(c => c.name === t.name))];
+    if (allCosGeneric.length > 0) {
+      sections.push(`**Assistant tools** (${allCosGeneric.length}): ${allCosGeneric.map(t => t.name).join(", ")}`);
+    }
+
+    // Local MCP servers
+    const localMcpTools = getLocalMcpTools() || [];
+    if (localMcpTools.length > 0) {
+      const byServer = new Map();
+      for (const t of localMcpTools) {
+        const sn = t._serverName || "Unknown";
+        if (!byServer.has(sn)) byServer.set(sn, []);
+        byServer.get(sn).push(t);
+      }
+      for (const [serverName, serverTools] of byServer) {
+        if (serverTools[0]?._isDirect) {
+          sections.push(`**${serverName}** (${serverTools.length}): ${serverTools.map(t => t.name).join(", ")}`);
+        } else {
+          sections.push(`**${serverName}** (${serverTools.length} tools, via LOCAL_MCP_ROUTE)`);
+        }
+      }
+    }
+
+    // Remote MCP servers
+    const remoteMcpTools = getRemoteMcpTools() || [];
+    if (remoteMcpTools.length > 0) {
+      const byServer = new Map();
+      for (const t of remoteMcpTools) {
+        const sn = t._serverName || "Unknown";
+        if (!byServer.has(sn)) byServer.set(sn, []);
+        byServer.get(sn).push(t);
+      }
+      for (const [serverName, serverTools] of byServer) {
+        if (serverTools[0]?._isDirect) {
+          sections.push(`**${serverName}** (${serverTools.length}): ${serverTools.map(t => t.name).join(", ")}`);
+        } else {
+          sections.push(`**${serverName}** (${serverTools.length} tools, via REMOTE_MCP_ROUTE)`);
+        }
+      }
+    }
+
+    // Composio services
+    try {
+      const state = extensionAPIRef ? getToolsConfigState(extensionAPIRef) : { installedTools: [] };
+      const connected = state.installedTools.filter(t => t.installState === "installed");
+      if (connected.length > 0) {
+        sections.push(`**Composio services** (${connected.length}): ${connected.map(t => t.label || t.slug).join(", ")}`);
+      }
+    } catch (e) { /* ignore */ }
+
+    const responseText = sections.length > 0
+      ? `## Available tools\n\n${sections.join("\n\n")}\n\nAsk about a specific category for more detail, e.g. *"what roam tools do you have?"*`
+      : "No tools are currently registered. Check that your API keys and connections are configured.";
+    return deps.publishAskResponse(prompt, responseText, assistantName, suppressToasts);
+  }
+
+  // "run zotero_list_libraries", "call bt_list_workspaces", "execute roam_search"
+  const directToolMatch = prompt.match(/\b(?:run|call|execute|use)\s+([\w]+)\b/i);
+  if (directToolMatch) {
+    const toolName = directToolMatch[1];
+    const allTools = [
+      ...deps.getRoamNativeTools(),
+      ...deps.getExternalExtensionTools(),
+      ...deps.getCosIntegrationTools(),
+      ...deps.getCronTools(),
+      ...getLocalMcpTools()
+    ];
+    const tool = allTools.find(t => t.name === toolName || t.name.toLowerCase() === toolName.toLowerCase());
+    const requiredParams = tool?.input_schema?.required;
+    const hasRequiredParams = Array.isArray(requiredParams) && requiredParams.length > 0;
+    if (tool && typeof tool.execute === "function" && !hasRequiredParams && tool.isMutating === false) {
+      deps.debugLog("[Chief flow] Deterministic route matched: direct_tool_execute", toolName);
+      try {
+        const result = await tool.execute({});
+        const responseText = typeof result === "object"
+          ? "```json\n" + JSON.stringify(result, null, 2) + "\n```"
+          : String(result);
+        return deps.publishAskResponse(prompt, responseText, assistantName, suppressToasts);
+      } catch (e) {
+        const responseText = `Tool ${toolName} failed: ${e?.message || "Unknown error"}`;
+        return deps.publishAskResponse(prompt, responseText, assistantName, suppressToasts);
+      }
+    }
+  }
+
+  const deregisterIntent = parseComposioDeregisterIntent(prompt, {
+    installedSlugs: installedToolSlugsForIntents
+  });
+  if (extensionAPIRef && deregisterIntent?.toolSlug) {
+    deps.debugLog("[Chief flow] Deterministic route matched: composio_deregister", {
+      toolSlug: deregisterIntent.toolSlug
+    });
+    const targetSlug = String(deregisterIntent.toolSlug || "").trim().toUpperCase();
+    await deregisterComposioTool(extensionAPIRef, targetSlug);
+    const stateAfter = getToolsConfigState(extensionAPIRef);
+    const stillTracked = stateAfter.installedTools.some(
+      (tool) => normaliseToolSlugToken(tool?.slug) === normaliseToolSlugToken(targetSlug)
+    );
+    const responseText = stillTracked
+      ? `I attempted to deregister ${targetSlug}, but it still appears in local tool state. Check the latest toast for details.`
+      : `${targetSlug} has been deregistered (or was already removed).`;
+    return deps.publishAskResponse(prompt, responseText, assistantName, suppressToasts);
+  }
+
+  const installIntent = parseComposioInstallIntent(prompt);
+  if (extensionAPIRef && installIntent?.toolSlug) {
+    deps.debugLog("[Chief flow] Deterministic route matched: composio_install", {
+      toolSlug: installIntent.toolSlug
+    });
+    const targetSlug = String(installIntent.toolSlug || "").trim().toUpperCase();
+    try {
+      await installComposioTool(extensionAPIRef, targetSlug);
+      const stateAfter = getToolsConfigState(extensionAPIRef);
+      const installed = stateAfter.installedTools.find(
+        (tool) => normaliseToolSlugToken(tool?.slug) === normaliseToolSlugToken(targetSlug)
+      );
+      const state = installed?.installState || "";
+      const responseText = state === "pending_auth"
+        ? `${targetSlug} requires authentication. A browser tab should have opened — complete the setup there, then try using the tool.`
+        : state === "failed"
+          ? `${targetSlug} installation failed. Check the toasts for details.`
+          : `${targetSlug} has been installed and is now available.`;
+      return deps.publishAskResponse(prompt, responseText, assistantName, suppressToasts);
+    } catch (error) {
+      const responseText = `Failed to install ${targetSlug}: ${error?.message || "Unknown error"}. Check the Composio connection and try again.`;
+      return deps.publishAskResponse(prompt, responseText, assistantName, suppressToasts);
+    }
+  }
+
+  const memorySaveIntent = parseMemorySaveIntent(prompt);
+  if (memorySaveIntent) {
+    deps.debugLog("[Chief flow] Deterministic route matched: memory_save");
+    const responseText = await runDeterministicMemorySave(memorySaveIntent);
+    return deps.publishAskResponse(prompt, responseText, assistantName, suppressToasts);
+  }
+
+  const skillIntent = parseSkillInvocationIntent(prompt);
+  // Also detect natural-language briefing requests and route to the Daily Briefing skill
+  // Skip this shortcut if the prompt is clearly about scheduling/cron (let agent loop handle it)
+  const isCronIntent = /\b(cron|schedule[ds]?|recurring|every\s+\d+\s+(min|hour)|set up a?\s*(job|timer|remind))\b/i.test(prompt);
+  const briefingIntent = !skillIntent && !isCronIntent && /\b(daily\s*)?briefing\b/i.test(prompt)
+    ? { skillName: "Daily Briefing", targetText: "", originalPrompt: prompt }
+    : null;
+  const workflowSuggestIntent = !skillIntent && !isCronIntent &&
+    /\b(suggest\s*(?:some\s*)?workflows?|what\s+(?:automations?|workflows?)\s+(?:could|can|should)|skills?\s+(?:am\s+i|i'?m)\s+missing|recommend\s*(?:some\s*)?workflows?)\b/i.test(prompt)
+    ? { skillName: "Suggest Workflows", targetText: "", originalPrompt: prompt }
+    : null;
+  // Detect "draft workflow #2" / "create skill for X" follow-ups after a Suggest Workflows turn.
+  // Re-route through the skill so the LLM has drafting instructions in its system prompt.
+  const recentWorkflowSuggestions = (!skillIntent && !isCronIntent && !workflowSuggestIntent)
+    ? getLatestWorkflowSuggestionsFromConversation()
+    : [];
+  const hasRecentSuggestions = recentWorkflowSuggestions.length > 0;
+  const workflowDraftIntent = hasRecentSuggestions &&
+    promptLooksLikeWorkflowDraftFollowUp(prompt, recentWorkflowSuggestions)
+    ? { skillName: "Suggest Workflows", targetText: prompt, originalPrompt: prompt }
+    : null;
+  const resolvedSkillIntent = skillIntent || briefingIntent || workflowSuggestIntent || workflowDraftIntent;
+  if (resolvedSkillIntent) {
+    deps.debugLog("[Chief flow] Deterministic route matched: skill_invoke", {
+      skillName: resolvedSkillIntent?.skillName || "",
+      viaBriefingShortcut: Boolean(briefingIntent)
+    });
+    const responseText = await runDeterministicSkillInvocation(resolvedSkillIntent, { suppressToasts });
+    // Extract compact suggestion index so it survives context truncation for follow-up drafting
+    const suggestionIdx = extractWorkflowSuggestionIndex(responseText);
+    const contextText = suggestionIdx ? `${suggestionIdx}\n\n${responseText}` : undefined;
+    const result = deps.publishAskResponse(prompt, responseText, assistantName, suppressToasts, contextText);
+
+    if (offerWriteToDailyPage) {
+      const shouldWrite = await promptWriteToDailyPage();
+      if (shouldWrite) {
+        try {
+          const writeResult = await deps.writeResponseToTodayDailyPage(prompt, responseText);
+          deps.showInfoToast("Saved to Roam", `Added under ${writeResult.pageTitle}.`);
+        } catch (error) {
+          deps.showErrorToast("Write failed", error?.message || "Could not write to daily page.");
+        }
+      }
+    }
+
+    return result;
+  }
+
+  deps.debugLog("[Chief flow] Deterministic router: no match.");
+  return null;
+}
