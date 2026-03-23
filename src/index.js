@@ -4720,11 +4720,27 @@ async function askChiefOfStaff(userMessage, options = {}) {
   const providerSlashMatch = rawPrompt.match(/(?:^|\s)\/(claude|gemini|openai|mistral)(?:\s|$)/i);
   const providerOverride = providerSlashMatch ? PROVIDER_SLASH_MAP[providerSlashMatch[1].toLowerCase()] : null;
 
-  const prompt = rawPrompt
+  // Detect /lesson flag — records lessons from the conversation
+  const lessonFlag = /(?:^|\s)\/lesson(?:\s|$)/i.test(rawPrompt);
+
+  let prompt = rawPrompt
     .replace(/(?:^|\s)\/ludicrous(?:\s|$)/i, " ")
     .replace(/(?:^|\s)\/power(?:\s|$)/i, " ")
     .replace(/(?:^|\s)\/(claude|gemini|openai|mistral)(?:\s|$)/gi, " ")
+    .replace(/(?:^|\s)\/lesson(?:\s|$)/i, " ")
     .trim();
+
+  // /lesson — inject lesson-extraction prompt (valid even when prompt is otherwise empty)
+  if (lessonFlag) {
+    const lessonBase = "Review our conversation and extract key lessons learned."
+      + " You MUST use the cos_update_memory tool with page \"lessons\" and action \"append\" to write each lesson to [[Chief of Staff/Lessons Learned]]."
+      + " Do NOT use any MCP tools or external services — only cos_update_memory."
+      + " Focus on what worked, what didn't, and reusable patterns or decisions worth remembering.";
+    prompt = prompt
+      ? `${lessonBase} Focus specifically on: ${prompt}`
+      : lessonBase;
+  }
+
   if (!prompt) return;
 
   // Validate API key for forced provider before any work
