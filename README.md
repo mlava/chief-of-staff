@@ -16,7 +16,7 @@ https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 - **Inbox as input channel** — drop blocks into `Chief of Staff/Inbox` and they are automatically processed in read-only mode (the assistant can search and read but cannot mutate your graph). Responses are nested under the inbox block and moved to your daily page.
 - **Composio tool connections** — connect Google Calendar, Gmail, Todoist, and hundreds of other apps via Composio MCP. The assistant discovers and executes tools on your behalf.
 - **Local MCP server integration** — connect to MCP servers running on your machine (e.g. Zotero, GitHub, custom tools). Servers with many tools use a two-stage routing system to keep token costs low. Connections retry automatically on failure.
-- **Remote MCP server integration** — connect to any remote MCP server on the internet via StreamableHTTP or SSE transport. Configure up to 10 remote servers with optional auth headers (including OAuth Bearer tokens). SSE connections that fail automatically fall back to StreamableHTTP. Tools are discovered at connection time and made available to the agent alongside local and Composio tools.
+- **Remote MCP server integration** — connect to any remote MCP server on the internet via StreamableHTTP or SSE transport. Configure up to 10 remote servers with token-based auth or automatic OAuth sign-in. Servers that implement the MCP OAuth 2.1 spec (GitHub, Notion, Linear, Sentry, Stripe, and 30+ others) can be connected with a single click — no manual token management needed. SSE connections that fail automatically fall back to StreamableHTTP. Tools are discovered at connection time and made available to the agent alongside local and Composio tools.
 - **Web page fetching** — fetch any public web page and return its content as Markdown using Cloudflare's Browser Rendering API. Useful for importing articles, documentation, or reference material into your graph. Requires a Cloudflare API token (free tier available).
 - **Scheduled jobs** — create recurring or one-shot scheduled tasks (cron expressions, intervals, or specific times) that the assistant runs automatically. Multi-tab safe via leader election.
 - **Self-healing tool calls** — if the LLM claims to have done something without actually doing it, the extension detects the hallucination, retries with the correct tool, and auto-escalates to a smarter model if needed. No user intervention required.
@@ -191,31 +191,32 @@ Remote MCP servers let the assistant use tools hosted anywhere on the internet �
 
    | Field | Required | Example |
    |---|---|---|
-   | **URL** | Yes | `https://my-server.example.com/mcp` or `https://my-server.example.com/sse` |
-   | **Display name** | No | `Open Brain` (falls back to the server's own name) |
-   | **Auth header name** | No | `x-brain-key`, `Authorization` |
-   | **Auth token** | No | Your API key or `Bearer <your-token>` |
+   | **URL** | Yes | `https://mcp.sentry.dev/sse` or `https://my-server.example.com/mcp` |
+   | **Display name** | No | `Sentry` (falls back to the server's own name) |
+   | **Auth method** | Yes | `token` or `oauth` |
 
-4. Run **Chief of Staff: Refresh Remote MCP Servers** from the command palette, or reload the extension. Connection and tool discovery happen automatically.
+4. **For token auth:** fill in the header name (e.g. `x-api-key`, `Authorization`) and token value.
+5. **For OAuth auth:** run **Chief of Staff: Connect Remote OAuth Server** from the command palette. A browser tab opens to the service's sign-in page. Once you authorise, the extension picks up the token automatically. Subsequent reloads reconnect using stored tokens — no re-authentication needed.
+
+#### Auth methods
+
+| Method | When to use | How it works |
+|---|---|---|
+| **Token** | Servers that accept API keys or static bearer tokens (e.g. `x-api-key: sk-...`). | You paste the header name and token value in settings. |
+| **OAuth** | Servers that implement MCP OAuth 2.1 (GitHub, Notion, Linear, Sentry, Stripe, Supabase, Cloudflare, and [30+ others](docs/remote-mcp-servers-research.md)). | Chief of Staff handles the full OAuth flow automatically: server discovery, dynamic client registration, PKCE, and token refresh. Just enter the URL, set auth to "oauth", and connect. |
+
+> **Pre-registered servers:** Some providers (e.g. GitHub, Atlassian) block automatic client registration. For these, register an OAuth app in the provider's developer console, set the redirect URI to `https://roam-oauth-middleware.roam-extensions.workers.dev/mcp-oauth/callback`, then enter the Client ID in the settings fields that appear.
 
 #### How it works
 
-- **Two transports supported:** StreamableHTTP (stateless POST to `/mcp`) is preferred. SSE (browser-native `EventSource` GET to `/sse`) is also supported for legacy servers.
+- **Two transports supported:** StreamableHTTP (stateless POST to `/mcp`) is preferred. SSE (browser-native `EventSource` GET to `/sse`) is also supported for legacy servers. OAuth servers using SSE URLs are automatically rewritten to StreamableHTTP.
 - **Automatic fallback:** If an SSE connection fails (CORS, 4xx, network error), the extension automatically retries with StreamableHTTP on the same host (`/sse` → `/mcp`). No manual reconfiguration needed.
 - Tool calls use raw JSON-RPC POST requests directly — this ensures compatibility with stateless servers that close the SSE stream after each response.
 - Servers with **15 or fewer tools** are registered directly — the LLM calls them by name in a single step.
 - Servers with **more than 15 tools** use two-stage routing: `REMOTE_MCP_ROUTE` discovers available tools, then `REMOTE_MCP_EXECUTE` calls the chosen tool.
-- Auth tokens are stored in Roam Depot (browser IndexedDB) and redacted from all debug logs.
+- Auth tokens are stored in Roam Depot (browser IndexedDB) and redacted from all debug logs. OAuth tokens are refreshed automatically when they expire.
 - The same supply-chain security pipeline as local MCP applies: tool descriptions are scanned for injection patterns, schemas are pinned on first connection and compared on reconnection, and connection details are logged to `[[Chief of Staff/MCP Servers]]`.
 - Connections retry automatically with exponential backoff (up to 4 retries). Use **Chief of Staff: Refresh Remote MCP Servers** to force an immediate reconnect.
-
-#### OAuth Bearer token authentication
-
-Services like Notion, Atlassian, and Sentry require OAuth Bearer tokens. Since Roam Research has no OAuth redirect URI, tokens must be obtained externally:
-
-1. Create an **Internal Integration** in the service's developer console (e.g. Notion's "My Integrations" page).
-2. Copy the integration token.
-3. In Roam Depot settings, set the **Auth header name** to `Authorization` and the **Auth token** to `Bearer <your-token>`.
 
 > **CORS note:** Roam routes remote MCP requests through its built-in CORS proxy (`corsAnywhereProxyUrl`). If the proxy is unavailable, the extension falls back to a direct request. Some servers may require the proxy to be active for cross-origin access to work correctly.
 
@@ -269,6 +270,8 @@ The tool is now available to the assistant. Ask it to "fetch https://example.com
 | **Chief of Staff: Generate Supergateway Script** | Paste your `mcpServers` JSON and get a platform-specific install script (macOS launchd / Linux systemd / Windows Task Scheduler) with auto-assigned ports. |
 | **Chief of Staff: Refresh Local MCP Servers** | Disconnects and reconnects all configured local MCP servers. |
 | **Chief of Staff: Refresh Remote MCP Servers** | Disconnects and reconnects all configured remote MCP servers. |
+| **Chief of Staff: Connect Remote OAuth Server** | Starts the OAuth sign-in flow for a remote MCP server configured with auth type "oauth". |
+| **Chief of Staff: Disconnect Remote OAuth Server** | Clears stored OAuth credentials and disconnects a remote server. |
 | **Chief of Staff: Show Stored Tool Config** | Logs the current tool configuration to the browser console. |
 | **Chief of Staff: Show Last Run Trace** | Logs the most recent agent run (iterations, tool calls, timing) to the browser console. |
 | **Chief of Staff: Debug Runtime Stats** | Logs current runtime state (cache sizes, connection status, conversation turns) to the browser console. |
