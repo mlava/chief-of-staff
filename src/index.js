@@ -219,6 +219,7 @@ import {
   buildRemoteMcpRouteTool,
   buildRemoteMcpMetaTool,
   connectRemoteMcp,
+  disconnectRemoteMcp,
   disconnectAllRemoteMcp,
   scheduleRemoteMcpAutoConnect,
   getRemoteMcpClients,
@@ -229,15 +230,16 @@ import {
 } from "./remote-mcp.js";
 import {
   initOAuthClient,
-  acquireOAuthToken,
   getValidToken as getOAuthValidToken,
   getAuthHeader as getOAuthAuthHeader,
-  revokeToken as revokeOAuthToken,
   getOAuthTokenState,
-  getAllConnectedProviders,
-  getAvailableProviders as getOAuthAvailableProviders,
   cancelOAuthPolling,
 } from "./oauth-client.js";
+import {
+  initMcpOAuthProvider,
+  getMcpOAuthStatus,
+  clearMcpOAuthCredentials,
+} from "./mcp-oauth-provider.js";
 import {
   initEvalJudge,
   evaluateAgentRun,
@@ -1224,7 +1226,7 @@ function getSettingBool(extensionAPI, key, fallbackValue = false) {
 // Built-in remote MCP servers (always connected, no user config required)
 const BUILTIN_REMOTE_MCP_SERVERS = [
   {
-    url: "https://extension-docs-proxy.manus-proxy.workers.dev",
+    url: "https://extension-docs-proxy.roam-extensions.workers.dev",
     name: "Extension Docs",
     header: "",
     token: "",
@@ -1244,6 +1246,16 @@ function getRemoteMcpServers(extensionAPI = extensionAPIRef) {
       name: getSettingString(extensionAPI, `remote-mcp-${i}-name`, "").trim(),
       header: getSettingString(extensionAPI, `remote-mcp-${i}-header`, "").trim(),
       token: getSettingString(extensionAPI, `remote-mcp-${i}-token`, "").trim(),
+      authType: (() => {
+        const raw = getSettingString(extensionAPI, `remote-mcp-${i}-auth-type`, "token").trim();
+        // Map display values → internal: "oauth" → "mcp-oauth", "token" → "static"
+        if (raw === "oauth") return "mcp-oauth";
+        if (raw === "token" || raw === "static") return "static";
+        return raw; // "mcp-oauth" legacy passthrough
+      })(),
+      oauthProvider: getSettingString(extensionAPI, `remote-mcp-${i}-oauth-provider`, "").trim(),
+      mcpOauthClientId: getSettingString(extensionAPI, `remote-mcp-${i}-mcp-oauth-client-id`, "").trim(),
+      mcpOauthClientSecret: getSettingString(extensionAPI, `remote-mcp-${i}-mcp-oauth-client-secret`, "").trim(),
     });
   }
   // Append built-in servers (extension docs, etc.)
@@ -4115,6 +4127,85 @@ function registerCommandPaletteCommands(extensionAPI) {
       }
     }
   });
+  // ── Remote OAuth commands ───────────────────────────────────────────────────
+  extensionAPI.ui.commandPalette.addCommand({
+    label: "Chief of Staff: Connect Remote OAuth Server",
+    callback: async () => {
+      const servers = getRemoteMcpServers().filter(s => s.authType === "mcp-oauth");
+      if (!servers.length) {
+        showInfoToast("No MCP OAuth servers", "Configure a remote server with auth type \"MCP OAuth\" in Settings → Integration Settings first.");
+        return;
+      }
+      const buttons = servers.map(s => {
+        const label = s.name || (() => { try { return new URL(s.url).hostname; } catch { return s.url; } })();
+        return [
+          `<button style="font-weight:600;margin:2px 4px;">${escapeHtml(label)}</button>`,
+          async (instance, toast) => {
+            if (instance?.hide) instance.hide({}, toast);
+            showInfoToast("Connecting…", `Starting MCP OAuth flow for ${label}. A browser tab will open.`);
+            const urlKey = normalizeRemoteMcpUrl(s.url);
+            await disconnectRemoteMcp(urlKey);
+            await connectRemoteMcp({ ...s, _interactive: true });
+          }
+        ];
+      });
+      iziToast.show({
+        class: "cos-toast",
+        theme: getToastTheme(),
+        title: "Connect MCP OAuth Server",
+        message: "Select a server to authenticate:",
+        position: "center",
+        timeout: false,
+        close: true,
+        overlay: true,
+        drag: false,
+        maxWidth: 400,
+        buttons,
+      });
+    }
+  });
+  extensionAPI.ui.commandPalette.addCommand({
+    label: "Chief of Staff: Disconnect Remote OAuth Server",
+    callback: async () => {
+      const servers = getRemoteMcpServers().filter(s => s.authType === "mcp-oauth");
+      const connected = servers.filter(s => {
+        const normalized = normalizeRemoteMcpUrl(s.url);
+        const status = getMcpOAuthStatus(normalized);
+        return status.connected;
+      });
+      if (!connected.length) {
+        showInfoToast("No connected MCP OAuth servers", "No MCP OAuth servers are currently authenticated.");
+        return;
+      }
+      const buttons = connected.map(s => {
+        const label = s.name || (() => { try { return new URL(s.url).hostname; } catch { return s.url; } })();
+        return [
+          `<button style="font-weight:600;margin:2px 4px;color:#ef4444;">${escapeHtml(label)}</button>`,
+          async (instance, toast) => {
+            if (instance?.hide) instance.hide({}, toast);
+            const urlKey = normalizeRemoteMcpUrl(s.url);
+            clearMcpOAuthCredentials(urlKey);
+            await disconnectRemoteMcp(urlKey);
+            showInfoToast("Disconnected", `MCP OAuth credentials cleared for ${label}.`);
+          }
+        ];
+      });
+      iziToast.show({
+        class: "cos-toast",
+        theme: getToastTheme(),
+        title: "Disconnect MCP OAuth Server",
+        message: "Select a server to disconnect:",
+        position: "center",
+        timeout: false,
+        close: true,
+        overlay: true,
+        drag: false,
+        maxWidth: 400,
+        buttons,
+      });
+    }
+  });
+
   extensionAPI.ui.commandPalette.addCommand({
     label: "Chief of Staff: Refresh AIBOM Snapshot",
     callback: () => {
@@ -4726,6 +4817,13 @@ function onload({ extensionAPI }) {
     DEFAULT_ASSISTANT_NAME,
     getResponseVerbosity,
     invalidateRemoteMcpToolsCache,
+    getOAuthProviderItems: () => ["google", "github", "notion", "slack", "todoist", "linear"],
+    getOAuthTokenState,
+    getMcpOAuthStatus: (serverUrl) => {
+      if (!serverUrl) return { connected: false, hasClientInfo: false, isExpired: false };
+      const normalized = normalizeRemoteMcpUrl(serverUrl);
+      return getMcpOAuthStatus(normalized);
+    },
   });
   initLlmProviders({
     debugLog,
@@ -4827,6 +4925,7 @@ function onload({ extensionAPI }) {
     findSkillEntryByName,
     invalidateSkillsPromptCache,
     debugLog,
+    escapeHtml,
     BLOCK_TREE_PULL_PATTERN,
     MAX_CREATE_BLOCKS_TOTAL,
     SKILLS_PAGE_TITLE,
@@ -4907,6 +5006,8 @@ function onload({ extensionAPI }) {
     updateMcpBom,
     isUnloadInProgress: () => unloadInProgress,
     COMPOSIO_AUTO_CONNECT_DELAY_MS,
+    getOAuthAuthHeader: getOAuthAuthHeader,
+    getOAuthValidToken: getOAuthValidToken,
   });
   initOAuthClient({
     extensionAPI,
@@ -4915,6 +5016,13 @@ function onload({ extensionAPI }) {
     showInfoToast,
     showErrorToast,
     sanitizeHeaderValue,
+  });
+  initMcpOAuthProvider({
+    extensionAPI,
+    debugLog,
+    redactForLog,
+    showInfoToast,
+    showErrorToast,
   });
   initInbox({
     getRoamAlphaApi,

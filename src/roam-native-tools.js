@@ -1149,8 +1149,8 @@ export function getRoamNativeTools() {
       execute: async (args) => {
         const iziToast = (await import("izitoast")).default;
         iziToast.show({
-          title: args.title || "",
-          message: args.message,
+          title: deps.escapeHtml(args.title || ""),
+          message: deps.escapeHtml(args.message),
           timeout: (args.timeout || 15) * 1000,
           position: "topRight",
           color: "blue"

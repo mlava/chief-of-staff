@@ -240,34 +240,99 @@ export function buildSettingsConfig(extensionAPI) {
           }
         }
       });
+      // ── Auth type selector (token / oauth) ──
+      // Stored values are "token" and "oauth" (display-friendly).
+      // getRemoteMcpServers() maps these to internal authType values.
+      // Migrate legacy stored values on read.
+      const rawAuthType = deps.getSettingString(extensionAPI, `remote-mcp-${i}-auth-type`, "token") || "token";
+      const authType = rawAuthType === "mcp-oauth" ? "oauth"    // migrate legacy
+                     : rawAuthType === "static"    ? "token"    // migrate legacy
+                     : rawAuthType;
+      // Persist the migrated value so Roam's select displays correctly
+      if (authType !== rawAuthType) {
+        try { extensionAPI.settings.set(`remote-mcp-${i}-auth-type`, authType); } catch { }
+      }
       settings.push({
-        id: `remote-mcp-${i}-header`,
-        name: `Remote Server ${i} — Auth header name`,
-        description: "Header name for authentication (e.g. x-brain-key, Authorization). Leave blank if the server needs no authentication.",
+        id: `remote-mcp-${i}-auth-type`,
+        name: `Remote Server ${i} — Auth method`,
+        description: "Token: paste an API key or bearer token. OAuth: automatic sign-in via the server's OAuth flow (GitHub, Notion, Linear, Sentry, etc.).",
         action: {
-          type: "input",
-          value: deps.getSettingString(extensionAPI, `remote-mcp-${i}-header`, ""),
-          placeholder: "x-api-key",
-          onChange: (evt) => {
-            const v = String(evt?.target?.value ?? evt ?? "").trim();
-            try { extensionAPI.settings.set(`remote-mcp-${i}-header`, v); } catch { }
+          type: "select",
+          items: ["token", "oauth"],
+          value: authType,
+          onChange: (value) => {
+            try { extensionAPI.settings.set(`remote-mcp-${i}-auth-type`, value || "token"); } catch { }
+            rebuildSettingsPanel(extensionAPI);
           }
         }
       });
-      settings.push({
-        id: `remote-mcp-${i}-token`,
-        name: `Remote Server ${i} — Auth token`,
-        description: "Token or secret value. Stored in Roam Depot (local IndexedDB only). Redacted from all debug logs and never sent to any service other than this server.",
-        action: {
-          type: "input",
-          value: deps.getSettingString(extensionAPI, `remote-mcp-${i}-token`, ""),
-          placeholder: "your-token",
-          onChange: (evt) => {
-            const v = String(evt?.target?.value ?? evt ?? "").trim();
-            try { extensionAPI.settings.set(`remote-mcp-${i}-token`, v); } catch { }
-          }
+
+      if (authType === "oauth") {
+        // OAuth mode: auto-discovery via MCP OAuth 2.1 spec
+        const serverUrl = deps.getSettingString(extensionAPI, `remote-mcp-${i}-url`, "").trim();
+        if (serverUrl && deps.getMcpOAuthStatus) {
+          const mcpStatus = deps.getMcpOAuthStatus(serverUrl);
+          const statusText = mcpStatus.connected
+            ? (mcpStatus.isExpired ? "Connected (token expired — will auto-refresh)" : "Connected")
+            : "Not connected — use command palette: Chief of Staff: Connect Remote OAuth Server";
+          settings.push({
+            id: `remote-mcp-${i}-oauth-status`,
+            name: `Remote Server ${i} — OAuth status`,
+            description: statusText,
+            action: { type: "input", placeholder: "", onChange: () => {} },
+          });
         }
-      });
+        settings.push({
+          id: `remote-mcp-${i}-mcp-oauth-client-id`,
+          name: `Remote Server ${i} — Client ID (optional)`,
+          description: "Only needed for servers that block dynamic client registration (e.g. GitHub, Atlassian). Register an OAuth app in the provider's developer console, set the redirect URI to the Worker callback URL, then enter the client ID here.",
+          action: {
+            type: "input",
+            value: deps.getSettingString(extensionAPI, `remote-mcp-${i}-mcp-oauth-client-id`, ""),
+            placeholder: "Leave blank for auto-registration",
+          }
+        });
+        settings.push({
+          id: `remote-mcp-${i}-mcp-oauth-client-secret`,
+          name: `Remote Server ${i} — Client Secret (optional)`,
+          description: "Required only if the server demands a client secret (confidential client). Most MCP OAuth servers use public clients — leave blank.",
+          action: {
+            type: "input",
+            value: deps.getSettingString(extensionAPI, `remote-mcp-${i}-mcp-oauth-client-secret`, ""),
+            placeholder: "Leave blank for public client",
+          }
+        });
+      } else {
+        // Static mode: existing header + token fields
+        settings.push({
+          id: `remote-mcp-${i}-header`,
+          name: `Remote Server ${i} — Auth header name`,
+          description: "Header name for authentication (e.g. x-brain-key, Authorization). Leave blank if the server needs no authentication.",
+          action: {
+            type: "input",
+            value: deps.getSettingString(extensionAPI, `remote-mcp-${i}-header`, ""),
+            placeholder: "x-api-key",
+            onChange: (evt) => {
+              const v = String(evt?.target?.value ?? evt ?? "").trim();
+              try { extensionAPI.settings.set(`remote-mcp-${i}-header`, v); } catch { }
+            }
+          }
+        });
+        settings.push({
+          id: `remote-mcp-${i}-token`,
+          name: `Remote Server ${i} — Auth token`,
+          description: "Token or secret value. Stored in Roam Depot (local IndexedDB only). Redacted from all debug logs and never sent to any service other than this server.",
+          action: {
+            type: "input",
+            value: deps.getSettingString(extensionAPI, `remote-mcp-${i}-token`, ""),
+            placeholder: "your-token",
+            onChange: (evt) => {
+              const v = String(evt?.target?.value ?? evt ?? "").trim();
+              try { extensionAPI.settings.set(`remote-mcp-${i}-token`, v); } catch { }
+            }
+          }
+        });
+      }
     }
 
     // ── Web Fetch (Cloudflare Browser Rendering) ──────────────────────────────

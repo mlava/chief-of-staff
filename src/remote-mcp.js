@@ -21,6 +21,8 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { UnauthorizedError, auth as sdkAuth } from "@modelcontextprotocol/sdk/client/auth.js";
+import { createMcpOAuthProvider, urlToHash } from "./mcp-oauth-provider.js";
 
 // ── Constants ───────────────────────────────────────────────────────────────
 const REMOTE_MCP_CONNECT_TIMEOUT_MS = 20_000;    // StreamableHTTP connect (no SSE startup overhead)
@@ -592,7 +594,7 @@ export function buildRemoteMcpMetaTool() {
 // ── Connection management ────────────────────────────────────────────────────
 
 export async function connectRemoteMcp(serverConfig) {
-  const { url: rawUrl, name: configName, header, token } = serverConfig || {};
+  const { url: rawUrl, name: configName, header, token, authType, oauthProvider } = serverConfig || {};
   if (!rawUrl || !String(rawUrl).startsWith("http")) {
     deps.debugLog("[Remote MCP] Invalid or missing URL:", rawUrl);
     return null;
@@ -603,6 +605,16 @@ export async function connectRemoteMcp(serverConfig) {
 
   // Already connected — tools cached
   if (existing?.serverName && Array.isArray(existing.tools)) return existing;
+
+  // MCP OAuth auto-connect: skip if no stored tokens (user must use command palette)
+  if (authType === "mcp-oauth" && !serverConfig._interactive) {
+    const hash = urlToHash(urlKey);
+    const storedTokens = deps.getExtensionAPI()?.settings?.get(`mcp-oauth-tokens-${hash}`);
+    if (!storedTokens) {
+      deps.debugLog(`[Remote MCP] MCP OAuth: no stored tokens for ${urlKey} — skipping auto-connect (use command palette)`);
+      return null;
+    }
+  }
 
   // Exponential backoff after recent failure
   if (existing?.lastFailureAt && existing.failureCount > 0) {
@@ -624,18 +636,55 @@ export async function connectRemoteMcp(serverConfig) {
     let client = null;
     let abortController = null;
     // Build auth headers before try block so they're accessible in catch fallback
-    const authHeader = parseAuthHeader(header, token);
     const headers = {};
-    if (authHeader) {
-      headers[authHeader.name] = authHeader.value;
-      deps.debugLog(`[Remote MCP] Auth header: ${authHeader.name}: [REDACTED]`);
+    let resolvedOauthProvider = null;
+    let authProvider = null;   // MCP OAuth 2.1 provider (set when authType === "mcp-oauth")
+
+    if (authType === "mcp-oauth") {
+      // MCP OAuth 2.1 — SDK-native auth. Provider handles discovery, DCR, PKCE, tokens.
+      // Always create the provider, even for SSE URLs — the SSE→StreamableHTTP fallback
+      // path will use it if the SSE connection fails (which it will without auth).
+      authProvider = createMcpOAuthProvider({
+        urlHash: urlToHash(normalizeRemoteMcpUrl(rawUrl)),
+        preRegisteredClientId: serverConfig.mcpOauthClientId || "",
+        preRegisteredClientSecret: serverConfig.mcpOauthClientSecret || "",
+        silent: !serverConfig._interactive,  // suppress popups during auto-connect
+      });
+      deps.debugLog(`[Remote MCP] MCP OAuth 2.1 auth provider created for ${urlKey}`);
+    } else if (authType === "oauth" && oauthProvider && deps.getOAuthAuthHeader) {
+      const oauthHeader = await deps.getOAuthAuthHeader(oauthProvider);
+      if (oauthHeader) {
+        headers[oauthHeader.name] = oauthHeader.value;
+        resolvedOauthProvider = oauthProvider;
+        deps.debugLog(`[Remote MCP] OAuth auth (${oauthProvider}): ${oauthHeader.name}: [REDACTED]`);
+      } else {
+        deps.debugLog(`[Remote MCP] No OAuth token for ${oauthProvider} — connecting without auth`);
+      }
+    } else {
+      const authHeader = parseAuthHeader(header, token);
+      if (authHeader) {
+        headers[authHeader.name] = authHeader.value;
+        deps.debugLog(`[Remote MCP] Auth header: ${authHeader.name}: [REDACTED]`);
+      }
+    }
+
+    // MCP OAuth 2.1 only works on StreamableHTTP — if the URL ends in /sse,
+    // rewrite to /mcp to skip the SSE→fallback dance entirely.
+    // Declared before try so the catch block can check it for fallback suppression.
+    let effectiveUrl = rawUrl;
+    if (authProvider && isSSEEndpoint(rawUrl)) {
+      const rewritten = rawUrl.replace(/\/sse\s*$/, "/mcp");
+      if (rewritten !== rawUrl) {
+        deps.debugLog(`[Remote MCP] MCP OAuth: rewriting SSE URL to StreamableHTTP: ${rewritten}`);
+        effectiveUrl = rewritten;
+      }
     }
 
     try {
-      const proxiedUrl = deps.getProxiedRemoteUrl(rawUrl);
-      deps.debugLog(`[Remote MCP] Connecting to ${urlKey} via ${proxiedUrl !== rawUrl ? "proxy" : "direct"}`);
+      const proxiedUrl = deps.getProxiedRemoteUrl(effectiveUrl);
+      deps.debugLog(`[Remote MCP] Connecting to ${urlKey} via ${proxiedUrl !== effectiveUrl ? "proxy" : "direct"}`);
 
-      const useSSE = isSSEEndpoint(rawUrl);
+      const useSSE = isSSEEndpoint(effectiveUrl);
       abortController = new AbortController();
 
       if (useSSE) {
@@ -666,12 +715,29 @@ export async function connectRemoteMcp(serverConfig) {
         // ── StreamableHTTP transport (existing path) ──
         const wrappedFetch = (input, init = {}) => fetch(input, { ...init, signal: abortController.signal });
 
+        // MCP OAuth: pass the effective URL (not proxied) so the SDK constructs correct
+        // discovery URLs (/.well-known/oauth-protected-resource, auth server metadata, DCR).
+        // A proxying fetch routes all actual HTTP requests through the CORS proxy.
+        const useRawUrl = !!authProvider;
+        const transportUrl = useRawUrl ? new URL(effectiveUrl) : new URL(proxiedUrl);
+        const transportFetch = useRawUrl
+          ? (input, init = {}) => {
+              const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+              return fetch(deps.getProxiedRemoteUrl(url), { ...init, signal: abortController.signal });
+            }
+          : wrappedFetch;
+
         transport = new StreamableHTTPClientTransport(
-          new URL(proxiedUrl),
-          { fetch: wrappedFetch, requestInit: { headers } }
+          transportUrl,
+          {
+            fetch: transportFetch,
+            requestInit: { headers },
+            ...(authProvider ? { authProvider } : {}),
+          }
         );
 
-        client = new Client({ name: `roam-remote-mcp-${urlKey.slice(0, 40)}`, version: "0.1.0" });
+        const clientName = `roam-remote-mcp-${urlKey.slice(0, 40)}`;
+        client = new Client({ name: clientName, version: "0.1.0" });
 
         let timeoutId = null;
         try {
@@ -684,6 +750,43 @@ export async function connectRemoteMcp(serverConfig) {
               }, REMOTE_MCP_CONNECT_TIMEOUT_MS);
             })
           ]);
+        } catch (connectErr) {
+          // MCP OAuth 2.1 two-phase connect: SDK opened popup, now await auth code
+          if (connectErr instanceof UnauthorizedError && authProvider?._authPromise) {
+            deps.debugLog(`[Remote MCP] MCP OAuth redirect initiated for ${urlKey}, awaiting user authorisation…`);
+            deps.showInfoToast("Authorising…", `Complete sign-in in the popup for ${configName || urlKey}.`);
+
+            const authorizationCode = await authProvider._authPromise;
+            await transport.finishAuth(authorizationCode);
+            deps.debugLog(`[Remote MCP] MCP OAuth code exchanged for ${urlKey}, reconnecting…`);
+
+            // Transport can only start() once — recreate client + transport
+            try { await transport.close(); } catch { }
+            transport = new StreamableHTTPClientTransport(
+              transportUrl,
+              { fetch: transportFetch, requestInit: { headers }, authProvider }
+            );
+            client = new Client({ name: clientName, version: "0.1.0" });
+
+            let postAuthTimeout = null;
+            try {
+              await Promise.race([
+                client.connect(transport),
+                new Promise((_, reject) => {
+                  postAuthTimeout = setTimeout(() => {
+                    postAuthTimeout = null;
+                    reject(new Error(`Post-auth connect timeout (${REMOTE_MCP_CONNECT_TIMEOUT_MS / 1000}s) for ${urlKey}`));
+                  }, REMOTE_MCP_CONNECT_TIMEOUT_MS);
+                })
+              ]);
+            } finally {
+              if (postAuthTimeout) { clearTimeout(postAuthTimeout); postAuthTimeout = null; }
+            }
+
+            deps.showInfoToast("Authorised", `${configName || urlKey} connected via MCP OAuth.`);
+          } else {
+            throw connectErr;  // Non-OAuth error — propagate normally
+          }
         } finally {
           if (timeoutId) { clearTimeout(timeoutId); timeoutId = null; }
         }
@@ -739,21 +842,78 @@ export async function connectRemoteMcp(serverConfig) {
               if (!postUrl) return { error: `Remote server "${urlKey}" has no POST endpoint (SSE session may have expired)` };
               try {
                 const requestId = Math.random().toString(36).slice(2);
-                const response = await fetch(postUrl, {
+                const makeToolCallBody = () => JSON.stringify({
+                  jsonrpc: "2.0",
+                  id: Math.random().toString(36).slice(2),
+                  method: "tools/call",
+                  params: { name: toolName, arguments: args }
+                });
+                let response = await fetch(postUrl, {
                   method: "POST",
                   headers: {
                     "Content-Type": "application/json",
                     "Accept": "application/json, text/event-stream",
                     ...(entry._headers || {})
                   },
-                  body: JSON.stringify({
-                    jsonrpc: "2.0",
-                    id: requestId,
-                    method: "tools/call",
-                    params: { name: toolName, arguments: args }
-                  })
+                  body: makeToolCallBody()
                 });
-                if (!response.ok) {
+                // MCP OAuth 2.1 401 retry: refresh token via SDK auth and retry once
+                if (!response.ok && response.status === 401 && entry._authProvider) {
+                  deps.debugLog(`[Remote MCP] 401 from "${toolName}" — refreshing MCP OAuth token`);
+                  try {
+                    const result = await sdkAuth(entry._authProvider, {
+                      serverUrl: entry._urlKey,
+                      fetchFn: (input, init = {}) => fetch(
+                        deps.getProxiedRemoteUrl(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url),
+                        init
+                      )
+                    });
+                    if (result === "AUTHORIZED") {
+                      const tokens = await entry._authProvider.tokens();
+                      if (tokens?.access_token) {
+                        entry._headers = { Authorization: `Bearer ${tokens.access_token}` };
+                        const retry = await fetch(postUrl, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream", ...entry._headers },
+                          body: makeToolCallBody()
+                        });
+                        if (retry.ok) {
+                          response = retry;
+                        } else {
+                          return { error: `Remote MCP HTTP ${retry.status} calling "${toolName}" (after MCP OAuth refresh)` };
+                        }
+                      }
+                    }
+                  } catch (authErr) {
+                    deps.debugLog(`[Remote MCP] MCP OAuth refresh error:`, authErr?.message);
+                    return { error: `Remote MCP HTTP 401 calling "${toolName}" — MCP OAuth refresh failed: ${authErr?.message}` };
+                  }
+                }
+                // Phase 1 OAuth 401 retry: refresh token and retry once
+                else if (!response.ok && response.status === 401 && entry._oauthProvider && deps.getOAuthValidToken) {
+                  deps.debugLog(`[Remote MCP] 401 from "${toolName}" — refreshing OAuth token for ${entry._oauthProvider}`);
+                  try {
+                    const freshToken = await deps.getOAuthValidToken(entry._oauthProvider);
+                    if (freshToken) {
+                      entry._headers = { Authorization: `Bearer ${freshToken}` };
+                      const retry = await fetch(postUrl, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream", ...entry._headers },
+                        body: makeToolCallBody()
+                      });
+                      if (retry.ok) {
+                        response = retry;
+                      } else {
+                        return { error: `Remote MCP HTTP ${retry.status} calling "${toolName}" (after OAuth refresh)` };
+                      }
+                    } else {
+                      return { error: `Remote MCP HTTP 401 calling "${toolName}" — OAuth refresh failed` };
+                    }
+                  } catch (refreshErr) {
+                    deps.debugLog(`[Remote MCP] OAuth refresh error:`, refreshErr?.message);
+                    return { error: `Remote MCP HTTP 401 calling "${toolName}" — ${refreshErr?.message}` };
+                  }
+                } else if (!response.ok) {
                   return { error: `Remote MCP HTTP ${response.status} calling "${toolName}"` };
                 }
                 const contentType = response.headers.get("content-type") || "";
@@ -824,6 +984,8 @@ export async function connectRemoteMcp(serverConfig) {
       remoteMcpClients.set(urlKey, {
         client, transport, abortController,
         _proxiedUrl: proxiedUrl, _headers: headers,
+        _oauthProvider: resolvedOauthProvider,
+        _authProvider: authProvider,
         _isSSE, _sessionUrl,
         serverName, serverDescription, tools,
         lastFailureAt: 0, failureCount: 0, connectPromise: null,
@@ -841,19 +1003,28 @@ export async function connectRemoteMcp(serverConfig) {
       // ── StreamableHTTP fallback for failed SSE endpoints ──
       // Many modern MCP servers support both /sse and /mcp transports.
       // When SSE fails (CORS, proxy 410, etc.), try StreamableHTTP automatically.
-      if (isSSEEndpoint(rawUrl)) {
-        const fallbackUrl = rawUrl.replace(/\/sse\s*$/, "/mcp");
+      // Skip if effectiveUrl was already rewritten to /mcp (MCP OAuth path).
+      if (isSSEEndpoint(effectiveUrl)) {
+        const fallbackUrl = effectiveUrl.replace(/\/sse\s*$/, "/mcp");
         if (fallbackUrl !== rawUrl) {
           deps.debugLog(`[Remote MCP] SSE failed for ${urlKey}, trying StreamableHTTP fallback: ${fallbackUrl}`);
           try {
             const fbAbort = new AbortController();
             const fbProxied = deps.getProxiedRemoteUrl(fallbackUrl);
-            const fbFetch = (input, init = {}) => fetch(input, { ...init, signal: fbAbort.signal });
-            const fbTransport = new StreamableHTTPClientTransport(
-              new URL(fbProxied),
-              { fetch: fbFetch, requestInit: { headers } }
+            const fbUseRaw = !!authProvider;
+            const fbTransportUrl = fbUseRaw ? new URL(fallbackUrl) : new URL(fbProxied);
+            const fbFetch = fbUseRaw
+              ? (input, init = {}) => {
+                  const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+                  return fetch(deps.getProxiedRemoteUrl(url), { ...init, signal: fbAbort.signal });
+                }
+              : (input, init = {}) => fetch(input, { ...init, signal: fbAbort.signal });
+            const fbClientName = `roam-remote-mcp-${urlKey.slice(0, 40)}`;
+            let fbTransport = new StreamableHTTPClientTransport(
+              fbTransportUrl,
+              { fetch: fbFetch, requestInit: { headers }, ...(authProvider ? { authProvider } : {}) }
             );
-            const fbClient = new Client({ name: `roam-remote-mcp-${urlKey.slice(0, 40)}`, version: "0.1.0" });
+            let fbClient = new Client({ name: fbClientName, version: "0.1.0" });
 
             let fbTimeoutId = null;
             try {
@@ -866,6 +1037,41 @@ export async function connectRemoteMcp(serverConfig) {
                   }, REMOTE_MCP_CONNECT_TIMEOUT_MS);
                 })
               ]);
+            } catch (fbConnErr) {
+              // MCP OAuth two-phase connect in the SSE→StreamableHTTP fallback
+              if (fbConnErr instanceof UnauthorizedError && authProvider?._authPromise) {
+                deps.debugLog(`[Remote MCP] MCP OAuth redirect (SSE fallback) for ${urlKey}, awaiting user…`);
+                deps.showInfoToast("Authorising…", `Complete sign-in in the popup for ${configName || urlKey}.`);
+
+                const fbAuthCode = await authProvider._authPromise;
+                await fbTransport.finishAuth(fbAuthCode);
+                deps.debugLog(`[Remote MCP] MCP OAuth code exchanged (SSE fallback) for ${urlKey}, reconnecting…`);
+
+                try { await fbTransport.close(); } catch { }
+                fbTransport = new StreamableHTTPClientTransport(
+                  fbTransportUrl,
+                  { fetch: fbFetch, requestInit: { headers }, authProvider }
+                );
+                fbClient = new Client({ name: fbClientName, version: "0.1.0" });
+
+                let postAuthFbTimeout = null;
+                try {
+                  await Promise.race([
+                    fbClient.connect(fbTransport),
+                    new Promise((_, reject) => {
+                      postAuthFbTimeout = setTimeout(() => {
+                        postAuthFbTimeout = null;
+                        reject(new Error(`Post-auth fallback timeout (${REMOTE_MCP_CONNECT_TIMEOUT_MS / 1000}s) for ${urlKey}`));
+                      }, REMOTE_MCP_CONNECT_TIMEOUT_MS);
+                    })
+                  ]);
+                } finally {
+                  if (postAuthFbTimeout) { clearTimeout(postAuthFbTimeout); postAuthFbTimeout = null; }
+                }
+                deps.showInfoToast("Authorised", `${configName || urlKey} connected via MCP OAuth.`);
+              } else {
+                throw fbConnErr;
+              }
             } finally {
               if (fbTimeoutId) { clearTimeout(fbTimeoutId); fbTimeoutId = null; }
             }
@@ -889,11 +1095,28 @@ export async function connectRemoteMcp(serverConfig) {
                 _serverName: fbServerName, _serverDescription: fbServerDescription,
                 _urlKey: urlKey, _isRemote: true, _isDirect: (fbResult?.tools || []).length <= REMOTE_MCP_DIRECT_TOOL_THRESHOLD,
                 execute: async (args) => {
+                  const entry = remoteMcpClients.get(urlKey);
+                  const currentHeaders = entry?._headers || headers;
                   const body = { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: t.name, arguments: args || {} } };
-                  const resp = await fetch(fbProxied, {
-                    method: "POST", headers: { ...headers, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+                  let resp = await fetch(fbProxied, {
+                    method: "POST", headers: { ...currentHeaders, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
                     body: JSON.stringify(body)
                   });
+                  // OAuth 401 retry
+                  if (!resp.ok && resp.status === 401 && entry?._oauthProvider && deps.getOAuthValidToken) {
+                    deps.debugLog(`[Remote MCP] Fallback 401 from "${t.name}" — refreshing OAuth token`);
+                    try {
+                      const freshToken = await deps.getOAuthValidToken(entry._oauthProvider);
+                      if (freshToken) {
+                        entry._headers = { Authorization: `Bearer ${freshToken}` };
+                        const retryBody = { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: t.name, arguments: args || {} } };
+                        resp = await fetch(fbProxied, {
+                          method: "POST", headers: { ...entry._headers, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+                          body: JSON.stringify(retryBody)
+                        });
+                      }
+                    } catch (e) { deps.debugLog(`[Remote MCP] Fallback OAuth refresh error:`, e?.message); }
+                  }
                   if (!resp.ok) throw new Error(`Remote MCP tool call failed: HTTP ${resp.status}`);
                   const json = await resp.json();
                   if (json.error) throw new Error(json.error.message || JSON.stringify(json.error));
@@ -908,6 +1131,8 @@ export async function connectRemoteMcp(serverConfig) {
             remoteMcpClients.set(urlKey, {
               client: fbClient, transport: fbTransport, abortController: fbAbort,
               _proxiedUrl: fbProxied, _headers: headers,
+              _oauthProvider: resolvedOauthProvider,
+              _authProvider: authProvider,
               _isSSE: false, _sessionUrl: null,
               serverName: fbServerName, serverDescription: fbServerDescription, tools: fbTools,
               lastFailureAt: 0, failureCount: 0, connectPromise: null,
