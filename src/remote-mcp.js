@@ -592,7 +592,7 @@ export function buildRemoteMcpMetaTool() {
 // ── Connection management ────────────────────────────────────────────────────
 
 export async function connectRemoteMcp(serverConfig) {
-  const { url: rawUrl, name: configName, header, token } = serverConfig || {};
+  const { url: rawUrl, name: configName, header, token, authType, oauthProvider } = serverConfig || {};
   if (!rawUrl || !String(rawUrl).startsWith("http")) {
     deps.debugLog("[Remote MCP] Invalid or missing URL:", rawUrl);
     return null;
@@ -624,11 +624,24 @@ export async function connectRemoteMcp(serverConfig) {
     let client = null;
     let abortController = null;
     // Build auth headers before try block so they're accessible in catch fallback
-    const authHeader = parseAuthHeader(header, token);
     const headers = {};
-    if (authHeader) {
-      headers[authHeader.name] = authHeader.value;
-      deps.debugLog(`[Remote MCP] Auth header: ${authHeader.name}: [REDACTED]`);
+    let resolvedOauthProvider = null;
+
+    if (authType === "oauth" && oauthProvider && deps.getOAuthAuthHeader) {
+      const oauthHeader = await deps.getOAuthAuthHeader(oauthProvider);
+      if (oauthHeader) {
+        headers[oauthHeader.name] = oauthHeader.value;
+        resolvedOauthProvider = oauthProvider;
+        deps.debugLog(`[Remote MCP] OAuth auth (${oauthProvider}): ${oauthHeader.name}: [REDACTED]`);
+      } else {
+        deps.debugLog(`[Remote MCP] No OAuth token for ${oauthProvider} — connecting without auth`);
+      }
+    } else {
+      const authHeader = parseAuthHeader(header, token);
+      if (authHeader) {
+        headers[authHeader.name] = authHeader.value;
+        deps.debugLog(`[Remote MCP] Auth header: ${authHeader.name}: [REDACTED]`);
+      }
     }
 
     try {
@@ -739,21 +752,46 @@ export async function connectRemoteMcp(serverConfig) {
               if (!postUrl) return { error: `Remote server "${urlKey}" has no POST endpoint (SSE session may have expired)` };
               try {
                 const requestId = Math.random().toString(36).slice(2);
-                const response = await fetch(postUrl, {
+                const makeToolCallBody = () => JSON.stringify({
+                  jsonrpc: "2.0",
+                  id: Math.random().toString(36).slice(2),
+                  method: "tools/call",
+                  params: { name: toolName, arguments: args }
+                });
+                let response = await fetch(postUrl, {
                   method: "POST",
                   headers: {
                     "Content-Type": "application/json",
                     "Accept": "application/json, text/event-stream",
                     ...(entry._headers || {})
                   },
-                  body: JSON.stringify({
-                    jsonrpc: "2.0",
-                    id: requestId,
-                    method: "tools/call",
-                    params: { name: toolName, arguments: args }
-                  })
+                  body: makeToolCallBody()
                 });
-                if (!response.ok) {
+                // OAuth 401 retry: refresh token and retry once
+                if (!response.ok && response.status === 401 && entry._oauthProvider && deps.getOAuthValidToken) {
+                  deps.debugLog(`[Remote MCP] 401 from "${toolName}" — refreshing OAuth token for ${entry._oauthProvider}`);
+                  try {
+                    const freshToken = await deps.getOAuthValidToken(entry._oauthProvider);
+                    if (freshToken) {
+                      entry._headers = { Authorization: `Bearer ${freshToken}` };
+                      const retry = await fetch(postUrl, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream", ...entry._headers },
+                        body: makeToolCallBody()
+                      });
+                      if (retry.ok) {
+                        response = retry;
+                      } else {
+                        return { error: `Remote MCP HTTP ${retry.status} calling "${toolName}" (after OAuth refresh)` };
+                      }
+                    } else {
+                      return { error: `Remote MCP HTTP 401 calling "${toolName}" — OAuth refresh failed` };
+                    }
+                  } catch (refreshErr) {
+                    deps.debugLog(`[Remote MCP] OAuth refresh error:`, refreshErr?.message);
+                    return { error: `Remote MCP HTTP 401 calling "${toolName}" — ${refreshErr?.message}` };
+                  }
+                } else if (!response.ok) {
                   return { error: `Remote MCP HTTP ${response.status} calling "${toolName}"` };
                 }
                 const contentType = response.headers.get("content-type") || "";
@@ -824,6 +862,7 @@ export async function connectRemoteMcp(serverConfig) {
       remoteMcpClients.set(urlKey, {
         client, transport, abortController,
         _proxiedUrl: proxiedUrl, _headers: headers,
+        _oauthProvider: resolvedOauthProvider,
         _isSSE, _sessionUrl,
         serverName, serverDescription, tools,
         lastFailureAt: 0, failureCount: 0, connectPromise: null,
@@ -889,11 +928,28 @@ export async function connectRemoteMcp(serverConfig) {
                 _serverName: fbServerName, _serverDescription: fbServerDescription,
                 _urlKey: urlKey, _isRemote: true, _isDirect: (fbResult?.tools || []).length <= REMOTE_MCP_DIRECT_TOOL_THRESHOLD,
                 execute: async (args) => {
+                  const entry = remoteMcpClients.get(urlKey);
+                  const currentHeaders = entry?._headers || headers;
                   const body = { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: t.name, arguments: args || {} } };
-                  const resp = await fetch(fbProxied, {
-                    method: "POST", headers: { ...headers, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+                  let resp = await fetch(fbProxied, {
+                    method: "POST", headers: { ...currentHeaders, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
                     body: JSON.stringify(body)
                   });
+                  // OAuth 401 retry
+                  if (!resp.ok && resp.status === 401 && entry?._oauthProvider && deps.getOAuthValidToken) {
+                    deps.debugLog(`[Remote MCP] Fallback 401 from "${t.name}" — refreshing OAuth token`);
+                    try {
+                      const freshToken = await deps.getOAuthValidToken(entry._oauthProvider);
+                      if (freshToken) {
+                        entry._headers = { Authorization: `Bearer ${freshToken}` };
+                        const retryBody = { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: t.name, arguments: args || {} } };
+                        resp = await fetch(fbProxied, {
+                          method: "POST", headers: { ...entry._headers, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+                          body: JSON.stringify(retryBody)
+                        });
+                      }
+                    } catch (e) { deps.debugLog(`[Remote MCP] Fallback OAuth refresh error:`, e?.message); }
+                  }
                   if (!resp.ok) throw new Error(`Remote MCP tool call failed: HTTP ${resp.status}`);
                   const json = await resp.json();
                   if (json.error) throw new Error(json.error.message || JSON.stringify(json.error));
@@ -908,6 +964,7 @@ export async function connectRemoteMcp(serverConfig) {
             remoteMcpClients.set(urlKey, {
               client: fbClient, transport: fbTransport, abortController: fbAbort,
               _proxiedUrl: fbProxied, _headers: headers,
+              _oauthProvider: resolvedOauthProvider,
               _isSSE: false, _sessionUrl: null,
               serverName: fbServerName, serverDescription: fbServerDescription, tools: fbTools,
               lastFailureAt: 0, failureCount: 0, connectPromise: null,

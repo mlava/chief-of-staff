@@ -1244,6 +1244,8 @@ function getRemoteMcpServers(extensionAPI = extensionAPIRef) {
       name: getSettingString(extensionAPI, `remote-mcp-${i}-name`, "").trim(),
       header: getSettingString(extensionAPI, `remote-mcp-${i}-header`, "").trim(),
       token: getSettingString(extensionAPI, `remote-mcp-${i}-token`, "").trim(),
+      authType: getSettingString(extensionAPI, `remote-mcp-${i}-auth-type`, "static").trim(),
+      oauthProvider: getSettingString(extensionAPI, `remote-mcp-${i}-oauth-provider`, "").trim(),
     });
   }
   // Append built-in servers (extension docs, etc.)
@@ -4115,6 +4117,87 @@ function registerCommandPaletteCommands(extensionAPI) {
       }
     }
   });
+  // ── OAuth commands ──────────────────────────────────────────────────────────
+  extensionAPI.ui.commandPalette.addCommand({
+    label: "Chief of Staff: Connect OAuth Provider",
+    callback: async () => {
+      let providers;
+      try { providers = await getOAuthAvailableProviders(); } catch { providers = ["google"]; }
+      if (!providers.length) {
+        showErrorToast("No providers available", "OAuth worker returned no providers.");
+        return;
+      }
+      const buttons = providers.map(provider => [
+        `<button style="font-weight:600;margin:2px 4px;">${escapeHtml(provider)}</button>`,
+        async (instance, toast) => {
+          if (instance?.hide) instance.hide({}, toast);
+          showInfoToast("Connecting…", `Starting OAuth flow for ${provider}. A popup window will open.`);
+          const result = await acquireOAuthToken(provider);
+          if (result?.success) {
+            showInfoToast("OAuth connected", `${provider} connected successfully. Servers using this provider will use the token on next connection.`);
+          }
+        }
+      ]);
+      iziToast.show({
+        class: "cos-toast",
+        theme: getToastTheme(),
+        title: "Connect OAuth Provider",
+        message: "Select a provider to authenticate:",
+        position: "center",
+        timeout: false,
+        close: true,
+        overlay: true,
+        drag: false,
+        maxWidth: 400,
+        buttons,
+      });
+    }
+  });
+  extensionAPI.ui.commandPalette.addCommand({
+    label: "Chief of Staff: Disconnect OAuth Provider",
+    callback: async () => {
+      const connected = getAllConnectedProviders();
+      if (!connected.length) {
+        showInfoToast("No connected providers", "No OAuth providers are currently connected.");
+        return;
+      }
+      const buttons = connected.map(p => [
+        `<button style="font-weight:600;margin:2px 4px;color:#ef4444;">${escapeHtml(p.label || p.provider)}</button>`,
+        async (instance, toast) => {
+          if (instance?.hide) instance.hide({}, toast);
+          await revokeOAuthToken(p.provider);
+        }
+      ]);
+      iziToast.show({
+        class: "cos-toast",
+        theme: getToastTheme(),
+        title: "Disconnect OAuth Provider",
+        message: "Select a provider to disconnect:",
+        position: "center",
+        timeout: false,
+        close: true,
+        overlay: true,
+        drag: false,
+        maxWidth: 400,
+        buttons,
+      });
+    }
+  });
+  extensionAPI.ui.commandPalette.addCommand({
+    label: "Chief of Staff: Show OAuth Status",
+    callback: () => {
+      const connected = getAllConnectedProviders();
+      if (!connected.length) {
+        showInfoToast("OAuth Status", "No OAuth providers are connected.");
+        return;
+      }
+      const list = connected.map(p =>
+        `${p.label || p.provider}: ${p.isExpired ? "expired (will auto-refresh)" : "active"}`
+      ).join(", ");
+      showInfoToast("OAuth Status", list);
+    }
+  });
+
   extensionAPI.ui.commandPalette.addCommand({
     label: "Chief of Staff: Refresh AIBOM Snapshot",
     callback: () => {
@@ -4726,6 +4809,8 @@ function onload({ extensionAPI }) {
     DEFAULT_ASSISTANT_NAME,
     getResponseVerbosity,
     invalidateRemoteMcpToolsCache,
+    getOAuthProviderItems: () => ["google", "github", "notion", "slack", "todoist", "linear"],
+    getOAuthTokenState,
   });
   initLlmProviders({
     debugLog,
@@ -4907,6 +4992,8 @@ function onload({ extensionAPI }) {
     updateMcpBom,
     isUnloadInProgress: () => unloadInProgress,
     COMPOSIO_AUTO_CONNECT_DELAY_MS,
+    getOAuthAuthHeader: getOAuthAuthHeader,
+    getOAuthValidToken: getOAuthValidToken,
   });
   initOAuthClient({
     extensionAPI,

@@ -36,6 +36,8 @@ function stubDeps(overrides = {}) {
     updateMcpBom: async () => {},
     isUnloadInProgress: () => false,
     COMPOSIO_AUTO_CONNECT_DELAY_MS: 0,
+    getOAuthAuthHeader: async () => null,
+    getOAuthValidToken: async () => "",
     _storedSettings: storedSettings,
     ...overrides,
   };

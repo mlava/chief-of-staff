@@ -240,34 +240,86 @@ export function buildSettingsConfig(extensionAPI) {
           }
         }
       });
+      // ── Auth type selector (static vs OAuth) ──
+      const authType = deps.getSettingString(extensionAPI, `remote-mcp-${i}-auth-type`, "static") || "static";
       settings.push({
-        id: `remote-mcp-${i}-header`,
-        name: `Remote Server ${i} — Auth header name`,
-        description: "Header name for authentication (e.g. x-brain-key, Authorization). Leave blank if the server needs no authentication.",
+        id: `remote-mcp-${i}-auth-type`,
+        name: `Remote Server ${i} — Auth method`,
+        description: "Static: manual header + token. OAuth: automatic token via connected OAuth provider.",
         action: {
-          type: "input",
-          value: deps.getSettingString(extensionAPI, `remote-mcp-${i}-header`, ""),
-          placeholder: "x-api-key",
-          onChange: (evt) => {
-            const v = String(evt?.target?.value ?? evt ?? "").trim();
-            try { extensionAPI.settings.set(`remote-mcp-${i}-header`, v); } catch { }
+          type: "select",
+          items: ["static", "oauth"],
+          value: authType,
+          onChange: (value) => {
+            const v = String(value || "static").trim();
+            try { extensionAPI.settings.set(`remote-mcp-${i}-auth-type`, v); } catch { }
+            rebuildSettingsPanel(extensionAPI);
           }
         }
       });
-      settings.push({
-        id: `remote-mcp-${i}-token`,
-        name: `Remote Server ${i} — Auth token`,
-        description: "Token or secret value. Stored in Roam Depot (local IndexedDB only). Redacted from all debug logs and never sent to any service other than this server.",
-        action: {
-          type: "input",
-          value: deps.getSettingString(extensionAPI, `remote-mcp-${i}-token`, ""),
-          placeholder: "your-token",
-          onChange: (evt) => {
-            const v = String(evt?.target?.value ?? evt ?? "").trim();
-            try { extensionAPI.settings.set(`remote-mcp-${i}-token`, v); } catch { }
+
+      if (authType === "oauth") {
+        // OAuth mode: provider select + connection status
+        const providerItems = deps.getOAuthProviderItems ? deps.getOAuthProviderItems() : ["google"];
+        const currentProvider = deps.getSettingString(extensionAPI, `remote-mcp-${i}-oauth-provider`, "") || "";
+        settings.push({
+          id: `remote-mcp-${i}-oauth-provider`,
+          name: `Remote Server ${i} — OAuth provider`,
+          description: "Select which OAuth provider to use for this server's authentication.",
+          action: {
+            type: "select",
+            items: ["", ...providerItems],
+            value: currentProvider,
+            onChange: (value) => {
+              const v = String(value || "").trim();
+              try { extensionAPI.settings.set(`remote-mcp-${i}-oauth-provider`, v); } catch { }
+              rebuildSettingsPanel(extensionAPI);
+            }
           }
+        });
+        if (currentProvider && deps.getOAuthTokenState) {
+          const state = deps.getOAuthTokenState(currentProvider);
+          const statusText = state?.connected
+            ? (state.isExpired ? "Connected (token expired — will auto-refresh)" : "Connected")
+            : "Not connected — use command palette: Chief of Staff: Connect OAuth Provider";
+          settings.push({
+            id: `remote-mcp-${i}-oauth-status`,
+            name: `Remote Server ${i} — OAuth status`,
+            description: statusText,
+            action: { type: "input", placeholder: "", onChange: () => {} },
+          });
         }
-      });
+      } else {
+        // Static mode: existing header + token fields
+        settings.push({
+          id: `remote-mcp-${i}-header`,
+          name: `Remote Server ${i} — Auth header name`,
+          description: "Header name for authentication (e.g. x-brain-key, Authorization). Leave blank if the server needs no authentication.",
+          action: {
+            type: "input",
+            value: deps.getSettingString(extensionAPI, `remote-mcp-${i}-header`, ""),
+            placeholder: "x-api-key",
+            onChange: (evt) => {
+              const v = String(evt?.target?.value ?? evt ?? "").trim();
+              try { extensionAPI.settings.set(`remote-mcp-${i}-header`, v); } catch { }
+            }
+          }
+        });
+        settings.push({
+          id: `remote-mcp-${i}-token`,
+          name: `Remote Server ${i} — Auth token`,
+          description: "Token or secret value. Stored in Roam Depot (local IndexedDB only). Redacted from all debug logs and never sent to any service other than this server.",
+          action: {
+            type: "input",
+            value: deps.getSettingString(extensionAPI, `remote-mcp-${i}-token`, ""),
+            placeholder: "your-token",
+            onChange: (evt) => {
+              const v = String(evt?.target?.value ?? evt ?? "").trim();
+              try { extensionAPI.settings.set(`remote-mcp-${i}-token`, v); } catch { }
+            }
+          }
+        });
+      }
     }
 
     // ── Web Fetch (Cloudflare Browser Rendering) ──────────────────────────────
