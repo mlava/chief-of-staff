@@ -716,7 +716,18 @@ export function isLikelyLiveDataReadIntent(userMessage, options = {}) {
     "my schedule",
     "connected tools",
     "connection status",
-    "connected accounts"
+    "connected accounts",
+    // Roam context queries — current UI state requires tool grounding
+    "what page",
+    "which page",
+    "current page",
+    "am i on",
+    "where am i",
+    "what's on today",
+    "whats on today",
+    "today's page",
+    "todays page",
+    "daily page"
   ];
   if (explicitPhrases.some((phrase) => text.includes(phrase))) return true;
 
