@@ -28,10 +28,10 @@ const providerCooldowns = {}; // { provider: expiryTimestampMs } — bounded at 
 
 // ── Provider Selection & Model Mapping ───────────────────────────────────────
 
-export const VALID_LLM_PROVIDERS = ["anthropic", "openai", "gemini", "mistral"];
+export const VALID_LLM_PROVIDERS = ["anthropic", "openai", "gemini", "mistral", "groq"];
 
 export function isOpenAICompatible(provider) {
-  return provider === "openai" || provider === "gemini" || provider === "mistral";
+  return provider === "openai" || provider === "gemini" || provider === "mistral" || provider === "groq";
 }
 
 export function getLlmProvider(extensionAPI) {
@@ -59,7 +59,8 @@ export function getApiKeyForProvider(extensionAPI, provider) {
     openai: deps.SETTINGS_KEYS.openaiApiKey,
     anthropic: deps.SETTINGS_KEYS.anthropicApiKey,
     gemini: deps.SETTINGS_KEYS.geminiApiKey,
-    mistral: deps.SETTINGS_KEYS.mistralApiKey
+    mistral: deps.SETTINGS_KEYS.mistralApiKey,
+    groq: deps.SETTINGS_KEYS.groqApiKey
   };
   const settingKey = keyMap[provider];
   if (settingKey) {
@@ -140,6 +141,8 @@ export function isFailoverEligibleError(error) {
   const msg = String(error?.message || "").toLowerCase();
   return msg.includes("rate limit")
     || msg.includes("429")
+    || msg.includes("error 413")
+    || msg.includes("too large")
     || msg.includes("error 500")
     || msg.includes("error 502")
     || msg.includes("error 503")
@@ -377,6 +380,60 @@ export async function callAnthropic(apiKey, model, system, messages, tools, opti
   );
 }
 
+/**
+ * Ensure a tool's input_schema is a clean JSON Schema object compatible
+ * with all LLM providers. Strict providers like Groq reject advanced
+ * JSON Schema features (Draft 6+, composition, schema-valued fields).
+ *
+ * Uses an allowlist of safe keywords rather than a blocklist, so any
+ * unknown/new schema features are automatically stripped.
+ */
+const SAFE_SCHEMA_KEYS = new Set([
+  "type", "properties", "required", "items", "enum", "description",
+  "minimum", "maximum", "minLength", "maxLength", "minItems", "maxItems",
+  "additionalProperties"
+]);
+function sanitiseToolSchema(schema) {
+  if (!schema || typeof schema !== "object") return { type: "object", properties: {} };
+  const defs = schema.$defs || schema.definitions || {};
+  function resolve(node, depth) {
+    if (!node || typeof node !== "object" || depth > 10) return node;
+    if (Array.isArray(node)) return node.map(item => resolve(item, depth + 1));
+    // Resolve $ref to inline definition
+    if (node.$ref && typeof node.$ref === "string") {
+      const match = node.$ref.match(/^#\/(?:\$defs|definitions)\/(.+)$/);
+      if (match && defs[match[1]]) return resolve(defs[match[1]], depth + 1);
+      return { type: "string" }; // Unresolvable ref — fall back to string
+    }
+    // Collapse anyOf/oneOf → first element
+    if (Array.isArray(node.anyOf) && node.anyOf.length) return resolve(node.anyOf[0], depth + 1);
+    if (Array.isArray(node.oneOf) && node.oneOf.length) return resolve(node.oneOf[0], depth + 1);
+    // Merge allOf into a single flat schema
+    if (Array.isArray(node.allOf) && node.allOf.length) {
+      const merged = {};
+      for (const part of node.allOf) {
+        const resolved = resolve(part, depth + 1);
+        if (resolved && typeof resolved === "object") Object.assign(merged, resolved);
+      }
+      return merged;
+    }
+    const cleaned = {};
+    for (const [key, val] of Object.entries(node)) {
+      if (!SAFE_SCHEMA_KEYS.has(key)) continue;
+      // additionalProperties: only keep as boolean (schema-valued form breaks Groq)
+      if (key === "additionalProperties") {
+        cleaned[key] = typeof val === "boolean" ? val : true;
+        continue;
+      }
+      cleaned[key] = resolve(val, depth + 1);
+    }
+    return cleaned;
+  }
+  const clean = resolve(schema, 0);
+  if (!clean.type) clean.type = "object";
+  return clean;
+}
+
 export async function callOpenAI(apiKey, model, system, messages, tools, options = {}, provider = "openai") {
   // DD-2: Defence-in-depth PII scrub — in case this function is ever called directly
   const skipEmail = shouldSkipEmailScrub(tools);
@@ -404,13 +461,13 @@ export async function callOpenAI(apiKey, model, system, messages, tools, options
           function: {
             name: tool.name,
             description: tool.description,
-            parameters: tool.input_schema
+            parameters: sanitiseToolSchema(tool.input_schema)
           }
         })),
         ...tokenParam
       })
     },
-    "OpenAI",
+    provider,
     { signal: options.signal }
   );
 }
@@ -462,7 +519,7 @@ export async function callOpenAIStreaming(apiKey, model, system, messages, tools
           function: {
             name: tool.name,
             description: tool.description,
-            parameters: tool.input_schema
+            parameters: sanitiseToolSchema(tool.input_schema)
           }
         })),
         ...tokenParam,
@@ -475,8 +532,8 @@ export async function callOpenAIStreaming(apiKey, model, system, messages, tools
   }
 
   if (!response.ok) {
-    const errorText = (await response.text()).slice(0, 300);
-    throw new Error(`OpenAI streaming error ${response.status}: ${errorText}`);
+    const errorText = (await response.text()).slice(0, 800);
+    throw new Error(`${provider} streaming error ${response.status}: ${errorText}`);
   }
 
   const reader = response.body.getReader();

@@ -61,9 +61,9 @@ function makeDeps(overrides = {}) {
     MAX_CALLS_PER_TOOL_PER_LOOP: 10,
     MAX_TOOL_RESULT_CHARS: 12000,
     FAILOVER_CHAINS: {
-      mini: ["gemini", "openai", "anthropic", "mistral"],
-      power: ["gemini", "openai", "anthropic", "mistral"],
-      ludicrous: ["anthropic", "openai", "gemini", "mistral"],
+      mini: ["gemini", "openai", "anthropic", "mistral", "groq"],
+      power: ["gemini", "openai", "anthropic", "mistral", "groq"],
+      ludicrous: ["anthropic", "openai", "gemini", "mistral", "groq"],
     },
     FAILOVER_CONTINUATION_MESSAGE: "Continuing from a prior model.",
     DEFAULT_LLM_PROVIDER: "anthropic",

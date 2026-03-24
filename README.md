@@ -1,6 +1,6 @@
 # Chief of Staff
 
-An AI assistant embedded in Roam Research. Chief of Staff connects your Roam graph to large language models (Anthropic, OpenAI, Google Gemini, or Mistral) and to external tools via [Composio](https://composio.dev), letting you ask questions, search and manage tasks, and orchestrate actions across your connected apps — all without leaving Roam.
+An AI assistant embedded in Roam Research. Chief of Staff connects your Roam graph to large language models (Anthropic, OpenAI, Google Gemini, Mistral, or Groq) and to external tools via [Composio](https://composio.dev), letting you ask questions, search and manage tasks, and orchestrate actions across your connected apps — all without leaving Roam.
 
 https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 
@@ -9,7 +9,7 @@ https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 ## What it does
 
 - **Ask anything** via the command palette or a persistent floating chat panel. The assistant can read your graph, create blocks, and call external tools — with your approval before any write operation. Common queries (task searches, memory saves, tool lists) are handled instantly without an LLM call.
-- **Multi-provider LLM support** — choose from Anthropic Claude, OpenAI GPT, Google Gemini, or Mistral as your primary provider. If one provider is unavailable, the assistant automatically fails over to the next available provider in the chain.
+- **Multi-provider LLM support** — choose from Anthropic Claude, OpenAI GPT, Google Gemini, Mistral, or Groq as your primary provider. If one provider is unavailable, the assistant automatically fails over to the next available provider in the chain.
 - **Better Tasks integration** — search, create, and modify Better Tasks (TODO/DONE parent blocks with `BT_attr*` attribute children) directly from natural language. Supports filtering by due date, project, status, and free text.
 - **Persistent memory** — loads context from dedicated memory pages into the system prompt each run (see [Memory and learning](#memory-and-learning)).
 - **Skill routing** — reads `Chief of Staff/Skills`, injects a compact skill index into the prompt, and can apply a specific skill on request. A gathering completeness guard ensures the assistant calls all required data sources before writing.
@@ -20,7 +20,7 @@ https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 - **Web page fetching** — fetch any public web page and return its content as Markdown using Cloudflare's Browser Rendering API. Useful for importing articles, documentation, or reference material into your graph. Requires a Cloudflare API token (free tier available).
 - **Scheduled jobs** — create recurring or one-shot scheduled tasks (cron expressions, intervals, or specific times) that the assistant runs automatically. Multi-tab safe via leader election.
 - **Self-healing tool calls** — if the LLM claims to have done something without actually doing it, the extension detects the hallucination, retries with the correct tool, and auto-escalates to a smarter model if needed. No user intervention required.
-- **Three model tiers with automatic routing** — most requests use a fast, cheap model. Append `/power` or `/ludicrous` to your message to force a more capable tier, or let the extension auto-escalate based on request complexity. You can also force a specific provider with `/claude`, `/gemini`, `/openai`, or `/mistral`. See [How tiers work](#how-tiers-work) for details.
+- **Three model tiers with automatic routing** — most requests use a fast, cheap model. Append `/power` or `/ludicrous` to your message to force a more capable tier, or let the extension auto-escalate based on request complexity. You can also force a specific provider with `/claude`, `/gemini`, `/openai`, `/mistral`, or `/groq`. See [How tiers work](#how-tiers-work) for details.
 - **Dry-run mode** — simulate any mutating operation before it executes. Useful for reviewing what the agent would do before committing.
 - **Linked refs filtering** — automatically removes Chief of Staff namespace pages from the linked references section of every non-COS page you visit, keeping your graph tidy. Filters are merged with your existing manual filters (never overwritten) and applied once per page per session, so manual changes are respected. Enabled by default; toggle off in Advanced settings if needed.
 - **Guided onboarding** — first-run onboarding walks you through API key setup, memory page bootstrapping, and chat panel introduction.
@@ -31,7 +31,7 @@ https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 
 | Requirement | Notes |
 |---|---|
-| At least one LLM API key (Anthropic, OpenAI, Gemini, or Mistral) | Direct browser fetch — incurs API costs at your provider's rates |
+| At least one LLM API key (Anthropic, OpenAI, Gemini, Mistral, or Groq) | Direct browser fetch — incurs API costs at your provider's rates. Groq requires a paid plan (Dev tier or above) — the free tier's token-per-minute limit is too low. |
 | Composio account + API key | Only required for external tool integrations. Graph and task features work without it. |
 | [Better Tasks](https://github.com/mlava/recurring-tasks) extension | Only required for Better Tasks integration. Plain TODO search works without it. |
 
@@ -45,12 +45,13 @@ Open **Settings > Chief of Staff** and fill in:
 
 - **Your Name** — how Chief of Staff addresses you
 - **Assistant Name** — display-only label used in chat header and toasts (default: `Chief of Staff`)
-- **LLM Provider** — `anthropic` (default), `openai`, `gemini`, or `mistral`
+- **LLM Provider** — `anthropic` (default), `openai`, `gemini`, `mistral`, or `groq`
 - **API Keys** — separate fields for each provider. Only the key for your selected provider is required; configure additional keys to enable automatic failover.
   - Anthropic API Key (`sk-ant-...`)
   - OpenAI API Key (`sk-...`)
   - Google Gemini API Key (`AIza...`)
   - Mistral API Key
+  - Groq API Key (`gsk_...`) — requires a paid plan (Dev tier or above)
 - **LLM Model** — leave blank to use the default for your provider, or enter any model ID supported by that provider
 - **Response Verbosity** — controls how verbose assistant responses are and how many output tokens are allowed per call. `concise` (1,200 tokens, brief bullet-point style), `standard` (2,500 tokens, default), or `detailed` (4,096 tokens, thorough explanations). Only affects the mini tier — power and ludicrous tiers have their own token budgets. With prompt caching reducing input costs, output tokens become the dominant expense, so this setting gives you direct control over the main remaining cost lever.
 - **Debug Logging** — enable verbose console output for troubleshooting
@@ -60,15 +61,15 @@ Open **Settings > Chief of Staff** and fill in:
 
 Default models by tier:
 
-| Tier | Anthropic | OpenAI | Gemini | Mistral |
-|---|---|---|---|---|
-| Mini (default) | claude-haiku-4-5 | gpt-5-mini | gemini-3.1-flash-lite-preview | mistral-small |
-| Power (`/power`) | claude-sonnet-4-6 | gpt-4.1 | gemini-3-flash-preview | mistral-medium |
-| Ludicrous (`/ludicrous`) | claude-opus-4-6 | gpt-5.4 | gemini-3.1-pro-preview-customtools | mistral-large |
+| Tier | Anthropic | OpenAI | Gemini | Mistral | Groq |
+|---|---|---|---|---|---|
+| Mini (default) | claude-haiku-4-5 | gpt-5.4-mini | gemini-3.1-flash-lite-preview | mistral-small | llama-3.3-70b-versatile |
+| Power (`/power`) | claude-sonnet-4-6 | gpt-4.1 | gemini-3-flash-preview | mistral-medium | llama-3.3-70b-versatile |
+| Ludicrous (`/ludicrous`) | claude-opus-4-6 | gpt-5.4 | gemini-3.1-pro-preview-customtools | mistral-large | llama-3.3-70b-versatile |
 
 #### How tiers work
 
-By default, requests go to the **mini** tier — fast and cheap. You can force a higher tier by appending `/power` or `/ludicrous` to your message in the chat panel (e.g. "summarise my week /power"). You can also force a specific provider by appending `/claude`, `/gemini`, `/openai`, or `/mistral` (e.g. "summarise my week /claude /power"). Provider and tier commands are orthogonal and can be combined freely. All command suffixes are stripped before the message reaches the LLM. When a provider is forced, automatic failover is disabled — if that provider fails, you see the error rather than a silent switch to another provider.
+By default, requests go to the **mini** tier — fast and cheap. You can force a higher tier by appending `/power` or `/ludicrous` to your message in the chat panel (e.g. "summarise my week /power"). You can also force a specific provider by appending `/claude`, `/gemini`, `/openai`, `/mistral`, or `/groq` (e.g. "summarise my week /claude /power"). Provider and tier commands are orthogonal and can be combined freely. All command suffixes are stripped before the message reaches the LLM. When a provider is forced, automatic failover is disabled — if that provider fails, you see the error rather than a silent switch to another provider.
 
 Most of the time, you don't need to think about tiers. A composite scoring system evaluates each request across three dimensions — tool count requirements (40% weight), prompt complexity (35%), and conversation trajectory (25%) — and automatically escalates to the power tier when the score exceeds 0.45. Requests involving routed MCP servers (those with more than 15 tools) are always escalated to power regardless of score. Trivial follow-ups ("thanks", "ok") stay on mini even after complex sessions.
 
@@ -284,7 +285,7 @@ The floating chat panel (bottom-right corner by default) provides a persistent c
 - **Arrow Up / Down** to cycle through previous messages (like a terminal).
 - `/clear` resets conversation history and context (same as the Clear button).
 - `/lesson` reviews the conversation and records lessons learned to `[[Chief of Staff/Lessons Learned]]`. Add a topic to focus the reflection (e.g. `/lesson error handling`).
-- Suffix a message with `/power` or `/ludicrous` to use a more capable model for that request. Use `/claude`, `/gemini`, `/openai`, or `/mistral` to force a specific provider.
+- Suffix a message with `/power` or `/ludicrous` to use a more capable model for that request. Use `/claude`, `/gemini`, `/openai`, `/mistral`, or `/groq` to force a specific provider.
 - A **cost indicator** in the header shows cumulative API spend. Hover for a detailed breakdown: session cost with input/output token counts, today's cost with per-model splits (e.g. `3-flash $2.06`), and rolling 7-day and 30-day totals. Cost history is persisted across sessions. Use **Chief of Staff: Reset Token Usage Stats** to zero the session counters.
 - Each assistant response has a small pin icon at its bottom right. Click it to append the response to your daily note page.
 - **[[Page references]]** and **((block references))** in responses are clickable — click to navigate, Shift-click to open in the sidebar.

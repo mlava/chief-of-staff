@@ -557,6 +557,9 @@ function shortModelLabel(modelId) {
   if (id.includes("mistral-small"))  return "mistral-small";
   if (id.includes("mistral-medium")) return "mistral-medium";
   if (id.includes("mistral-large"))  return "mistral-large";
+  // Groq (Llama)
+  if (id.includes("llama-3.3-70b"))  return "llama-70b";
+  if (id.includes("llama-3.1-8b"))   return "llama-8b";
   // Fallback: return raw ID
   return modelId;
 }

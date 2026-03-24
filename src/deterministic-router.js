@@ -566,7 +566,7 @@ export async function buildHelpSummary() {
   const lines = [];
   const extensionAPIRef = deps.getExtensionAPIRef();
   const provider = extensionAPIRef ? deps.getLlmProvider(extensionAPIRef) : "unknown";
-  const providerLabel = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Google Gemini", mistral: "Mistral" }[provider] || provider;
+  const providerLabel = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Google Gemini", mistral: "Mistral", groq: "Groq" }[provider] || provider;
   const assistantName = deps.getAssistantDisplayName();
 
   lines.push(`## ${assistantName}`);
@@ -583,7 +583,8 @@ export async function buildHelpSummary() {
       anthropic: { key: deps.SETTINGS_KEYS.anthropicApiKey, label: "Anthropic" },
       openai: { key: deps.SETTINGS_KEYS.openaiApiKey, label: "OpenAI" },
       gemini: { key: deps.SETTINGS_KEYS.geminiApiKey, label: "Gemini" },
-      mistral: { key: deps.SETTINGS_KEYS.mistralApiKey, label: "Mistral" }
+      mistral: { key: deps.SETTINGS_KEYS.mistralApiKey, label: "Mistral" },
+      groq: { key: deps.SETTINGS_KEYS.groqApiKey, label: "Groq" }
     };
     const configured = [];
     for (const [prov, { key, label }] of Object.entries(providerKeyMap)) {
@@ -699,7 +700,7 @@ export async function buildHelpSummary() {
   lines.push("- `/lesson` — Record lessons learned from this conversation");
   lines.push("- `/power` — Use a more capable model for this message");
   lines.push("- `/ludicrous` — Use the most capable model");
-  lines.push("- `/claude`, `/gemini`, `/openai`, `/mistral` — Force a specific provider for this message");
+  lines.push("- `/claude`, `/gemini`, `/openai`, `/mistral`, `/groq` — Force a specific provider for this message");
   lines.push("");
   lines.push("**Tips:** Ask me to search your graph, manage tasks, send emails, create pages, run your daily briefing, or anything else. I'll use the right tools automatically.");
 
