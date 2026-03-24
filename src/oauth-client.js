@@ -27,7 +27,7 @@ import {
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
-const OAUTH_WORKER_BASE_URL = "https://roam-oauth-middleware.manus-proxy.workers.dev";
+const OAUTH_WORKER_BASE_URL = "https://roam-oauth-middleware.roam-extensions.workers.dev";
 const EXTENSION_ID = "chief-of-staff";
 
 // ── Provider labels ─────────────────────────────────────────────────────────

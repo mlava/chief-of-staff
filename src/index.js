@@ -1224,7 +1224,7 @@ function getSettingBool(extensionAPI, key, fallbackValue = false) {
 // Built-in remote MCP servers (always connected, no user config required)
 const BUILTIN_REMOTE_MCP_SERVERS = [
   {
-    url: "https://extension-docs-proxy.manus-proxy.workers.dev",
+    url: "https://extension-docs-proxy.roam-extensions.workers.dev",
     name: "Extension Docs",
     header: "",
     token: "",
