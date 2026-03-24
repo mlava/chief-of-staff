@@ -201,6 +201,25 @@ test("isLikelyLiveDataReadIntent: sessionUsedLocalMcp forces true for substantiv
   );
 });
 
+test("isLikelyLiveDataReadIntent: Roam context phrases trigger the guard", () => {
+  initToolExecution(makeDeps());
+  assert.equal(isLikelyLiveDataReadIntent("what page am I on?"), true);
+  assert.equal(isLikelyLiveDataReadIntent("which page is this?"), true);
+  assert.equal(isLikelyLiveDataReadIntent("where am I"), true);
+  assert.equal(isLikelyLiveDataReadIntent("what's on today's page"), true);
+  assert.equal(isLikelyLiveDataReadIntent("show me the daily page"), true);
+  assert.equal(isLikelyLiveDataReadIntent("what's on today"), true);
+});
+
+test("isLikelyLiveDataReadIntent: Roam context phrases — write intents do NOT false-positive", () => {
+  initToolExecution(makeDeps());
+  // Generic Roam write operations should NOT trigger — the explicit phrase list
+  // is narrow enough that page/block creation won't match
+  assert.equal(isLikelyLiveDataReadIntent("create a page called Recipes"), false);
+  assert.equal(isLikelyLiveDataReadIntent("add a block about cooking"), false);
+  assert.equal(isLikelyLiveDataReadIntent("remember that I like tea"), false);
+});
+
 test("isLikelyLiveDataReadIntent: dynamic MCP server names expand nouns", () => {
   const clients = new Map();
   clients.set(7777, { serverName: "zotero-server", tools: [] });

@@ -98,6 +98,18 @@ export class EmptyResponseEscalationError extends Error {
   }
 }
 
+/**
+ * Thrown when the live data guard fires twice on mini tier (model refuses to
+ * call data tools even after a retry nudge). Escalates to power tier.
+ */
+export class LiveDataEscalationError extends Error {
+  constructor(message, context) {
+    super(message);
+    this.name = "LiveDataEscalationError";
+    this.escalationContext = context || {};
+  }
+}
+
 // ── Cleanup ─────────────────────────────────────────────────────────────────
 
 /**
@@ -203,6 +215,8 @@ export async function runAgentLoop(userMessage, options = {}) {
   // the live data guard should let the model report that error rather than blocking.
   let sawExternalDataToolAttempt = false;
   let liveDataGuardFired = false;
+  let toolErrorNudgeFired = false;
+  let deferralNudgeFired = false;
   let mcpFabricationGuardFired = false;
   let emptyResponseRetried = false;
   let composioSessionId = "";
@@ -565,20 +579,51 @@ export async function runAgentLoop(userMessage, options = {}) {
         if (requiresLiveDataTool && !sawSuccessfulExternalDataToolResult) {
           // If the model called the right tool but it errored (e.g. rate limit, network
           // failure), let it report the error to the user rather than blocking the response.
-          if (sawExternalDataToolAttempt) {
-            deps.debugLog("[Chief flow] runAgentLoop live-data guard skipped — external tool was attempted but errored (iteration " + (index + 1) + ").");
+          if (sawExternalDataToolAttempt && !toolErrorNudgeFired) {
+            // Tool was called but errored — give the model one chance to report the
+            // failure gracefully instead of asking the user to debug configuration.
+            toolErrorNudgeFired = true;
+            trace.guardsFired.push("toolErrorNudge");
+            deps.debugLog("[Chief flow] runAgentLoop tool-error nudge — external tool attempted but errored (iteration " + (index + 1) + "), retrying with guidance.");
+            messages.push(formatAssistantMessage(provider, response));
+            messages.push({ role: "user", content: "The tool call failed. That response was not shown to the user. Explain to the user clearly and concisely what went wrong (e.g. the service returned an error). Suggest what they can do (retry later, check their API key in settings, or try a different approach). Do NOT ask the user to debug code, inspect logs, or fix configuration files." });
+            continue;
+          } else if (sawExternalDataToolAttempt) {
+            deps.debugLog("[Chief flow] runAgentLoop live-data guard skipped — external tool errored, nudge already fired (iteration " + (index + 1) + ").");
           } else if (!liveDataGuardFired) {
             liveDataGuardFired = true;
             trace.guardsFired.push("liveData");
             deps.debugLog("[Chief flow] runAgentLoop live-data guard triggered — no external tool result (iteration " + (index + 1) + "), retrying with hint.");
             messages.push(formatAssistantMessage(provider, response));
-            messages.push({ role: "user", content: "You responded without calling any data tool. That response was not shown to the user. You MUST call the appropriate tool (e.g. LOCAL_MCP_ROUTE, COMPOSIO_MULTI_EXECUTE_TOOL, roam_search) to fetch live data before answering." });
+            messages.push({ role: "user", content: "You responded without calling any data tool. That response was not shown to the user. You MUST call the appropriate tool (e.g. roam_search, roam_get_page, roam_get_daily_page, LOCAL_MCP_ROUTE, COMPOSIO_MULTI_EXECUTE_TOOL) to fetch live data before answering." });
             continue;
+          } else if (effectiveTier === "mini") {
+            deps.debugLog("[Chief flow] Live-data escalation: mini-tier failed to call data tools after retry, escalating to power tier.");
+            throw new LiveDataEscalationError(
+              "Mini-tier failed to ground response in live data after retry",
+              { provider, model, tier: effectiveTier }
+            );
           } else {
             finalText = "I can't answer that reliably without checking live tools first. Please retry, and I'll fetch the real data before responding.";
             deps.debugLog("[Chief flow] runAgentLoop text blocked: missing successful external tool result (after retry).");
           }
         }
+
+        // Post-guard deferral check: if the live data guard fired, tools were called
+        // successfully on retry, but the model still defers instead of synthesizing
+        // an answer — nudge it once to actually use the results.
+        if (liveDataGuardFired && sawSuccessfulExternalDataToolResult && !deferralNudgeFired && finalText) {
+          const deferralPattern = /\b(i['']ll\s+(check|get back|look into|let you know|find out)|let me (check|look|get back|find)|i('ll| will)\s+investigate|i need to\s+(check|look|verify)|once i\s+(check|have|get)|i('ll| will)\s+get\s+back)\b/i;
+          if (deferralPattern.test(finalText)) {
+            deferralNudgeFired = true;
+            trace.guardsFired.push("deferralNudge");
+            deps.debugLog("[Chief flow] runAgentLoop deferral nudge — model deferred after successful tool calls (iteration " + (index + 1) + "), retrying.");
+            messages.push(formatAssistantMessage(provider, response));
+            messages.push({ role: "user", content: "You already retrieved data via tool calls but then deferred instead of answering. That response was not shown to the user. Synthesize the tool results you already have into a direct, concrete answer now." });
+            continue;
+          }
+        }
+
         trace.finishedAt = Date.now();
         trace.resultTextPreview = String(finalText || "").slice(0, 400);
         deps.updateChatPanelCostIndicator();
@@ -1045,6 +1090,18 @@ export async function runAgentLoopWithFailover(userMessage, options = {}) {
         powerMode: true
       });
     }
+    if (error instanceof LiveDataEscalationError) {
+      const esc = error.escalationContext || {};
+      deps.debugLog(`[Chief flow] Live-data escalation: ${esc.provider} ${esc.tier} → power`);
+      recordUsageStat("tierEscalations");
+      deps.showInfoToast("Upgrading model", "Switching to power tier for better data grounding\u2026");
+      return await runAgentLoop(userMessage, {
+        ...options,
+        providerOverride: primaryProvider,
+        tier: "power",
+        powerMode: true
+      });
+    }
     lastError = error;
     if (!isFailoverEligibleError(error)) throw error;
     setProviderCooldown(primaryProvider);
@@ -1108,6 +1165,18 @@ export async function runAgentLoopWithFailover(userMessage, options = {}) {
         const esc = error.escalationContext || {};
         deps.debugLog(`[Chief flow] Empty response escalation in fallback: ${esc.provider} ${esc.tier} → power`);
         deps.showInfoToast("Upgrading model", "Mini tier unresponsive, switching to power tier\u2026");
+        return await runAgentLoop(userMessage, {
+          ...options,
+          providerOverride: nextProvider,
+          tier: "power",
+          powerMode: true
+        });
+      }
+      if (error instanceof LiveDataEscalationError) {
+        const esc = error.escalationContext || {};
+        deps.debugLog(`[Chief flow] Live-data escalation in fallback: ${esc.provider} ${esc.tier} → power`);
+        recordUsageStat("tierEscalations");
+        deps.showInfoToast("Upgrading model", "Switching to power tier for better data grounding\u2026");
         return await runAgentLoop(userMessage, {
           ...options,
           providerOverride: nextProvider,

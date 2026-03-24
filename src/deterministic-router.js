@@ -770,6 +770,20 @@ export async function tryRunDeterministicAskIntent(prompt, context = {}) {
     }
   }
 
+  // ── Current page query ──────────────────────────────────────────
+  // "what page am I on?", "which page is this?", "where am I?"
+  if (/^(?:what|which)\s+page\s+(?:am\s+i\s+on|is\s+this|are?\s+we\s+on)[?.!]?\s*$/i.test(prompt) ||
+      /^where\s+am\s+i[?.!]?\s*$/i.test(prompt)) {
+    deps.debugLog("[Chief flow] Deterministic route matched: current_page");
+    const pageCtx = await deps.getCurrentPageContext();
+    if (pageCtx) {
+      const label = pageCtx.type === "page"
+        ? `You're on **[[${pageCtx.title}]]** (uid: \`${pageCtx.uid}\`).`
+        : `You're viewing a block (uid: \`${pageCtx.uid}\`).`;
+      return deps.publishAskResponse(prompt, label, assistantName, suppressToasts);
+    }
+  }
+
   // ── Deterministic search ─────────────────────────────────────────
   // "search for X", "find X in my graph", "search X", "look up X", "search roam for X"
   const searchMatch = prompt.match(/^(?:search\s+(?:for|roam\s+for|my\s+(?:graph|roam)\s+for)?|find|look\s*up)\s+(.+?)(?:\s+in\s+(?:my\s+)?(?:graph|roam))?\s*[?.!]*$/i);

@@ -253,7 +253,7 @@ import {
 } from "./deterministic-router.js";
 import {
   initAgentLoop, runAgentLoopWithFailover,
-  ClaimedActionEscalationError, EmptyResponseEscalationError,
+  ClaimedActionEscalationError, EmptyResponseEscalationError, LiveDataEscalationError,
   getLastAgentRunTrace, setLastAgentRunTrace,
   getActiveAgentAbortController, cleanupAgentLoop
 } from "./agent-loop.js";
@@ -5019,6 +5019,7 @@ function onload({ extensionAPI }) {
     getExtensionToolsRegistry, getExtToolsConfig,
     getCosIntegrationTools, getCronTools,
     getExtensionAPIRef: () => extensionAPIRef,
+    getCurrentPageContext,
     getSkillEntries,
     getSkillsPromptCache: () => skillsPromptCache,
     getMemoryPromptCache: () => memoryPromptCache,

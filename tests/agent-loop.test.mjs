@@ -12,6 +12,7 @@ import {
   initAgentLoop,
   ClaimedActionEscalationError,
   EmptyResponseEscalationError,
+  LiveDataEscalationError,
   getLastAgentRunTrace,
   setLastAgentRunTrace,
   getActiveAgentAbortController,
@@ -130,6 +131,34 @@ describe("EmptyResponseEscalationError", () => {
   });
 });
 
+describe("LiveDataEscalationError", () => {
+  it("is an instance of Error", () => {
+    const err = new LiveDataEscalationError("test");
+    assert.ok(err instanceof Error);
+  });
+
+  it("has correct name property", () => {
+    const err = new LiveDataEscalationError("test");
+    assert.equal(err.name, "LiveDataEscalationError");
+  });
+
+  it("stores escalationContext", () => {
+    const ctx = { provider: "gemini", tier: "mini", model: "gemini-3.1-flash-lite-preview" };
+    const err = new LiveDataEscalationError("test", ctx);
+    assert.deepEqual(err.escalationContext, ctx);
+  });
+
+  it("defaults escalationContext to empty object", () => {
+    const err = new LiveDataEscalationError("test");
+    assert.deepEqual(err.escalationContext, {});
+  });
+
+  it("preserves message", () => {
+    const err = new LiveDataEscalationError("live data failure");
+    assert.equal(err.message, "live data failure");
+  });
+});
+
 // ── State management ────────────────────────────────────────────────────────
 
 describe("State management", () => {
@@ -205,6 +234,10 @@ describe("Module exports", () => {
 
   it("exports EmptyResponseEscalationError", () => {
     assert.equal(typeof EmptyResponseEscalationError, "function");
+  });
+
+  it("exports LiveDataEscalationError", () => {
+    assert.equal(typeof LiveDataEscalationError, "function");
   });
 
   it("exports getLastAgentRunTrace", () => {
