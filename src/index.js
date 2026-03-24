@@ -1,4 +1,5 @@
 import { extractBalancedJsonObjects, extractMcpKeyReference } from "./parse-utils.js";
+import { initCosLinkedRefsFilter, teardownCosLinkedRefsFilter } from "./cos-linked-refs-filter.js";
 import iziToast from "izitoast";
 import { launchOnboarding, teardownOnboarding } from "./onboarding/onboarding.js";
 import { computeRoutingScore, recordTurnOutcome, sessionTrajectory } from "./tier-routing.js";
@@ -298,7 +299,8 @@ const SETTINGS_KEYS = {
   cloudflareAccountId: "cloudflare-account-id",
   evalEnabled: "eval-enabled",
   evalSampleRate: "eval-sample-rate",
-  evalReviewThreshold: "eval-review-threshold"
+  evalReviewThreshold: "eval-review-threshold",
+  cosLinkedRefsFilter: "cos-linked-refs-filter"
 };
 const TOOLS_SCHEMA_VERSION = 3;
 const AUTH_POLL_INTERVAL_MS = 9000;
@@ -5077,6 +5079,12 @@ function onload({ extensionAPI }) {
     WRITE_TOOL_NAMES,
   });
   setChiefNamespaceGlobals();
+  initCosLinkedRefsFilter({
+    debugLog,
+    getExtensionAPI: () => extensionAPIRef,
+    getSettingBool,
+    SETTING_KEY: SETTINGS_KEYS.cosLinkedRefsFilter,
+  });
   loadConversationContext(extensionAPI);
   loadCostHistory(extensionAPI);
   loadUsageStats(extensionAPI);
@@ -5190,6 +5198,7 @@ function onunload() {
   if (extensionAPIRef === null) return;
   unloadInProgress = true;
   debugLog("Chief of Staff unloaded");
+  teardownCosLinkedRefsFilter();
   teardownOnboarding();
   if (onboardingCheckTimeoutId) {
     clearTimeout(onboardingCheckTimeoutId);

@@ -417,6 +417,15 @@ export function buildSettingsConfig(extensionAPI) {
         }
       },
       {
+        id: deps.SETTINGS_KEYS.cosLinkedRefsFilter,
+        name: "Hide COS Pages from Linked References",
+        description: "Automatically removes Chief of Staff namespace pages from linked references on all non-COS pages. Applies once per page per session — manual filter changes are respected.",
+        action: {
+          type: "switch",
+          value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.cosLinkedRefsFilter, true)
+        }
+      },
+      {
         id: deps.SETTINGS_KEYS.auditLogRetentionDays,
         name: "Audit Log Retention (days)",
         description: "Automatically trim audit log entries older than this many days. Runs after each agent interaction. Leave blank or 0 to keep all entries indefinitely.",
