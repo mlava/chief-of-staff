@@ -434,7 +434,7 @@ export function buildSettingsConfig(extensionAPI) {
           value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.auditLogRetentionDays, ""),
           placeholder: "e.g. 14"
         }
-      },
+      }/*,
       {
         id: deps.SETTINGS_KEYS.evalEnabled,
         name: "Post-Run Evaluation",
@@ -463,7 +463,7 @@ export function buildSettingsConfig(extensionAPI) {
           value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.evalReviewThreshold, "2"),
           placeholder: "2"
         }
-      }
+      }*/
     );
   }
 
