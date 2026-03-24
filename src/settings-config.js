@@ -240,48 +240,41 @@ export function buildSettingsConfig(extensionAPI) {
           }
         }
       });
-      // ── Auth type selector (static vs OAuth) ──
-      const authType = deps.getSettingString(extensionAPI, `remote-mcp-${i}-auth-type`, "static") || "static";
+      // ── Auth type selector (token / oauth) ──
+      // Stored values are "token" and "oauth" (display-friendly).
+      // getRemoteMcpServers() maps these to internal authType values.
+      // Migrate legacy stored values on read.
+      const rawAuthType = deps.getSettingString(extensionAPI, `remote-mcp-${i}-auth-type`, "token") || "token";
+      const authType = rawAuthType === "mcp-oauth" ? "oauth"    // migrate legacy
+                     : rawAuthType === "static"    ? "token"    // migrate legacy
+                     : rawAuthType;
+      // Persist the migrated value so Roam's select displays correctly
+      if (authType !== rawAuthType) {
+        try { extensionAPI.settings.set(`remote-mcp-${i}-auth-type`, authType); } catch { }
+      }
       settings.push({
         id: `remote-mcp-${i}-auth-type`,
         name: `Remote Server ${i} — Auth method`,
-        description: "Static: manual header + token. OAuth: automatic token via connected OAuth provider.",
+        description: "Token: paste an API key or bearer token. OAuth: automatic sign-in via the server's OAuth flow (GitHub, Notion, Linear, Sentry, etc.).",
         action: {
           type: "select",
-          items: ["static", "oauth"],
+          items: ["token", "oauth"],
           value: authType,
           onChange: (value) => {
-            const v = String(value || "static").trim();
-            try { extensionAPI.settings.set(`remote-mcp-${i}-auth-type`, v); } catch { }
+            try { extensionAPI.settings.set(`remote-mcp-${i}-auth-type`, value || "token"); } catch { }
             rebuildSettingsPanel(extensionAPI);
           }
         }
       });
 
       if (authType === "oauth") {
-        // OAuth mode: provider select + connection status
-        const providerItems = deps.getOAuthProviderItems ? deps.getOAuthProviderItems() : ["google"];
-        const currentProvider = deps.getSettingString(extensionAPI, `remote-mcp-${i}-oauth-provider`, "") || "";
-        settings.push({
-          id: `remote-mcp-${i}-oauth-provider`,
-          name: `Remote Server ${i} — OAuth provider`,
-          description: "Select which OAuth provider to use for this server's authentication.",
-          action: {
-            type: "select",
-            items: ["", ...providerItems],
-            value: currentProvider,
-            onChange: (value) => {
-              const v = String(value || "").trim();
-              try { extensionAPI.settings.set(`remote-mcp-${i}-oauth-provider`, v); } catch { }
-              rebuildSettingsPanel(extensionAPI);
-            }
-          }
-        });
-        if (currentProvider && deps.getOAuthTokenState) {
-          const state = deps.getOAuthTokenState(currentProvider);
-          const statusText = state?.connected
-            ? (state.isExpired ? "Connected (token expired — will auto-refresh)" : "Connected")
-            : "Not connected — use command palette: Chief of Staff: Connect OAuth Provider";
+        // OAuth mode: auto-discovery via MCP OAuth 2.1 spec
+        const serverUrl = deps.getSettingString(extensionAPI, `remote-mcp-${i}-url`, "").trim();
+        if (serverUrl && deps.getMcpOAuthStatus) {
+          const mcpStatus = deps.getMcpOAuthStatus(serverUrl);
+          const statusText = mcpStatus.connected
+            ? (mcpStatus.isExpired ? "Connected (token expired — will auto-refresh)" : "Connected")
+            : "Not connected — use command palette: Chief of Staff: Connect Remote OAuth Server";
           settings.push({
             id: `remote-mcp-${i}-oauth-status`,
             name: `Remote Server ${i} — OAuth status`,
@@ -289,6 +282,26 @@ export function buildSettingsConfig(extensionAPI) {
             action: { type: "input", placeholder: "", onChange: () => {} },
           });
         }
+        settings.push({
+          id: `remote-mcp-${i}-mcp-oauth-client-id`,
+          name: `Remote Server ${i} — Client ID (optional)`,
+          description: "Only needed for servers that block dynamic client registration (e.g. GitHub, Atlassian). Register an OAuth app in the provider's developer console, set the redirect URI to the Worker callback URL, then enter the client ID here.",
+          action: {
+            type: "input",
+            value: deps.getSettingString(extensionAPI, `remote-mcp-${i}-mcp-oauth-client-id`, ""),
+            placeholder: "Leave blank for auto-registration",
+          }
+        });
+        settings.push({
+          id: `remote-mcp-${i}-mcp-oauth-client-secret`,
+          name: `Remote Server ${i} — Client Secret (optional)`,
+          description: "Required only if the server demands a client secret (confidential client). Most MCP OAuth servers use public clients — leave blank.",
+          action: {
+            type: "input",
+            value: deps.getSettingString(extensionAPI, `remote-mcp-${i}-mcp-oauth-client-secret`, ""),
+            placeholder: "Leave blank for public client",
+          }
+        });
       } else {
         // Static mode: existing header + token fields
         settings.push({
