@@ -31,7 +31,7 @@ https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 
 | Requirement | Notes |
 |---|---|
-| At least one LLM API key (Anthropic, OpenAI, Gemini, Mistral, or Groq) | Direct browser fetch — incurs API costs at your provider's rates |
+| At least one LLM API key (Anthropic, OpenAI, Gemini, Mistral, or Groq) | Direct browser fetch — incurs API costs at your provider's rates. Groq requires a paid plan (Dev tier or above) — the free tier's token-per-minute limit is too low. |
 | Composio account + API key | Only required for external tool integrations. Graph and task features work without it. |
 | [Better Tasks](https://github.com/mlava/recurring-tasks) extension | Only required for Better Tasks integration. Plain TODO search works without it. |
 
