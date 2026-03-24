@@ -22,6 +22,7 @@ https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 - **Self-healing tool calls** — if the LLM claims to have done something without actually doing it, the extension detects the hallucination, retries with the correct tool, and auto-escalates to a smarter model if needed. No user intervention required.
 - **Three model tiers with automatic routing** — most requests use a fast, cheap model. Append `/power` or `/ludicrous` to your message to force a more capable tier, or let the extension auto-escalate based on request complexity. You can also force a specific provider with `/claude`, `/gemini`, `/openai`, or `/mistral`. See [How tiers work](#how-tiers-work) for details.
 - **Dry-run mode** — simulate any mutating operation before it executes. Useful for reviewing what the agent would do before committing.
+- **Linked refs filtering** — automatically removes Chief of Staff namespace pages from the linked references section of every non-COS page you visit, keeping your graph tidy. Filters are merged with your existing manual filters (never overwritten) and applied once per page per session, so manual changes are respected. Enabled by default; toggle off in Advanced settings if needed.
 - **Guided onboarding** — first-run onboarding walks you through API key setup, memory page bootstrapping, and chat panel introduction.
 
 ---
@@ -55,6 +56,7 @@ Open **Settings > Chief of Staff** and fill in:
 - **Debug Logging** — enable verbose console output for troubleshooting
 - **Dry Run** — one-shot toggle that simulates the next mutating tool call without writing anything (auto-disables after one use)
 - **Ludicrous mode failover** — allow escalation to the most expensive models (Opus / GPT-5.2) when all power-tier providers fail
+- **Hide COS Pages from Linked References** — automatically filters Chief of Staff namespace pages out of linked references on all non-COS pages. Enabled by default.
 
 Default models by tier:
 
