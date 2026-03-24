@@ -271,6 +271,7 @@ const SETTINGS_KEYS = {
   anthropicApiKey: "anthropic-api-key",
   geminiApiKey: "gemini-api-key",
   mistralApiKey: "mistral-api-key",
+  groqApiKey: "groq-api-key",
   debugLogging: "debug-logging",
   dryRunMode: "dry-run-mode",
   conversationContext: "conversation-context",
@@ -327,9 +328,9 @@ const LLM_STREAM_CHUNK_TIMEOUT_MS = 60_000; // 60s per-chunk timeout for streami
 const LLM_RESPONSE_TIMEOUT_MS = 90_000; // 90s per-request timeout for non-streaming calls
 const DEFAULT_LLM_PROVIDER = "anthropic";
 const FAILOVER_CHAINS = {
-  mini: ["gemini", "mistral", "openai", "anthropic"],
-  power: ["gemini", "mistral", "openai", "anthropic"],
-  ludicrous: ["gemini", "openai", "mistral", "anthropic"]
+  mini: ["gemini", "mistral", "openai", "anthropic", "groq"],
+  power: ["gemini", "mistral", "openai", "anthropic", "groq"],
+  ludicrous: ["gemini", "openai", "mistral", "anthropic", "groq"]
 };
 const PROVIDER_COOLDOWN_MS = 60_000;
 const FAILOVER_CONTINUATION_MESSAGE = "Note: You are continuing a task started by another AI model which hit a temporary error. The conversation above contains all data gathered so far. Please complete the task using this context.";
@@ -339,6 +340,7 @@ const LLM_MODEL_COSTS = {
   "claude-sonnet-4-6": [3.00, 15.00],
   "claude-opus-4-6": [5.00, 25.00],
   "gpt-5-mini": [0.25, 2.00],
+  "gpt-5.4-mini": [0.75, 4.50],
   "gpt-4.1": [2.00, 8.00],
   "gpt-5.4": [2.50, 15.00],
   "gemini-3.1-flash-lite-preview": [0.25, 1.50],
@@ -346,7 +348,8 @@ const LLM_MODEL_COSTS = {
   "gemini-3.1-pro-preview-customtools": [2.00, 12.00],
   "mistral-small-latest": [0.10, 0.30],
   "mistral-medium-latest": [0.40, 2.00],
-  "mistral-large-2512": [0.50, 1.50]
+  "mistral-large-2512": [0.50, 1.50],
+  "llama-3.3-70b-versatile": [0.59, 0.79]
 };
 // Map skill shorthand source names → actual LLM tool names
 const SOURCE_TOOL_NAME_MAP = {
@@ -3648,9 +3651,9 @@ async function askChiefOfStaff(userMessage, options = {}) {
   const ludicrousFlag = /(?:^|\s)\/ludicrous(?:\s|$)/i.test(rawPrompt);
   const powerFlag = /(?:^|\s)\/power(?:\s|$)/i.test(rawPrompt);
 
-  // Detect provider override — /claude, /gemini, /openai, /mistral
-  const PROVIDER_SLASH_MAP = { claude: "anthropic", gemini: "gemini", openai: "openai", mistral: "mistral" };
-  const providerSlashMatch = rawPrompt.match(/(?:^|\s)\/(claude|gemini|openai|mistral)(?:\s|$)/i);
+  // Detect provider override — /claude, /gemini, /openai, /mistral, /groq
+  const PROVIDER_SLASH_MAP = { claude: "anthropic", gemini: "gemini", openai: "openai", mistral: "mistral", groq: "groq" };
+  const providerSlashMatch = rawPrompt.match(/(?:^|\s)\/(claude|gemini|openai|mistral|groq)(?:\s|$)/i);
   const providerOverride = providerSlashMatch ? PROVIDER_SLASH_MAP[providerSlashMatch[1].toLowerCase()] : null;
 
   // Detect /lesson flag — records lessons from the conversation
@@ -3659,7 +3662,7 @@ async function askChiefOfStaff(userMessage, options = {}) {
   let prompt = rawPrompt
     .replace(/(?:^|\s)\/ludicrous(?:\s|$)/i, " ")
     .replace(/(?:^|\s)\/power(?:\s|$)/i, " ")
-    .replace(/(?:^|\s)\/(claude|gemini|openai|mistral)(?:\s|$)/gi, " ")
+    .replace(/(?:^|\s)\/(claude|gemini|openai|mistral|groq)(?:\s|$)/gi, " ")
     .replace(/(?:^|\s)\/lesson(?:\s|$)/i, " ")
     .trim();
 

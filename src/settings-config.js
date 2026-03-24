@@ -85,7 +85,7 @@ export function buildSettingsConfig(extensionAPI) {
       description: "Primary AI provider. If this provider fails, Chief of Staff automatically falls back to other providers you have keys for.",
       action: {
         type: "select",
-        items: ["anthropic", "openai", "gemini", "mistral"],
+        items: ["anthropic", "openai", "gemini", "mistral", "groq"],
         value: deps.getLlmProvider(extensionAPI)
       }
     },
@@ -127,6 +127,16 @@ export function buildSettingsConfig(extensionAPI) {
         type: "input",
         value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.mistralApiKey, ""),
         placeholder: "sk-..."
+      }
+    },
+    {
+      id: deps.SETTINGS_KEYS.groqApiKey,
+      name: "Groq API Key",
+      description: "Get yours at console.groq.com. Requires a paid plan (Dev tier or above) — the free tier's 12K TPM limit is too low. Used for Llama models via Groq's fast inference and as a failover provider.",
+      action: {
+        type: "input",
+        value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.groqApiKey, ""),
+        placeholder: "gsk_..."
       }
     },
   ];

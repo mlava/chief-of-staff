@@ -28,6 +28,7 @@ function detectProvider(key) {
   if (key.startsWith("sk-ant-")) return "anthropic";
   if (key.startsWith("sk-")) return "openai";
   if (key.startsWith("AIza")) return "gemini";
+  if (key.startsWith("gsk_")) return "groq";
   return null;
 }
 
@@ -191,7 +192,7 @@ const ONBOARDING_STEPS = [
       ));
 
       const keyField = createInputField({
-        placeholder: "sk-... / AIza...",
+        placeholder: "sk-... / AIza... / gsk_...",
         type: "password",
       });
       frag.appendChild(keyField.wrapper);
@@ -205,7 +206,7 @@ const ONBOARDING_STEPS = [
       providerSelectLabel.style.cssText = "font-size: 13px; margin: 0; font-weight: 600;";
       const providerSelect = document.createElement("select");
       providerSelect.className = "cos-onboarding-select";
-      for (const opt of ["mistral", "anthropic", "openai", "gemini"]) {
+      for (const opt of ["mistral", "anthropic", "openai", "gemini", "groq"]) {
         const el = document.createElement("option");
         el.value = opt;
         el.textContent = opt.charAt(0).toUpperCase() + opt.slice(1);
@@ -221,7 +222,7 @@ const ONBOARDING_STEPS = [
       detectedFeedback.style.cssText = "font-size: 13px; margin: 4px 0 8px; min-height: 20px;";
       frag.appendChild(detectedFeedback);
 
-      const providerLabelsMap = { anthropic: "Anthropic (Claude)", openai: "OpenAI (GPT)", gemini: "Google (Gemini)" };
+      const providerLabelsMap = { anthropic: "Anthropic (Claude)", openai: "OpenAI (GPT)", gemini: "Google (Gemini)", groq: "Groq (Llama)" };
 
       // Show/hide manual selector + detection feedback based on key prefix.
       // Debounced to avoid excessive DOM updates during fast typing.
@@ -280,11 +281,12 @@ const ONBOARDING_STEPS = [
               openai: deps.SETTINGS_KEYS.openaiApiKey,
               anthropic: deps.SETTINGS_KEYS.anthropicApiKey,
               gemini: deps.SETTINGS_KEYS.geminiApiKey,
-              mistral: deps.SETTINGS_KEYS.mistralApiKey
+              mistral: deps.SETTINGS_KEYS.mistralApiKey,
+              groq: deps.SETTINGS_KEYS.groqApiKey
             };
             extensionAPI.settings.set(keySettingMap[provider], key);
             extensionAPI.settings.set(deps.SETTINGS_KEYS.llmProvider, provider);
-            const providerLabels = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Gemini", mistral: "Mistral" };
+            const providerLabels = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Gemini", mistral: "Mistral", groq: "Groq" };
             deps.iziToast.success({
               class: "cos-toast",
               title: `${providerLabels[provider]} key saved`,
@@ -875,9 +877,10 @@ const ONBOARDING_STEPS = [
         deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.anthropicApiKey, "") ||
         deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.openaiApiKey, "") ||
         deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.geminiApiKey, "") ||
-        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.mistralApiKey, "")
+        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.mistralApiKey, "") ||
+        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.groqApiKey, "")
       );
-      const providerLabels = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Gemini", mistral: "Mistral" };
+      const providerLabels = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Gemini", mistral: "Mistral", groq: "Groq" };
       const providerLabel = providerLabels[provider] || "Not set";
 
       const summaryContainer = document.createElement("div");
