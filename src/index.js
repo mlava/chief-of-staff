@@ -77,6 +77,14 @@ import {
   loadCronJobs,
 } from "./cron-scheduler.js";
 import {
+  initIdleScheduler,
+  startIdleScheduler,
+  cleanupIdleScheduler,
+  registerIdleTask,
+  unregisterIdleTask,
+  getIdleSchedulerState,
+} from "./idle-scheduler.js";
+import {
   initSystemPrompt,
   buildDefaultSystemPrompt,
   resetLastPromptSections,
@@ -3363,7 +3371,12 @@ function setChiefNamespaceGlobals() {
     ask: (message, options = {}) => askChiefOfStaff(message, options),
     toggleChat: () => toggleChatPanel(),
     memory: async () => getAllMemoryContent({ force: true }),
-    skills: async () => getSkillsContent({ force: true })
+    skills: async () => getSkillsContent({ force: true }),
+    idle: {
+      state: () => getIdleSchedulerState(),
+      register: (taskDef) => registerIdleTask(taskDef),
+      unregister: (id) => unregisterIdleTask(id),
+    },
   };
 }
 
@@ -5082,6 +5095,12 @@ function onload({ extensionAPI }) {
     INBOX_READ_ONLY_TOOL_ALLOWLIST,
     WRITE_TOOL_NAMES,
   });
+  initIdleScheduler({
+    debugLog,
+    getActiveAgentAbortController: () => getActiveAgentAbortController(),
+    getChatPanelIsSending: () => getChatPanelIsSending(),
+    isUnloadInProgress: () => unloadInProgress,
+  });
   setChiefNamespaceGlobals();
   initCosLinkedRefsFilter({
     debugLog,
@@ -5145,6 +5164,7 @@ function onload({ extensionAPI }) {
   primeInboxStaticUIDs(); // no-op: inboxStaticUIDs is already set (instruction-only)
   setupExtensionBroadcastListeners();
   startCronScheduler();
+  startIdleScheduler();
   scheduleRuntimeAibomRefresh(1200);
   // Restore chat panel if it was open before reload.
   // Blueprint.js overlays (used by Roam Settings / Depot) enforce a JavaScript focus trap — anything outside the overlay DOM is
@@ -5210,6 +5230,7 @@ function onunload() {
   }
   teardownExtensionBroadcastListeners();
   stopCronScheduler();
+  cleanupIdleScheduler();
   // Abort any in-flight LLM requests and reset agent loop state
   cleanupAgentLoop();
   const api = extensionAPIRef;
