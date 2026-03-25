@@ -869,11 +869,16 @@ export function isExternalDataToolCall(toolName) {
     upper === "ROAM_SEARCH_BLOCKS" ||
     upper === "LOCAL_MCP_ROUTE" ||
     upper === "LOCAL_MCP_EXECUTE" ||
+    upper === "REMOTE_MCP_ROUTE" ||
+    upper === "REMOTE_MCP_EXECUTE" ||
     upper === "ROAM_WEB_FETCH"
   ) return true;
   // Direct-call local MCP tools (from servers ≤15 tools, exposed by original name)
   const localToolsCache = deps.getLocalMcpToolsCache();
   if (Array.isArray(localToolsCache) && localToolsCache.some(t => t.name === name)) return true;
+  // Direct-call remote MCP tools (from servers ≤15 tools, exposed by original name)
+  const remoteToolsCache = deps.getRemoteMcpToolsCache?.();
+  if (Array.isArray(remoteToolsCache) && remoteToolsCache.some(t => t.name === name)) return true;
   // Extension tools (registered via window.RoamExtensionTools, e.g. wp_get_featured_article)
   const extTools = deps.getExternalExtensionTools();
   if (Array.isArray(extTools) && extTools.some(t => t.name === name)) return true;
