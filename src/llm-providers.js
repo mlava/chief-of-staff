@@ -425,6 +425,16 @@ function sanitiseToolSchema(schema) {
         cleaned[key] = typeof val === "boolean" ? val : true;
         continue;
       }
+      // "properties" is a map of user-defined names → schema objects;
+      // preserve the property names and only sanitise each schema value
+      if (key === "properties" && val && typeof val === "object" && !Array.isArray(val)) {
+        const cleanedProps = {};
+        for (const [propName, propSchema] of Object.entries(val)) {
+          cleanedProps[propName] = resolve(propSchema, depth + 1);
+        }
+        cleaned[key] = cleanedProps;
+        continue;
+      }
       cleaned[key] = resolve(val, depth + 1);
     }
     return cleaned;
