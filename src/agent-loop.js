@@ -812,8 +812,8 @@ export async function runAgentLoop(userMessage, options = {}) {
 
         const isExternalToolCall = isExternalDataToolCall(toolCall.name);
         // Track that the model attempted an external data tool (even if it errors).
-        // LOCAL_MCP_ROUTE is discovery-only — don't count it as a data attempt.
-        if (isExternalToolCall && toolCall.name !== "LOCAL_MCP_ROUTE") {
+        // LOCAL_MCP_ROUTE / REMOTE_MCP_ROUTE are discovery-only — don't count as a data attempt.
+        if (isExternalToolCall && toolCall.name !== "LOCAL_MCP_ROUTE" && toolCall.name !== "REMOTE_MCP_ROUTE") {
           sawExternalDataToolAttempt = true;
         }
         if (onToolCall) onToolCall(toolCall.name, toolCall.arguments);
@@ -920,9 +920,9 @@ export async function runAgentLoop(userMessage, options = {}) {
           durationMs,
           error: errorMessage
         });
-        // LOCAL_MCP_ROUTE is discovery only — don't let it satisfy the live data guard.
-        // Only actual data-fetching tools (LOCAL_MCP_EXECUTE, etc.) should count.
-        if (isExternalToolCall && toolCall.name !== "LOCAL_MCP_ROUTE" && isSuccessfulExternalToolResult(result)) {
+        // LOCAL_MCP_ROUTE / REMOTE_MCP_ROUTE are discovery only — don't let them satisfy the live data guard.
+        // Only actual data-fetching tools (LOCAL_MCP_EXECUTE, REMOTE_MCP_EXECUTE, etc.) should count.
+        if (isExternalToolCall && toolCall.name !== "LOCAL_MCP_ROUTE" && toolCall.name !== "REMOTE_MCP_ROUTE" && isSuccessfulExternalToolResult(result)) {
           sawSuccessfulExternalDataToolResult = true;
         }
         if (onToolResult) onToolResult(toolCall.name, result);
