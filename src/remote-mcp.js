@@ -22,7 +22,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { UnauthorizedError, auth as sdkAuth } from "@modelcontextprotocol/sdk/client/auth.js";
-import { createMcpOAuthProvider, urlToHash } from "./mcp-oauth-provider.js";
+import { createMcpOAuthProvider, urlToHash, getOAuthProxiedUrl } from "./mcp-oauth-provider.js";
 
 // ── Constants ───────────────────────────────────────────────────────────────
 const REMOTE_MCP_CONNECT_TIMEOUT_MS = 20_000;    // StreamableHTTP connect (no SSE startup overhead)
@@ -681,8 +681,8 @@ export async function connectRemoteMcp(serverConfig) {
     }
 
     try {
-      const proxiedUrl = deps.getProxiedRemoteUrl(effectiveUrl);
-      deps.debugLog(`[Remote MCP] Connecting to ${urlKey} via ${proxiedUrl !== effectiveUrl ? "proxy" : "direct"}`);
+      const proxiedUrl = authProvider ? getOAuthProxiedUrl(effectiveUrl) : deps.getProxiedRemoteUrl(effectiveUrl);
+      deps.debugLog(`[Remote MCP] Connecting to ${urlKey} via ${proxiedUrl !== effectiveUrl ? (authProvider ? "OAuth Worker proxy" : "proxy") : "direct"}`);
 
       const useSSE = isSSEEndpoint(effectiveUrl);
       abortController = new AbortController();
@@ -717,13 +717,14 @@ export async function connectRemoteMcp(serverConfig) {
 
         // MCP OAuth: pass the effective URL (not proxied) so the SDK constructs correct
         // discovery URLs (/.well-known/oauth-protected-resource, auth server metadata, DCR).
-        // A proxying fetch routes all actual HTTP requests through the CORS proxy.
+        // OAuth connections route through the OAuth Worker proxy; non-OAuth through corsAnywhere.
         const useRawUrl = !!authProvider;
         const transportUrl = useRawUrl ? new URL(effectiveUrl) : new URL(proxiedUrl);
+        const proxyFn = useRawUrl ? getOAuthProxiedUrl : deps.getProxiedRemoteUrl;
         const transportFetch = useRawUrl
           ? (input, init = {}) => {
               const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-              return fetch(deps.getProxiedRemoteUrl(url), { ...init, signal: abortController.signal });
+              return fetch(proxyFn(url), { ...init, signal: abortController.signal });
             }
           : wrappedFetch;
 
@@ -864,7 +865,7 @@ export async function connectRemoteMcp(serverConfig) {
                     const result = await sdkAuth(entry._authProvider, {
                       serverUrl: entry._urlKey,
                       fetchFn: (input, init = {}) => fetch(
-                        deps.getProxiedRemoteUrl(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url),
+                        getOAuthProxiedUrl(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url),
                         init
                       )
                     });
@@ -1010,13 +1011,14 @@ export async function connectRemoteMcp(serverConfig) {
           deps.debugLog(`[Remote MCP] SSE failed for ${urlKey}, trying StreamableHTTP fallback: ${fallbackUrl}`);
           try {
             const fbAbort = new AbortController();
-            const fbProxied = deps.getProxiedRemoteUrl(fallbackUrl);
+            const fbProxyFn = authProvider ? getOAuthProxiedUrl : deps.getProxiedRemoteUrl;
+            const fbProxied = fbProxyFn(fallbackUrl);
             const fbUseRaw = !!authProvider;
             const fbTransportUrl = fbUseRaw ? new URL(fallbackUrl) : new URL(fbProxied);
             const fbFetch = fbUseRaw
               ? (input, init = {}) => {
                   const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-                  return fetch(deps.getProxiedRemoteUrl(url), { ...init, signal: fbAbort.signal });
+                  return fetch(fbProxyFn(url), { ...init, signal: fbAbort.signal });
                 }
               : (input, init = {}) => fetch(input, { ...init, signal: fbAbort.signal });
             const fbClientName = `roam-remote-mcp-${urlKey.slice(0, 40)}`;

@@ -24,6 +24,10 @@ const MCP_OAUTH_CALLBACK_URL =
 
 const MCP_OAUTH_CALLBACK_ORIGIN = new URL(MCP_OAUTH_CALLBACK_URL).origin;
 
+// Worker CORS proxy for OAuth flows — routes through our Cloudflare Worker
+// instead of Roam's generic corsAnywhere proxy.
+const MCP_OAUTH_PROXY_BASE = `${MCP_OAUTH_CALLBACK_ORIGIN}/proxy`;
+
 const MCP_OAUTH_AUTH_TIMEOUT_MS = 180_000;  // 3 minutes for user to authorise
 const MCP_OAUTH_POPUP_CHECK_MS = 2_000;     // poll popup.closed every 2s
 
@@ -316,6 +320,18 @@ export function clearMcpOAuthCredentials(normalizedUrl) {
   deps.debugLog?.("[MCP OAuth] Cleared credentials for", normalizedUrl);
 }
 
+// ── Worker proxy helper ──────────────────────────────────────────────────────
+
+/**
+ * Proxy a URL through the OAuth Worker instead of Roam's corsAnywhere.
+ * Used for all fetch calls in MCP OAuth connections (discovery, DCR, token
+ * exchange, and authenticated MCP requests).
+ */
+export function getOAuthProxiedUrl(url) {
+  const raw = typeof url === "string" ? url : url instanceof URL ? url.toString() : String(url);
+  return `${MCP_OAUTH_PROXY_BASE}/${raw}`;
+}
+
 // ── Exports for testing ─────────────────────────────────────────────────────
 
-export { MCP_OAUTH_CALLBACK_URL, MCP_OAUTH_CALLBACK_ORIGIN };
+export { MCP_OAUTH_CALLBACK_URL, MCP_OAUTH_CALLBACK_ORIGIN, MCP_OAUTH_PROXY_BASE };

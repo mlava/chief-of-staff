@@ -29,6 +29,11 @@ const USAGE_STATS_MAX_DAYS = 90;
 
 let auditTrimInFlight = false;
 
+// Firebase/Roam Depot keys cannot contain . # $ / [ ]
+function sanitiseKey(k) {
+  return typeof k === "string" ? k.replace(/[.#$/[\]]/g, "_") : k;
+}
+
 // ── Accessors ────────────────────────────────────────────────────────
 
 export function getSessionTokenUsage() {
@@ -100,10 +105,11 @@ export function recordCostEntry(model, inputTokens, outputTokens, callCost) {
   day.input += inputTokens;
   day.output += outputTokens;
   day.requests += 1;
-  if (!day.models[model]) {
-    day.models[model] = { cost: 0, input: 0, output: 0, requests: 0 };
+  const safeModel = sanitiseKey(model);
+  if (!day.models[safeModel]) {
+    day.models[safeModel] = { cost: 0, input: 0, output: 0, requests: 0 };
   }
-  const m = day.models[model];
+  const m = day.models[safeModel];
   m.cost += callCost;
   m.input += inputTokens;
   m.output += outputTokens;
@@ -328,8 +334,9 @@ export function recordUsageStat(stat, detail) {
   const day = ensureTodayUsageStats();
   if (stat === "toolCall" && detail) {
     // Cap distinct tool names per day to prevent unbounded key growth from dynamic MCP tool names
-    if (Object.keys(day.toolCalls).length < 200 || detail in day.toolCalls) {
-      day.toolCalls[detail] = (day.toolCalls[detail] || 0) + 1;
+    const safeName = sanitiseKey(detail);
+    if (Object.keys(day.toolCalls).length < 200 || safeName in day.toolCalls) {
+      day.toolCalls[safeName] = (day.toolCalls[safeName] || 0) + 1;
     }
   } else if (stat in day && typeof day[stat] === "number") {
     day[stat] += 1;
