@@ -462,7 +462,7 @@ export function getRemoteServerKeyForTool(toolName, toolObj, args) {
 // ── Meta-tools for large servers (>15 tools) ─────────────────────────────────
 
 export function buildRemoteMcpRouteTool() {
-  const cache = remoteMcpToolsCache || [];
+  const cache = getRemoteMcpTools();
   const routedServers = [...new Set(cache.filter(t => !t._isDirect).map(t => t._serverName))];
   const serverNameDesc = routedServers.length > 0
     ? `Server name. Available servers: ${routedServers.join(", ")}`
@@ -484,7 +484,7 @@ export function buildRemoteMcpRouteTool() {
       const serverName = args?.server_name;
       if (!serverName) return { error: "server_name is required" };
 
-      const cache = remoteMcpToolsCache || [];
+      const cache = getRemoteMcpTools();
       let serverTools = cache.filter(t => t._serverName === serverName && !t._isDirect);
 
       if (serverTools.length === 0) {
@@ -543,7 +543,7 @@ export function buildRemoteMcpMetaTool() {
       const innerName = args?.tool_name;
       const serverFilter = args?.server_name;
       if (!innerName) return { error: "tool_name is required" };
-      const cache = remoteMcpToolsCache || [];
+      const cache = getRemoteMcpTools();
 
       let tool;
 
@@ -833,114 +833,20 @@ export async function connectRemoteMcp(serverConfig) {
             _isDirect: isDirect,
             _isRemote: true,
             execute: async (args = {}) => {
-              // For both transport types we use raw JSON-RPC over HTTP.
-              // StreamableHTTP: POST to the original endpoint URL.
-              // SSE: POST to the session endpoint received during the EventSource handshake.
               const entry = remoteMcpClients.get(urlKey);
-              if (!entry?._proxiedUrl) return { error: `Remote server "${urlKey}" not connected` };
-              // SSE servers: POST to session endpoint; StreamableHTTP: POST to proxied URL
-              const postUrl = entry._isSSE ? entry._sessionUrl : entry._proxiedUrl;
-              if (!postUrl) return { error: `Remote server "${urlKey}" has no POST endpoint (SSE session may have expired)` };
+              if (!entry) return { error: `Remote server "${urlKey}" not connected` };
               try {
-                const requestId = Math.random().toString(36).slice(2);
-                const makeToolCallBody = () => JSON.stringify({
-                  jsonrpc: "2.0",
-                  id: Math.random().toString(36).slice(2),
-                  method: "tools/call",
-                  params: { name: toolName, arguments: args }
-                });
-                let response = await fetch(postUrl, {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    "Accept": "application/json, text/event-stream",
-                    ...(entry._headers || {})
-                  },
-                  body: makeToolCallBody()
-                });
-                // MCP OAuth 2.1 401 retry: refresh token via SDK auth and retry once
-                if (!response.ok && response.status === 401 && entry._authProvider) {
-                  deps.debugLog(`[Remote MCP] 401 from "${toolName}" — refreshing MCP OAuth token`);
-                  try {
-                    const result = await sdkAuth(entry._authProvider, {
-                      serverUrl: entry._urlKey,
-                      fetchFn: (input, init = {}) => fetch(
-                        getOAuthProxiedUrl(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url),
-                        init
-                      )
-                    });
-                    if (result === "AUTHORIZED") {
-                      const tokens = await entry._authProvider.tokens();
-                      if (tokens?.access_token) {
-                        entry._headers = { Authorization: `Bearer ${tokens.access_token}` };
-                        const retry = await fetch(postUrl, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream", ...entry._headers },
-                          body: makeToolCallBody()
-                        });
-                        if (retry.ok) {
-                          response = retry;
-                        } else {
-                          return { error: `Remote MCP HTTP ${retry.status} calling "${toolName}" (after MCP OAuth refresh)` };
-                        }
-                      }
-                    }
-                  } catch (authErr) {
-                    deps.debugLog(`[Remote MCP] MCP OAuth refresh error:`, authErr?.message);
-                    return { error: `Remote MCP HTTP 401 calling "${toolName}" — MCP OAuth refresh failed: ${authErr?.message}` };
+                // Use SDK client.callTool() — handles protocol headers, session ID,
+                // and transport details that raw fetch() misses (causes 400 on strict servers).
+                if (entry.client) {
+                  const sdkResult = await entry.client.callTool({ name: toolName, arguments: args });
+                  const text = sdkResult?.content?.[0]?.text;
+                  if (typeof text === "string") {
+                    try { return JSON.parse(text); } catch { return { text }; }
                   }
+                  return sdkResult;
                 }
-                // Phase 1 OAuth 401 retry: refresh token and retry once
-                else if (!response.ok && response.status === 401 && entry._oauthProvider && deps.getOAuthValidToken) {
-                  deps.debugLog(`[Remote MCP] 401 from "${toolName}" — refreshing OAuth token for ${entry._oauthProvider}`);
-                  try {
-                    const freshToken = await deps.getOAuthValidToken(entry._oauthProvider);
-                    if (freshToken) {
-                      entry._headers = { Authorization: `Bearer ${freshToken}` };
-                      const retry = await fetch(postUrl, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream", ...entry._headers },
-                        body: makeToolCallBody()
-                      });
-                      if (retry.ok) {
-                        response = retry;
-                      } else {
-                        return { error: `Remote MCP HTTP ${retry.status} calling "${toolName}" (after OAuth refresh)` };
-                      }
-                    } else {
-                      return { error: `Remote MCP HTTP 401 calling "${toolName}" — OAuth refresh failed` };
-                    }
-                  } catch (refreshErr) {
-                    deps.debugLog(`[Remote MCP] OAuth refresh error:`, refreshErr?.message);
-                    return { error: `Remote MCP HTTP 401 calling "${toolName}" — ${refreshErr?.message}` };
-                  }
-                } else if (!response.ok) {
-                  return { error: `Remote MCP HTTP ${response.status} calling "${toolName}"` };
-                }
-                const contentType = response.headers.get("content-type") || "";
-                let rpcResponse;
-                if (contentType.includes("text/event-stream")) {
-                  const text = await response.text();
-                  for (const line of text.split("\n")) {
-                    if (!line.startsWith("data: ")) continue;
-                    try {
-                      const parsed = JSON.parse(line.slice(6));
-                      if (parsed?.result !== undefined || parsed?.error !== undefined) {
-                        rpcResponse = parsed; break;
-                      }
-                    } catch { }
-                  }
-                } else {
-                  rpcResponse = await response.json();
-                }
-                if (!rpcResponse) return { error: `No JSON-RPC response from "${toolName}"` };
-                if (rpcResponse.error) return { error: rpcResponse.error?.message || JSON.stringify(rpcResponse.error) };
-                const result = rpcResponse.result;
-                const text = result?.content?.[0]?.text;
-                if (typeof text === "string") {
-                  try { return JSON.parse(text); } catch { return { text }; }
-                }
-                return result ?? rpcResponse;
+                return { error: `Remote server "${urlKey}" has no active client` };
               } catch (err) {
                 deps.debugLog(`[Remote MCP] Tool call failed for ${toolName}:`, err?.message);
                 return { error: `Remote MCP tool "${toolName}" failed: ${err?.message}` };
@@ -1098,31 +1004,13 @@ export async function connectRemoteMcp(serverConfig) {
                 _urlKey: urlKey, _isRemote: true, _isDirect: (fbResult?.tools || []).length <= REMOTE_MCP_DIRECT_TOOL_THRESHOLD,
                 execute: async (args) => {
                   const entry = remoteMcpClients.get(urlKey);
-                  const currentHeaders = entry?._headers || headers;
-                  const body = { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: t.name, arguments: args || {} } };
-                  let resp = await fetch(fbProxied, {
-                    method: "POST", headers: { ...currentHeaders, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
-                    body: JSON.stringify(body)
-                  });
-                  // OAuth 401 retry
-                  if (!resp.ok && resp.status === 401 && entry?._oauthProvider && deps.getOAuthValidToken) {
-                    deps.debugLog(`[Remote MCP] Fallback 401 from "${t.name}" — refreshing OAuth token`);
-                    try {
-                      const freshToken = await deps.getOAuthValidToken(entry._oauthProvider);
-                      if (freshToken) {
-                        entry._headers = { Authorization: `Bearer ${freshToken}` };
-                        const retryBody = { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: t.name, arguments: args || {} } };
-                        resp = await fetch(fbProxied, {
-                          method: "POST", headers: { ...entry._headers, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
-                          body: JSON.stringify(retryBody)
-                        });
-                      }
-                    } catch (e) { deps.debugLog(`[Remote MCP] Fallback OAuth refresh error:`, e?.message); }
+                  if (!entry?.client) throw new Error(`Remote server "${urlKey}" not connected`);
+                  const sdkResult = await entry.client.callTool({ name: t.name, arguments: args || {} });
+                  const text = sdkResult?.content?.[0]?.text;
+                  if (typeof text === "string") {
+                    try { return JSON.parse(text); } catch { return { text }; }
                   }
-                  if (!resp.ok) throw new Error(`Remote MCP tool call failed: HTTP ${resp.status}`);
-                  const json = await resp.json();
-                  if (json.error) throw new Error(json.error.message || JSON.stringify(json.error));
-                  return json.result;
+                  return sdkResult;
                 }
               }));
             } catch (listErr) {

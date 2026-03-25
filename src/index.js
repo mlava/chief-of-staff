@@ -5084,6 +5084,8 @@ function onload({ extensionAPI }) {
     getComposioMetaToolsForLlm,
     getExtensionToolsRegistry,
     buildLocalMcpRouteTool,
+    buildRemoteMcpRouteTool,
+    buildRemoteMcpMetaTool,
     getToolSchema,
     getToolkitSchemaRegistry,
     recordToolResponseShape,

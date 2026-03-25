@@ -596,6 +596,16 @@ export async function executeToolCall(toolName, args, { readOnly = false } = {})
     return tool.execute(innerArgs);
   }
 
+  // REMOTE_MCP_ROUTE discovery tool: returns a routed server's tool catalog
+  if (toolName === "REMOTE_MCP_ROUTE") {
+    return deps.buildRemoteMcpRouteTool().execute(effectiveArgs || {});
+  }
+
+  // REMOTE_MCP_EXECUTE meta-tool: dispatch to the discovered remote tool by name
+  if (toolName === "REMOTE_MCP_EXECUTE") {
+    return deps.buildRemoteMcpMetaTool().execute(effectiveArgs || {});
+  }
+
   const roamTool = resolvedTool;
   if (roamTool?.execute) {
     // Track direct MCP tool usage so sessionUsedLocalMcp is set for follow-up routing
