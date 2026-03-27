@@ -27,6 +27,56 @@ const CHAT_PANEL_SELECTORS = {
   send: "[data-chief-chat-send]"
 };
 const MAX_CHAT_PANEL_MESSAGES = 80;
+
+// ── Friendly tool-name labels for the thinking indicator ──────────────
+// Maps tool name prefixes / exact names to short, user-facing labels.
+// Falls back to "Working…" for unmapped tools.
+const TOOL_FRIENDLY_LABELS = {
+  // Roam native tools
+  roam_search:            "Searching Roam",
+  roam_create_block:      "Creating block",
+  roam_create_page:       "Creating page",
+  roam_update_block:      "Updating block",
+  roam_delete_block:      "Deleting block",
+  roam_move_block:        "Moving block",
+  roam_get_page:          "Reading page",
+  roam_get_block:         "Reading block",
+  roam_query:             "Querying Roam",
+  roam_pull:              "Fetching data",
+  // COS tools
+  cos_update_memory:      "Updating memory",
+  cos_cron_create:        "Scheduling job",
+  cos_cron_delete_jobs:   "Removing jobs",
+  cos_email:              "Handling email",
+  cos_calendar:           "Checking calendar",
+  // MCP routing
+  LOCAL_MCP_ROUTE:        "Choosing tool",
+  LOCAL_MCP_EXECUTE:      "Running tool",
+  REMOTE_MCP_ROUTE:       "Choosing tool",
+  REMOTE_MCP_EXECUTE:     "Running tool",
+  // Composio
+  COMPOSIO_MULTI_EXECUTE_TOOL: "Running integration",
+  // Extension tools — prefix match handled in getter
+  EXT_ROUTE:              "Choosing extension tool",
+  EXT_EXECUTE:            "Running extension tool",
+};
+
+/**
+ * Derive a short, user-facing label for a tool call.
+ * Tries exact match first, then common prefixes.
+ */
+function getToolFriendlyLabel(toolName) {
+  if (!toolName) return "Working";
+  if (TOOL_FRIENDLY_LABELS[toolName]) return TOOL_FRIENDLY_LABELS[toolName];
+  // Prefix-based fallback: roam_*, cos_*, bt_*
+  if (toolName.startsWith("roam_"))  return "Querying Roam";
+  if (toolName.startsWith("cos_"))   return "Running task";
+  if (toolName.startsWith("bt_"))    return "Managing tasks";
+  if (toolName.startsWith("wp_"))    return "Running extension";
+  return "Working";
+}
+
+const TOOL_STATUS_DEBOUNCE_MS = 400;
 const CHAT_PANEL_STORAGE_KEY = "chief-of-staff-panel-geometry";
 
 // ── Module-scoped state ─────────────────────────────────────────────
@@ -881,27 +931,60 @@ async function handleChatPanelSend() {
 
   ensureStreamingEl();
   if (streamingEl) {
+    // Safe: static string, no user content
     streamingEl.innerHTML = '<span class="chief-msg-thinking">Thinking</span>';
     if (chatPanelMessages) chatPanelMessages.scrollTop = chatPanelMessages.scrollHeight;
   }
 
+  // Debounced tool-call status: update the thinking indicator each time a
+  // tool fires, but debounce so rapid-fire calls don't flicker.
+  let toolStatusTimerId = null;
+  let toolCallReceived = false;
+
+  function updateThinkingStatus(label) {
+    if (!streamingEl || !document.body.contains(streamingEl)) return;
+    if (streamText.length > 0) return; // streaming text already started — don't overwrite
+    // Safe: label is from TOOL_FRIENDLY_LABELS (static map) or hardcoded fallback strings.
+    // Build DOM safely using textContent to avoid any XSS vector.
+    const span = document.createElement("span");
+    span.className = "chief-msg-thinking";
+    span.textContent = label;
+    streamingEl.replaceChildren(span);
+    if (chatPanelMessages) chatPanelMessages.scrollTop = chatPanelMessages.scrollHeight;
+  }
+
+  function onChatToolCall(toolName) {
+    toolCallReceived = true;
+    // Clear the fallback timer — we have real progress now
+    clearTimeout(chatThinkingTimerId);
+    clearTimeout(chatWorkingTimerId);
+    // Debounce: delay update so rapid successive calls show only the latest
+    clearTimeout(toolStatusTimerId);
+    toolStatusTimerId = setTimeout(() => {
+      updateThinkingStatus(getToolFriendlyLabel(toolName));
+    }, TOOL_STATUS_DEBOUNCE_MS);
+  }
+
+  // Fallback timers — only fire if no tool calls have arrived yet
   chatThinkingTimerId = setTimeout(() => {
-    if (streamingEl && streamText.length === 0 && document.body.contains(streamingEl)) {
-      streamingEl.innerHTML = '<span class="chief-msg-thinking">Still thinking</span>';
+    if (!toolCallReceived && streamingEl && streamText.length === 0 && document.body.contains(streamingEl)) {
+      updateThinkingStatus("Still thinking");
     }
-  }, 5000);
+  }, 8000);
   chatWorkingTimerId = setTimeout(() => {
     if (streamingEl && streamText.length === 0 && document.body.contains(streamingEl)) {
-      streamingEl.innerHTML = '<span class="chief-msg-thinking">Still working</span>';
+      updateThinkingStatus("Still working");
     }
-  }, 15000);
+  }, 20000);
 
   try {
     const result = await deps.askChiefOfStaff(message, {
       suppressToasts: true,
+      onToolCall: onChatToolCall,
       onTextChunk: (chunk) => {
         clearTimeout(chatThinkingTimerId);
         clearTimeout(chatWorkingTimerId);
+        clearTimeout(toolStatusTimerId);
         if (chatPanelSendButton && chatPanelSendButton.textContent !== "Generating response...") {
           chatPanelSendButton.textContent = "Generating response...";
         }
@@ -951,6 +1034,7 @@ async function handleChatPanelSend() {
   } finally {
     clearTimeout(chatThinkingTimerId);
     clearTimeout(chatWorkingTimerId);
+    clearTimeout(toolStatusTimerId);
     if (streamRenderTimerId) { clearTimeout(streamRenderTimerId); streamRenderTimerId = null; }
     setChatPanelSendingState(false);
     if (chatPanelInput) chatPanelInput.focus();
@@ -2262,6 +2346,171 @@ export function promptInstalledToolSlugWithToast(
         activeToast = toast;
         keyboard.attach(toast);
         focusToastField(toast, "[data-chief-tool-select]");
+      },
+      onClosing: () => {
+        keyboard.detach();
+        activeInstance = null;
+        activeToast = null;
+        finish(null);
+      }
+    });
+  });
+}
+
+// ── Intent Confidence Gate Dialogs ──────────────────────────────────────────
+
+/**
+ * Shows a plan confirmation dialog when the intent classifier has medium
+ * confidence and the risk is elevated. Returns true (confirmed), false
+ * (rejected — user wants to clarify), or null (dismissed).
+ */
+export function promptIntentConfirmation(classification) {
+  return new Promise((resolve) => {
+    if (promptDialogOpen) { resolve(null); return; }
+    if (!iziToast?.show) { resolve(null); return; }
+    promptDialogOpen = true;
+    let resolved = false;
+    const finish = (value) => {
+      if (resolved) return;
+      resolved = true;
+      promptDialogOpen = false;
+      resolve(value);
+    };
+
+    const escapedIntent = deps.escapeHtml(String(classification?.intent || ""));
+    const tools = classification?.estimatedTools ?? "?";
+    const risk = deps.escapeHtml(String(classification?.risk || "unknown"));
+
+    let activeInstance = null;
+    let activeToast = null;
+    const confirmAction = (instance, toast) => {
+      keyboard.detach();
+      finish(true);
+      hideToastSafely(instance, toast);
+    };
+    const cancelAction = (instance, toast) => {
+      keyboard.detach();
+      finish(false);
+      hideToastSafely(instance, toast);
+    };
+    const keyboard = createToastConfirmCancelKeyboardHandlers({
+      onConfirm: () => { if (activeInstance && activeToast) confirmAction(activeInstance, activeToast); },
+      onCancel: () => { if (activeInstance && activeToast) cancelAction(activeInstance, activeToast); }
+    });
+
+    iziToast.show({
+      class: "cos-toast",
+      theme: getToastTheme(),
+      title: "Confirm intent",
+      message: `<div><strong>I think you want me to:</strong> ${escapedIntent}</div>`
+        + `<div style="margin-top:4px;font-size:0.9em;opacity:0.8">`
+        + `Estimated complexity: ${tools} tool call${tools === 1 ? "" : "s"}, ${risk} risk</div>`,
+      position: "center",
+      timeout: false,
+      close: false,
+      overlay: true,
+      drag: false,
+      buttons: [
+        ["<button>Go ahead</button>", function (firstArg, secondArg) {
+          const { instance, toast } = normaliseToastContext(firstArg, secondArg);
+          confirmAction(instance, toast);
+        }, true],
+        ["<button>That's not right</button>", function (firstArg, secondArg) {
+          const { instance, toast } = normaliseToastContext(firstArg, secondArg);
+          cancelAction(instance, toast);
+        }]
+      ],
+      onOpening: function (firstArg, secondArg) {
+        const { instance, toast } = normaliseToastContext(firstArg, secondArg);
+        activeInstance = instance;
+        activeToast = toast;
+        keyboard.attach(toast);
+      },
+      onClosing: () => {
+        keyboard.detach();
+        activeInstance = null;
+        activeToast = null;
+        finish(null);
+      }
+    });
+  });
+}
+
+/**
+ * Shows a clarification dialog with numbered interpretation options when the
+ * intent classifier has low confidence. Returns { selectedIndex, selectedText }
+ * or null (cancelled). selectedIndex -1 means "Something else".
+ */
+export function promptIntentClarification(interpretations) {
+  return new Promise((resolve) => {
+    if (promptDialogOpen) { resolve(null); return; }
+    if (!iziToast?.show) { resolve(null); return; }
+    if (!Array.isArray(interpretations) || interpretations.length === 0) { resolve(null); return; }
+    promptDialogOpen = true;
+    let resolved = false;
+    const finish = (value) => {
+      if (resolved) return;
+      resolved = true;
+      promptDialogOpen = false;
+      resolve(value);
+    };
+
+    const optionsHtml = interpretations.map((text, i) => {
+      const escaped = deps.escapeHtml(String(text || ""));
+      const checked = i === 0 ? " checked" : "";
+      return `<label style="display:block;margin:4px 0;cursor:pointer">`
+        + `<input type="radio" name="chief-intent" data-chief-intent-option value="${i}"${checked}> `
+        + `${escaped}</label>`;
+    }).join("")
+    + `<label style="display:block;margin:4px 0;cursor:pointer">`
+    + `<input type="radio" name="chief-intent" data-chief-intent-option value="-1"> `
+    + `Something else — let me explain</label>`;
+
+    let activeInstance = null;
+    let activeToast = null;
+    const confirmAction = (instance, toast) => {
+      const selected = toast.querySelector("[data-chief-intent-option]:checked");
+      const idx = selected ? parseInt(selected.value, 10) : -1;
+      const text = idx >= 0 && idx < interpretations.length ? interpretations[idx] : null;
+      keyboard.detach();
+      finish({ selectedIndex: idx, selectedText: text });
+      hideToastSafely(instance, toast);
+    };
+    const cancelAction = (instance, toast) => {
+      keyboard.detach();
+      finish(null);
+      hideToastSafely(instance, toast);
+    };
+    const keyboard = createToastConfirmCancelKeyboardHandlers({
+      onConfirm: () => { if (activeInstance && activeToast) confirmAction(activeInstance, activeToast); },
+      onCancel: () => { if (activeInstance && activeToast) cancelAction(activeInstance, activeToast); }
+    });
+
+    iziToast.show({
+      class: "cos-toast",
+      theme: getToastTheme(),
+      title: "What did you mean?",
+      message: optionsHtml,
+      position: "center",
+      timeout: false,
+      close: false,
+      overlay: true,
+      drag: false,
+      buttons: [
+        ["<button>Select</button>", function (firstArg, secondArg) {
+          const { instance, toast } = normaliseToastContext(firstArg, secondArg);
+          confirmAction(instance, toast);
+        }, true],
+        ["<button>Cancel</button>", function (firstArg, secondArg) {
+          const { instance, toast } = normaliseToastContext(firstArg, secondArg);
+          cancelAction(instance, toast);
+        }]
+      ],
+      onOpening: function (firstArg, secondArg) {
+        const { instance, toast } = normaliseToastContext(firstArg, secondArg);
+        activeInstance = instance;
+        activeToast = toast;
+        keyboard.attach(toast);
       },
       onClosing: () => {
         keyboard.detach();

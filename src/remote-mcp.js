@@ -77,6 +77,62 @@ export function parseAuthHeader(headerName, token) {
 }
 
 /**
+ * Attempt to correct common argument errors based on a -32602 validation error.
+ * Returns corrected args object if any fix was applied, or null if nothing could be done.
+ *
+ * Corrections:
+ * - "Expected string, received array" → unwrap single-element arrays to first element
+ * - Missing required field → map common aliases (timeMin→dateMin, timeMax→dateMax)
+ */
+// Groups of equivalent parameter names — any can map to any other within the group.
+const PARAM_EQUIV_GROUPS = [
+  ["dateMin", "timeMin", "time_min", "start", "startDate", "start_date", "from"],
+  ["dateMax", "timeMax", "time_max", "end", "endDate", "end_date", "to"],
+  ["calendarId", "calendar_id", "calendar", "account"],
+];
+
+export function tryCorrectArgs(args, schema, errorMessage) {
+  if (!args || typeof args !== "object") return null;
+  const corrected = { ...args };
+  let changed = false;
+
+  const schemaProps = schema?.properties || {};
+
+  // Fix 1: unwrap arrays that should be strings
+  for (const [key, val] of Object.entries(corrected)) {
+    if (Array.isArray(val) && schemaProps[key]?.type === "string") {
+      corrected[key] = val.length > 0 ? String(val[0]) : "";
+      changed = true;
+    }
+  }
+
+  // Fix 2: bidirectional parameter name mapping using equivalence groups.
+  // For each schema property that's missing from the args, check if the model
+  // provided a value under an equivalent name (e.g. dateMin for timeMin or vice versa).
+  for (const group of PARAM_EQUIV_GROUPS) {
+    // Find the schema property that belongs to this group (case-insensitive)
+    const schemaProp = Object.keys(schemaProps).find(k =>
+      group.some(g => g.toLowerCase() === k.toLowerCase())
+    );
+    if (!schemaProp) continue;
+    // Skip if already provided
+    if (corrected[schemaProp] !== undefined && corrected[schemaProp] !== null) continue;
+    // Check if any equivalent name was provided in the args
+    for (const alias of group) {
+      if (alias === schemaProp) continue;
+      if (corrected[alias] !== undefined && corrected[alias] !== null) {
+        corrected[schemaProp] = corrected[alias];
+        delete corrected[alias];
+        changed = true;
+        break;
+      }
+    }
+  }
+
+  return changed ? corrected : null;
+}
+
+/**
  * Detect whether a URL is an SSE endpoint (legacy MCP transport).
  * SSE endpoints use GET to establish an EventSource stream, then POST
  * to a session-specific endpoint. StreamableHTTP endpoints use POST only.
@@ -835,6 +891,7 @@ export async function connectRemoteMcp(serverConfig) {
             execute: async (args = {}) => {
               const entry = remoteMcpClients.get(urlKey);
               if (!entry) return { error: `Remote server "${urlKey}" not connected` };
+              const schema = t.inputSchema || {};
               try {
                 // Use SDK client.callTool() — handles protocol headers, session ID,
                 // and transport details that raw fetch() misses (causes 400 on strict servers).
@@ -848,8 +905,26 @@ export async function connectRemoteMcp(serverConfig) {
                 }
                 return { error: `Remote server "${urlKey}" has no active client` };
               } catch (err) {
-                deps.debugLog(`[Remote MCP] Tool call failed for ${toolName}:`, err?.message);
-                return { error: `Remote MCP tool "${toolName}" failed: ${err?.message}` };
+                const msg = err?.message || "";
+                // Auto-correct common argument errors and retry once
+                if (msg.includes("-32602") && entry.client) {
+                  const corrected = tryCorrectArgs(args, schema, msg);
+                  if (corrected) {
+                    deps.debugLog(`[Remote MCP] Retrying ${toolName} with corrected args`);
+                    try {
+                      const retryResult = await entry.client.callTool({ name: toolName, arguments: corrected });
+                      const retryText = retryResult?.content?.[0]?.text;
+                      if (typeof retryText === "string") {
+                        try { return JSON.parse(retryText); } catch { return { text: retryText }; }
+                      }
+                      return retryResult;
+                    } catch (retryErr) {
+                      deps.debugLog(`[Remote MCP] Retry also failed for ${toolName}:`, retryErr?.message);
+                    }
+                  }
+                }
+                deps.debugLog(`[Remote MCP] Tool call failed for ${toolName}:`, msg);
+                return { error: `Remote MCP tool "${toolName}" failed: ${msg}` };
               }
             }
           });
