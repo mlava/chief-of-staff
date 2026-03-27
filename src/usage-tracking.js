@@ -319,6 +319,8 @@ function ensureTodayUsageStats() {
       agentRuns: 0, toolCalls: {}, approvalsGranted: 0, approvalsDenied: 0,
       injectionWarnings: 0, claimedActionFires: 0, tierEscalations: 0, memoryWriteBlocks: 0,
       evalRuns: 0, evalAvgScore: 0,
+      intentClassifications: 0, intentSkipped: 0, intentAutoProceeded: 0,
+      intentConfirmations: 0, intentClarifications: 0, intentUserOverrides: 0,
       guardOutcomes: {
         claimedAction: { truePositive: 0, falsePositive: 0 },
         fabrication: { truePositive: 0, falsePositive: 0 },

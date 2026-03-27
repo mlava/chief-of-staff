@@ -398,6 +398,31 @@ export async function executeToolCall(toolName, args, { readOnly = false } = {})
   if (isComposioDirect || (!preResolvedTool && upperToolName && /^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(upperToolName))) {
     const matchedSchema = deps.getToolSchema(upperToolName);
     if (matchedSchema || isComposioDirect) {
+      // Guard: if a remote MCP server name matches the slug prefix (e.g. "Gmail" for
+      // GMAIL_LIST_SEND_AS), redirect to the actual remote MCP tool instead of Composio.
+      // This handles cases where a service (Gmail, Calendar, etc.) is connected via Remote
+      // MCP rather than Composio — the model may still generate Composio-style slug names.
+      if (!isComposioDirect) {
+        const slugPrefix = upperToolName.split("_")[0].toLowerCase();
+        const remoteCache = deps.getRemoteMcpToolsCache?.() || [];
+        const serverTools = remoteCache.filter(t =>
+          t._isRemote && t._serverName && t._serverName.toLowerCase().startsWith(slugPrefix)
+        );
+        if (serverTools.length > 0) {
+          // Try to find the matching tool: strip prefix (e.g. GMAIL_FETCH_EMAILS → fetch_emails)
+          const actionPart = upperToolName.slice(slugPrefix.length + 1).toLowerCase();
+          const match = serverTools.find(t => t.name.toLowerCase() === actionPart)
+            || serverTools.find(t => t.name.toLowerCase().replace(/-/g, "_") === actionPart);
+          if (match) {
+            deps.debugLog(`[Chief flow] Composio slug → remote MCP redirect: "${toolName}" → "${match.name}" (${match._serverName})`);
+            return match.execute(effectiveArgs);
+          }
+          // No exact match — return error listing available tools from the server
+          const available = serverTools.map(t => t.name).join(", ");
+          deps.debugLog(`[Chief flow] Composio slug interceptor: "${toolName}" has no remote MCP match. Available from ${serverTools[0]._serverName}: ${available}`);
+          return { error: `"${toolName}" looks like a Composio tool slug, but ${serverTools[0]._serverName} is connected via Remote MCP, not Composio. Available tools: ${available}. Call the correct tool name directly.` };
+        }
+      }
       deps.debugLog(`[Chief flow] Composio slug interceptor: rewriting direct call "${toolName}" → COMPOSIO_MULTI_EXECUTE_TOOL`);
       const wrappedArgs = {
         tools: [{ tool_slug: upperToolName, arguments: effectiveArgs }]
@@ -604,6 +629,22 @@ export async function executeToolCall(toolName, args, { readOnly = false } = {})
   // REMOTE_MCP_EXECUTE meta-tool: dispatch to the discovered remote tool by name
   if (toolName === "REMOTE_MCP_EXECUTE") {
     return deps.buildRemoteMcpMetaTool().execute(effectiveArgs || {});
+  }
+
+  // EXT_ROUTE / EXT_EXECUTE: extension tool routing (two-stage, like LOCAL_MCP)
+  if (toolName === "EXT_ROUTE" && deps.buildExtRouteTool) {
+    return deps.buildExtRouteTool().execute(effectiveArgs || {});
+  }
+  if (toolName === "EXT_EXECUTE" && deps.buildExtExecuteTool) {
+    return deps.buildExtExecuteTool().execute(effectiveArgs || {});
+  }
+
+  // ROAM_ROUTE / ROAM_EXECUTE: roam extended tool routing (two-stage)
+  if (toolName === "ROAM_ROUTE" && deps.buildRoamRouteTool) {
+    return deps.buildRoamRouteTool().execute(effectiveArgs || {});
+  }
+  if (toolName === "ROAM_EXECUTE" && deps.buildRoamExecuteTool) {
+    return deps.buildRoamExecuteTool().execute(effectiveArgs || {});
   }
 
   const roamTool = resolvedTool;

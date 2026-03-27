@@ -1,4 +1,8 @@
 import { extractBalancedJsonObjects, extractMcpKeyReference } from "./parse-utils.js";
+import {
+  initIntentClassifier, classifyIntent, evaluateConfidence,
+  clearIntentCache, getCachedClassification
+} from "./intent-classifier.js";
 import { initCosLinkedRefsFilter, teardownCosLinkedRefsFilter } from "./cos-linked-refs-filter.js";
 import iziToast from "izitoast";
 import { launchOnboarding, teardownOnboarding } from "./onboarding/onboarding.js";
@@ -13,6 +17,7 @@ import {
   setChatPanelOpen, toggleChatPanel,
   destroyChatPanel, promptToolSlugWithToast, promptTextWithToast, promptTextareaWithToast,
   promptInstalledToolSlugWithToast, promptToolExecutionApproval,
+  promptIntentConfirmation, promptIntentClarification,
   promptWriteToDailyPage, detachAllToastKeyboards,
   refreshChatPanelElementRefs, addSaveToDailyPageButton, addModelIndicator,
   getToastTheme
@@ -311,7 +316,8 @@ const SETTINGS_KEYS = {
   evalEnabled: "eval-enabled",
   evalSampleRate: "eval-sample-rate",
   evalReviewThreshold: "eval-review-threshold",
-  cosLinkedRefsFilter: "cos-linked-refs-filter"
+  cosLinkedRefsFilter: "cos-linked-refs-filter",
+  intentGateEnabled: "intent-gate-enabled"
 };
 const TOOLS_SCHEMA_VERSION = 3;
 const AUTH_POLL_INTERVAL_MS = 9000;
@@ -1498,7 +1504,7 @@ function getComposioMetaToolsForLlm() {
     {
       name: "COMPOSIO_GET_CONNECTED_ACCOUNTS",
       isMutating: false,
-      description: "List currently connected accounts and connection status.",
+      description: "List currently connected accounts and connection status. Includes both Composio integrations and Remote MCP servers.",
       input_schema: {
         type: "object",
         properties: {}
@@ -1506,12 +1512,27 @@ function getComposioMetaToolsForLlm() {
       source: "composio",
       execute: () => {
         const extensionAPI = extensionAPIRef;
-        if (!extensionAPI) return { connected: false, accounts: [] };
+        if (!extensionAPI) return { connected: false, accounts: [], remote_mcp_servers: [] };
         const { installedTools } = getToolsConfigState(extensionAPI);
         const accounts = installedTools
           .filter((t) => t.enabled)
           .map((t) => ({ slug: t.slug, status: t.installState, connectionId: t.connectionId || null }));
-        return { connected: mcpClient != null, accounts };
+        // Include connected Remote MCP servers so the model knows about all service connections
+        const remoteServers = [];
+        try {
+          const clients = getRemoteMcpClients();
+          for (const [, entry] of clients) {
+            if (entry?.serverName && Array.isArray(entry.tools)) {
+              remoteServers.push({
+                name: entry.serverName,
+                status: "connected",
+                tool_count: entry.tools.length,
+                source: "remote-mcp"
+              });
+            }
+          }
+        } catch (_) { /* non-fatal */ }
+        return { connected: mcpClient != null, accounts, remote_mcp_servers: remoteServers };
       }
     }
   ];
@@ -3055,6 +3076,25 @@ function getCosIntegrationTools() {
           }
         } catch (e) { debugLog("[Chief flow] Ecosystem: local MCP error:", e?.message); }
 
+        // Remote MCP servers (same grouping as local MCP)
+        const remoteMcpServers = {};
+        try {
+          const remoteTools = getRemoteMcpTools() || [];
+          const remoteGroups = new Map();
+          for (const t of remoteTools) {
+            const sn = t._serverName || "Unknown";
+            if (!remoteGroups.has(sn)) remoteGroups.set(sn, { description: t._serverDescription || "", isDirect: t._isDirect, tools: [] });
+            remoteGroups.get(sn).tools.push(t);
+          }
+          for (const [name, group] of remoteGroups) {
+            if (group.isDirect) {
+              remoteMcpServers[name] = { tools: group.tools.map(fmtTool), direct: true };
+            } else {
+              remoteMcpServers[name] = { tool_count: group.tools.length, direct: false, description: group.description };
+            }
+          }
+        } catch (e) { debugLog("[Chief flow] Ecosystem: remote MCP error:", e?.message); }
+
         // COS tools (exclude this tool itself to avoid recursion in output)
         const cosTools = [
           ...getCosIntegrationTools().filter(t => t.name !== "cos_get_tool_ecosystem"),
@@ -3094,10 +3134,12 @@ function getCosIntegrationTools() {
           toolSources.push(...names);
         }
         if (Object.keys(localMcpServers).length) toolSources.push(...Object.keys(localMcpServers));
+        if (Object.keys(remoteMcpServers).length) toolSources.push(...Object.keys(remoteMcpServers));
 
         const totalTools = roamTools.length
           + Object.values(extensionTools).reduce((sum, arr) => sum + arr.length, 0)
           + Object.values(localMcpServers).reduce((sum, s) => sum + (s.tools?.length || s.tool_count || 0), 0)
+          + Object.values(remoteMcpServers).reduce((sum, s) => sum + (s.tools?.length || s.tool_count || 0), 0)
           + cosTools.length;
 
         return {
@@ -3106,6 +3148,7 @@ function getCosIntegrationTools() {
             extension_tools: extensionTools,
             composio_services: composioServices,
             local_mcp_servers: localMcpServers,
+            remote_mcp_servers: remoteMcpServers,
             cos_tools: cosTools
           },
           existing_skills: existingSkills,
@@ -3156,12 +3199,26 @@ async function getAvailableToolSchemas() {
   // first-class tools the LLM can call directly, instead of requiring it to
   // know about the COMPOSIO_MULTI_EXECUTE_TOOL wrapper indirection.
   // Execution is handled by the Composio slug interceptor in tool-execution.js.
+  //
+  // Guard: if a remote MCP server covers the same service (e.g. "Gmail" server
+  // connected via MintMCP), exclude the Composio slugs for that prefix to avoid
+  // the model calling stale Composio tools instead of the actual remote MCP tools.
+  const remoteCache = getRemoteMcpToolsCache() || [];
+  const remoteMcpPrefixes = new Set();
+  for (const t of remoteCache) {
+    if (t._isRemote && t._serverName) {
+      remoteMcpPrefixes.add(t._serverName.toLowerCase().split(/\s+/)[0]);
+    }
+  }
   const composioDirectTools = [];
   const composioSeenSlugs = new Set();
   for (const tk of Object.values(registry.toolkits || {})) {
     for (const [slug, schema] of Object.entries(tk.tools || {})) {
       if (!schema || !schema.input_schema) continue;
       if (composioSeenSlugs.has(slug)) continue; // Same slug in multiple toolkits
+      // Skip if a remote MCP server covers this slug's prefix
+      const slugPrefix = slug.split("_")[0].toLowerCase();
+      if (remoteMcpPrefixes.has(slugPrefix)) continue;
       composioSeenSlugs.add(slug);
       composioDirectTools.push({
         name: slug,
@@ -3666,7 +3723,7 @@ function publishAskResponse(prompt, responseText, assistantName, suppressToasts 
 // ── tryRunDeterministicAskIntent — extracted to deterministic-router.js ──
 
 async function askChiefOfStaff(userMessage, options = {}) {
-  const { offerWriteToDailyPage = false, suppressToasts = false, onTextChunk = null, readOnlyTools = false } = options;
+  const { offerWriteToDailyPage = false, suppressToasts = false, onTextChunk = null, onToolCall = null, readOnlyTools = false } = options;
   const rawPrompt = String(userMessage || "").trim();
   if (!rawPrompt) return;
 
@@ -3793,6 +3850,7 @@ async function askChiefOfStaff(userMessage, options = {}) {
 
   let finalTier = effectiveTier;
   let finalPowerMode = powerFlag || ludicrousFlag;
+  let routingResult = null;
 
   // Hard-escalate for routed MCP server mentions (bypass scoring)
   if (mentionsRoutedMcpServer) {
@@ -3824,6 +3882,7 @@ async function askChiefOfStaff(userMessage, options = {}) {
       reason: routing.reason,
       signals: routing.signals
     });
+    routingResult = routing;
 
     if (routing.tier && routing.tier !== "mini" && (routing.tier === "power" || routing.tier === "ludicrous")) {
       finalTier = routing.tier;
@@ -3833,6 +3892,93 @@ async function askChiefOfStaff(userMessage, options = {}) {
     }
   }
 
+  // ── Intent confidence gate ────────────────────────────────────────────────
+  clearIntentCache();
+  if (getSettingBool(extensionAPIRef, SETTINGS_KEYS.intentGateEnabled, false)) {
+    const gateSkillEntries = await getSkillEntries({ force: false });
+    const gateSkillNames = gateSkillEntries.map(e => e.title).filter(Boolean);
+    const classification = await classifyIntent(prompt, {
+      hasContext,
+      conversationTurnCount: getConversationTurns().length,
+      effectiveTier,
+      ludicrousFlag,
+      powerFlag,
+      lessonFlag,
+      routingMatchedSkill: routingResult?.breakdown?.toolCount?.matchedSkill || null,
+      routingSkillMatchScore: routingResult?.breakdown?.toolCount?.score || 0,
+      skillNames: gateSkillNames,
+      recentTurnsSummary: hasContext
+        ? getConversationTurns().slice(-2).map(t => t.user?.slice(0, 80)).join(" | ")
+        : null,
+    });
+
+    if (classification && !classification.skipped) {
+      const evaluation = evaluateConfidence(classification);
+      debugLog("[Chief flow] Intent gate:", {
+        intent: classification.intent,
+        confidence: classification.confidence,
+        risk: classification.risk,
+        action: evaluation.action,
+      });
+
+      if (evaluation.action === "clarify") {
+        recordUsageStat("intentClarifications");
+        const interpretations = Array.isArray(classification.interpretations)
+          ? classification.interpretations.filter(Boolean).slice(0, 3)
+          : [];
+        if (interpretations.length >= 2) {
+          const selected = await promptIntentClarification(interpretations);
+          if (!selected) { askChiefInFlight = false; return; }
+          if (selected.selectedIndex === -1) {
+            const clarified = await promptTextWithToast({
+              title: "Clarify your request",
+              placeholder: "What did you mean?",
+              confirmLabel: "Submit"
+            });
+            if (!clarified) { askChiefInFlight = false; return; }
+            prompt = clarified;
+            recordUsageStat("intentUserOverrides");
+          } else {
+            prompt = selected.selectedText;
+            recordUsageStat("intentUserOverrides");
+          }
+        }
+      } else if (evaluation.action === "confirm") {
+        recordUsageStat("intentConfirmations");
+        const confirmed = await promptIntentConfirmation(classification);
+        if (confirmed === false) {
+          const clarified = await promptTextWithToast({
+            title: "Clarify your request",
+            placeholder: "What did you actually want?",
+            confirmLabel: "Submit"
+          });
+          if (!clarified) { askChiefInFlight = false; return; }
+          prompt = clarified;
+          recordUsageStat("intentUserOverrides");
+        } else if (confirmed === null) {
+          askChiefInFlight = false; return;
+        }
+      } else {
+        recordUsageStat("intentAutoProceeded");
+      }
+
+      // Tier override from classification
+      if (classification.estimatedTools >= 5 && finalTier === "mini") {
+        finalTier = "power";
+        finalPowerMode = true;
+        recordUsageStat("tierEscalations");
+        showInfoToastIfAllowed("Power Mode", "Auto-escalating: intent classifier estimates high complexity.", suppressToasts);
+      }
+    }
+  }
+
+  // ── Prompt split: displayPrompt for UI/storage, agentPrompt for LLM ─────
+  const displayPrompt = prompt;
+  const cachedIntent = getCachedClassification();
+  const agentPrompt = (cachedIntent?.intent && !cachedIntent.skipped)
+    ? `[User intent (classified): ${cachedIntent.intent}. Proceed with this interpretation. If during execution you discover the intent was wrong, stop and ask rather than continuing.]\n\n${prompt}`
+    : prompt;
+
   showInfoToastIfAllowed(
     "Context",
     hasContext ? "Using recent conversation context." : "Starting fresh context.",
@@ -3841,15 +3987,16 @@ async function askChiefOfStaff(userMessage, options = {}) {
   if (ludicrousFlag) showInfoToastIfAllowed("Ludicrous Mode", "Using ludicrous model for this request.", suppressToasts);
   else if (powerFlag) showInfoToastIfAllowed("Power Mode", "Using power model for this request.", suppressToasts);
   if (providerOverride) showInfoToastIfAllowed("Provider Override", `Using ${providerSlashMatch[1].toLowerCase()} for this request.`, suppressToasts);
-  showInfoToastIfAllowed("Thinking...", prompt.slice(0, 72), suppressToasts);
-  const result = await runAgentLoopWithFailover(prompt, {
+  showInfoToastIfAllowed("Thinking...", displayPrompt.slice(0, 72), suppressToasts);
+  const result = await runAgentLoopWithFailover(agentPrompt, {
     powerMode: finalPowerMode,
     tier: finalTier,
     providerOverride: providerOverride || undefined,
     disableFailover: !!providerOverride,
     readOnlyTools,
-    onToolCall: (name) => {
+    onToolCall: (name, args) => {
       showInfoToastIfAllowed("Using tool", name, suppressToasts);
+      if (onToolCall) onToolCall(name, args);
     },
     onTextChunk
   });
@@ -3873,6 +4020,17 @@ async function askChiefOfStaff(userMessage, options = {}) {
       escalated: finalTier !== effectiveTier,
       failedOver: Boolean(_trace.error && result?.text)
     });
+    // Enrich trace with intent classification data (if available)
+    const traceIntent = getCachedClassification();
+    if (traceIntent) {
+      _trace.intentClassification = {
+        intent: traceIntent.intent || null,
+        confidence: traceIntent.confidence ?? null,
+        risk: traceIntent.risk || null,
+        skipped: traceIntent.skipped || false,
+        skipReason: traceIntent.skipReason || null,
+      };
+    }
   }
 
   // Strip any echoed [Key reference: ...] blocks from the model response before display.
@@ -3884,18 +4042,18 @@ async function askChiefOfStaff(userMessage, options = {}) {
   // (truncation slices from the end — keys at the front are preserved).
   const mcpKeyRef = extractMcpKeyReference(result?.mcpResultTexts);
   const enrichedResponse = mcpKeyRef ? `${mcpKeyRef}\n\n${responseText}` : responseText;
-  appendConversationTurn(prompt, enrichedResponse);
+  appendConversationTurn(displayPrompt, enrichedResponse);
   showInfoToastIfAllowed(assistantName, responseText.slice(0, 280), suppressToasts);
   debugLog("[Chief of Staff] Ask response:", responseText);
   debugLog("[Chief flow] askChiefOfStaff completed via runAgentLoop.");
 
   // Persist audit log entry (non-blocking, non-fatal)
-  persistAuditLogEntry(_trace, prompt);
+  persistAuditLogEntry(_trace, displayPrompt);
   recordUsageStat("agentRuns");
   persistUsageStatsPage();
 
   // Non-blocking eval (opt-in, non-fatal)
-  evaluateAgentRun(_trace, prompt, responseText).catch(() => {});
+  evaluateAgentRun(_trace, displayPrompt, responseText).catch(() => {});
 
   if (offerWriteToDailyPage) {
     const shouldWrite = await promptWriteToDailyPage();
@@ -4791,6 +4949,23 @@ function onload({ extensionAPI }) {
     recordGuardOutcome,
     recordEvalRun,
   });
+  initIntentClassifier({
+    callLlm,
+    getApiKeyForProvider,
+    getLlmProvider,
+    getLlmModel,
+    getModelCostRates,
+    recordCostEntry,
+    accumulateSessionTokens,
+    recordUsageStat,
+    getExtensionAPIRef: () => extensionAPIRef,
+    getSettingBool,
+    isOpenAICompatible,
+    isProviderCoolingDown,
+    debugLog,
+    SETTINGS_KEYS,
+    extractBalancedJsonObjects,
+  });
   initSecurity({
     debugLog,
     recordUsageStat,
@@ -5098,6 +5273,10 @@ function onload({ extensionAPI }) {
     buildLocalMcpRouteTool,
     buildRemoteMcpRouteTool,
     buildRemoteMcpMetaTool,
+    buildExtRouteTool,
+    buildExtExecuteTool,
+    buildRoamRouteTool,
+    buildRoamExecuteTool,
     getToolSchema,
     getToolkitSchemaRegistry,
     recordToolResponseShape,

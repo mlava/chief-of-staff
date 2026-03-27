@@ -509,7 +509,7 @@ export function buildSettingsConfig(extensionAPI) {
           value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.auditLogRetentionDays, ""),
           placeholder: "e.g. 14"
         }
-      }/*,
+      },
       {
         id: deps.SETTINGS_KEYS.evalEnabled,
         name: "Post-Run Evaluation",
@@ -538,7 +538,16 @@ export function buildSettingsConfig(extensionAPI) {
           value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.evalReviewThreshold, "2"),
           placeholder: "2"
         }
-      }*/
+      },
+      {
+        id: deps.SETTINGS_KEYS.intentGateEnabled,
+        name: "Intent Confidence Gate (Beta)",
+        description: "Classify intent before running the agent loop. Ambiguous or high-risk requests trigger a confirmation step. Adds ~200–400ms and a small token cost per classified query. Default: off.",
+        action: {
+          type: "switch",
+          value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.intentGateEnabled, false)
+        }
+      }
     );
   }
 
