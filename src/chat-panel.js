@@ -73,6 +73,17 @@ function getToolFriendlyLabel(toolName) {
   if (toolName.startsWith("cos_"))   return "Running task";
   if (toolName.startsWith("bt_"))    return "Managing tasks";
   if (toolName.startsWith("wp_"))    return "Running extension";
+  // Keyword-based fallback for Composio slugs (e.g. list_calendars, search_email)
+  const lower = toolName.toLowerCase();
+  if (lower.includes("calendar") || lower.includes("event"))  return "Checking calendar";
+  if (lower.includes("email") || lower.includes("gmail"))     return "Checking email";
+  if (lower.includes("weather"))   return "Checking weather";
+  if (lower.includes("github") || lower.includes("issue") || lower.includes("repository")) return "Checking GitHub";
+  if (lower.includes("slack"))     return "Checking Slack";
+  if (lower.includes("todoist"))   return "Checking tasks";
+  if (lower.includes("sentry"))    return "Checking Sentry";
+  if (lower.includes("fetch"))     return "Fetching data";
+  if (lower.includes("search"))    return "Searching";
   return "Working";
 }
 
@@ -960,8 +971,9 @@ async function handleChatPanelSend() {
     clearTimeout(chatWorkingTimerId);
     // Debounce: delay update so rapid successive calls show only the latest
     clearTimeout(toolStatusTimerId);
+    const label = getToolFriendlyLabel(toolName);
     toolStatusTimerId = setTimeout(() => {
-      updateThinkingStatus(getToolFriendlyLabel(toolName));
+      updateThinkingStatus(label);
     }, TOOL_STATUS_DEBOUNCE_MS);
   }
 
