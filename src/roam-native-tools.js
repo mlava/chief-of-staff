@@ -321,7 +321,7 @@ export function getRoamNativeTools() {
     {
       name: "roam_update_block",
       isMutating: true,
-      description: "Update an existing block in Roam by UID. Can change text, heading level, children view type, text alignment, open/collapsed state, and block props (key/value attributes like BT_attrDue, BT_attrProject, etc.).",
+      description: "Update an existing block in Roam by UID. Can change text, heading level, children view type, text alignment, open/collapsed state, and block props (key/value attributes like BT_attrDue, BT_attrDefer, BT_attrProject, BT_attrPriority, BT_attrDepends, BT_attrParent, etc.).",
       input_schema: {
         type: "object",
         properties: {
@@ -333,7 +333,7 @@ export function getRoamNativeTools() {
           open: { type: "boolean", description: "true = expanded, false = collapsed. Omit to leave unchanged." },
           props: {
             type: "object",
-            description: "Block props to set or remove (merged with existing props). Each key is a prop name (e.g. BT_attrDue, BT_attrProject). Set a value to null to delete that prop.",
+            description: "Block props to set or remove (merged with existing props). Each key is a prop name (e.g. BT_attrDue, BT_attrDefer, BT_attrProject, BT_attrPriority, BT_attrDepends, BT_attrParent). Set a value to null to delete that prop.",
             additionalProperties: true
           }
         },
