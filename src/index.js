@@ -3804,7 +3804,9 @@ async function askChiefOfStaff(userMessage, options = {}) {
     suppressToasts,
     assistantName,
     installedToolSlugsForIntents,
-    offerWriteToDailyPage
+    offerWriteToDailyPage,
+    onToolCall,
+    onTextChunk
   });
   if (deterministicResult) {
     debugLog("[Chief flow] askChiefOfStaff completed via deterministic route.");

@@ -365,7 +365,7 @@ export function parseSkillSources(skillContent, knownToolNames = null) {
 }
 
 async function runDeterministicSkillInvocation(intent, options = {}) {
-  const { suppressToasts = false } = options;
+  const { suppressToasts = false, onToolCall = null, onTextChunk = null } = options;
   const skillName = String(intent?.skillName || "").trim();
   if (!skillName) {
     return "Please provide a skill name, for example: use skill Weekly Planning on my next two weeks.";
@@ -482,9 +482,11 @@ ${systemPromptSuffix}${mcpToolHintsSection}`;
     powerMode: true,
     gatheringGuard,
     ...(skillMaxIterations ? { maxIterations: skillMaxIterations } : {}),
-    onToolCall: (name) => {
+    onToolCall: (name, args) => {
       showInfoToastIfAllowed("Using tool", name, suppressToasts);
-    }
+      if (onToolCall) onToolCall(name, args);
+    },
+    onTextChunk
   });
   const responseText = String(result?.text || "").trim().replace(/\[Key reference:[^\]]*\]\s*/g, "").trim() || "No response generated.";
 
@@ -714,7 +716,9 @@ export async function tryRunDeterministicAskIntent(prompt, context = {}) {
     suppressToasts = false,
     assistantName = deps.getAssistantDisplayName(),
     installedToolSlugsForIntents = [],
-    offerWriteToDailyPage = false
+    offerWriteToDailyPage = false,
+    onToolCall = null,
+    onTextChunk = null
   } = context;
   deps.debugLog("[Chief flow] Deterministic router: evaluating.");
 
@@ -1584,7 +1588,7 @@ export async function tryRunDeterministicAskIntent(prompt, context = {}) {
       skillName: resolvedSkillIntent?.skillName || "",
       viaBriefingShortcut: Boolean(briefingIntent)
     });
-    const responseText = await runDeterministicSkillInvocation(resolvedSkillIntent, { suppressToasts });
+    const responseText = await runDeterministicSkillInvocation(resolvedSkillIntent, { suppressToasts, onToolCall, onTextChunk });
     // Extract compact suggestion index so it survives context truncation for follow-up drafting
     const suggestionIdx = extractWorkflowSuggestionIndex(responseText);
     const contextText = suggestionIdx ? `${suggestionIdx}\n\n${responseText}` : undefined;

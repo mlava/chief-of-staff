@@ -511,6 +511,15 @@ export function buildSettingsConfig(extensionAPI) {
         }
       },
       {
+        id: deps.SETTINGS_KEYS.intentGateEnabled,
+        name: "Intent Confidence Gate (Beta)",
+        description: "Classify intent before running the agent loop. Ambiguous or high-risk requests trigger a confirmation step. Adds ~200–400ms and a small token cost per classified query. Default: off.",
+        action: {
+          type: "switch",
+          value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.intentGateEnabled, false)
+        }
+      }/*,
+      {
         id: deps.SETTINGS_KEYS.evalEnabled,
         name: "Post-Run Evaluation",
         description: "Enable automatic quality scoring after each agent interaction using an LLM judge. Adds roughly $0.001–0.003 per evaluated run.",
@@ -538,16 +547,7 @@ export function buildSettingsConfig(extensionAPI) {
           value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.evalReviewThreshold, "2"),
           placeholder: "2"
         }
-      },
-      {
-        id: deps.SETTINGS_KEYS.intentGateEnabled,
-        name: "Intent Confidence Gate (Beta)",
-        description: "Classify intent before running the agent loop. Ambiguous or high-risk requests trigger a confirmation step. Adds ~200–400ms and a small token cost per classified query. Default: off.",
-        action: {
-          type: "switch",
-          value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.intentGateEnabled, false)
-        }
-      }
+      }*/
     );
   }
 
