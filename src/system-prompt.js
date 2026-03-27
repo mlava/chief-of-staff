@@ -152,7 +152,29 @@ Available tools:
 ${toolList}
 
 CRITICAL: When modifying a task, ALWAYS use the exact uid from the most recent search result. Never reuse UIDs from earlier turns — always re-search first.
-Use roam_bt_get_attributes to discover available attribute names if needed.
+
+### Attribute Reference
+Pass these as keys in the \`attributes\` object for bt_create/bt_modify. The attribute ID (left column) is the key you pass; the prop name is what gets stored on the block.
+
+| ID | Prop Name | Type | Format / Values |
+|----|-----------|------|-----------------|
+| due | BT_attrDue | date | \`[[March 27th, 2026]]\` (Roam date format — always ordinal) |
+| defer | BT_attrDefer | date | Same Roam date format. Task hidden until this date. |
+| start | BT_attrStart | date | Same Roam date format. When work begins. |
+| completed | BT_attrCompleted | date | Same Roam date format. Auto-set when marked DONE. |
+| project | BT_attrProject | string | Project name, e.g. \`"CALD_TANG"\`. Must match an existing project. |
+| priority | BT_attrPriority | enum | \`low\`, \`medium\`, \`high\` |
+| energy | BT_attrEnergy | enum | \`low\`, \`medium\`, \`high\` |
+| gtd | BT_attrGTD | enum | \`next action\`, \`delegated\`, \`deferred\`, \`someday\` |
+| waitingFor | BT_attrWaitingFor | string | Person or team name |
+| context | BT_attrContext | list | Comma-separated contexts, e.g. \`"office, phone"\` |
+| repeat | BT_attrRepeat | string | Recurrence pattern, e.g. \`"every weekday"\`, \`"every 2 weeks"\` |
+| depends | BT_attrDepends | list | Comma-separated task UIDs this task is blocked by, e.g. \`"abc123, def456"\` |
+| parent | BT_attrParent | ref | UID of a parent task for sub-task relationships, e.g. \`"xyz789"\` |
+
+Example: \`{ "attributes": { "due": "[[March 28th, 2026]]", "project": "Home Reno", "priority": "high", "depends": "abc123" } }\`
+
+You can also set/remove attributes directly on any block via roam_update_block with the \`props\` parameter using the prop name (e.g. \`{ "props": { "BT_attrDue": "[[March 28th, 2026]]" } }\`). Set a prop to \`null\` to remove it.
 
 IMPORTANT: A task needs at least one attribute (due, project, priority, context, energy, etc.) to appear in the Better Tasks dashboard and widgets. When creating tasks, always try to set at least one attribute — infer a due date, project, or priority from context when possible. If the user provides no attributes and none can be reasonably inferred, create the task anyway but note that it won't appear in Better Tasks views until an attribute is added.`;
     }
