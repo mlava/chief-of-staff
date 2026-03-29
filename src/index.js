@@ -375,6 +375,7 @@ const SOURCE_TOOL_NAME_MAP = {
   "bt_get_waiting_for": "roam_bt_get_waiting_for",
   "bt_get_context": "roam_bt_get_context",
   "bt_get_analytics": "bt_get_analytics",
+  "bt_get_analytics_detailed": "roam_bt_get_analytics_detailed",
   "bt_get_task_by_uid": "bt_get_task_by_uid",
   "roam_get_block_children": "roam_get_block_children",
   "roam_get_page": "roam_get_page",
@@ -528,6 +529,7 @@ const INBOX_READ_ONLY_TOOL_ALLOWLIST = new Set([
   "roam_bt_get_waiting_for",
   "roam_bt_get_context",
   "roam_bt_get_analytics",
+  "roam_bt_get_analytics_detailed",
   "roam_bt_get_task_by_uid",
   "roam_bt_get_attributes",
   // COS integration read tools
@@ -2881,6 +2883,7 @@ function getBetterTasksTools() {
     "bt_get_context": "roam_bt_get_context",
     "bt_get_attributes": "roam_bt_get_attributes",
     "bt_get_analytics": "roam_bt_get_analytics",
+    "bt_get_analytics_detailed": "roam_bt_get_analytics_detailed",
     "bt_get_task_by_uid": "roam_bt_get_task_by_uid",
     "roam_bt_search": "roam_bt_search_tasks",
     "roam_bt_create": "roam_bt_create_task",
