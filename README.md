@@ -27,6 +27,34 @@ https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 
 ---
 
+## How your data is handled
+
+Chief of Staff runs entirely inside your Roam browser tab — there's no server, no external API endpoint, and nothing outside your browser can reach your graph through it.
+
+**Nothing happens unless you trigger it.** Every LLM call, every tool invocation, every piece of data that leaves your browser starts because you typed a message, ran a command, or invoked a skill. The only exception is if you explicitly set up one of three optional automation features (cron jobs, inbox processing, or idle tasks) — and even those only do what you've configured them to do.
+
+Here's what crosses the network when something does run:
+
+**LLM calls** — Your prompt and supporting context are sent to whichever LLM provider you've configured (Anthropic, OpenAI, Google, Mistral, Groq). The context sent alongside your message includes conversation history (up to 12 prior turns), your COS memory pages, active project list, any active skill instructions, and tool results gathered during the current run (e.g. Roam search results, calendar events). Anthropic calls go direct from your browser; other providers route through Roam's built-in CORS proxy (the same one all Roam extensions use). An optional PII scrubbing setting can strip emails, phone numbers, and other sensitive patterns before anything is sent.
+
+**Composio integrations** — If you optionally connect external services (Gmail, Calendar, GitHub, etc.) through Composio, those tool calls go through Composio's API via a CORS proxy. Entirely opt-in — nothing connects unless you explicitly set it up and authenticate.
+
+**Local MCP servers** — If you connect local MCP servers (e.g. Zotero, a GitHub server), tool calls go to `localhost` — data stays on your machine and never hits the network.
+
+**Remote MCP servers** — If you connect remote MCP servers (e.g. Notion, Sentry), tool calls go to those external endpoints via the CORS proxy. Like Composio, fully opt-in and only what you configure.
+
+**Asking for help** — A dedicated remote MCP server contains semantically chunked documentation from the COS readme, other extension READMEs, and Roam help articles. When you ask "how do I connect to remote MCP servers?" this is where the query goes. It's hosted on a Supabase database controlled by the extension author.
+
+**What it can do inside your graph** — When you ask Chief of Staff to do something, it has access to Roam tools that can search blocks, read pages, create/edit/delete blocks, manage TODOs, and navigate your graph. If Better Tasks is installed, it can also search, create, and modify tasks with full attribute support. These tools only run during an active request — they don't scan or index your graph in the background by default.
+
+**Safety defaults** — Any action that modifies your graph (creating, editing, or deleting blocks) requires your explicit approval via a confirmation prompt. Read-only operations (searching, fetching) proceed automatically.
+
+Future releases may introduce optional background features (e.g. graph statistics, stale task detection, link suggestions) that use idle-time processing to scan parts of your graph locally. These will always be gated behind individual settings toggles — off by default, clearly described, and never sending graph data to an LLM unless explicitly configured to do so.
+
+For full technical details on security measures, injection defences, and credential handling, see [Security](#security).
+
+---
+
 ## Requirements
 
 | Requirement | Notes |
@@ -420,7 +448,7 @@ These queries are handled by a fast deterministic router that matches intent pat
 
 If the [Better Tasks](https://github.com/mlava/recurring-tasks) extension is installed, task queries use Better Tasks attributes (`BT_attrDue`, `BT_attrProject`, etc.) and support filtering by due date, project, status, priority, energy, GTD context, and free text. You can create new Better Tasks from natural language ("create a better task to review the budget due next Friday for the Planning Committee project"), and the assistant will set the appropriate attributes.
 
-**Attributes recognised:** `BT_attrProject` · `BT_attrDue` · `BT_attrStart` · `BT_attrDefer` · `BT_attrRepeat` · `BT_attrGTD` · `BT_attrWaitingFor` · `BT_attrContext` · `BT_attrPriority` · `BT_attrEnergy`
+**Attributes recognised:** `BT_attrProject` · `BT_attrDue` · `BT_attrStart` · `BT_attrDefer` · `BT_attrRepeat` · `BT_attrGTD` · `BT_attrWaitingFor` · `BT_attrContext` · `BT_attrPriority` · `BT_attrEnergy` · `BT_attrDepends` · `BT_attrParent`
 
 Custom attribute aliases configured in the Better Tasks extension are respected automatically. The assistant also loads project data from Better Tasks directly, so you don't need a separate `Chief of Staff/Projects` page.
 
