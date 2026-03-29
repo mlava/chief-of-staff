@@ -67,7 +67,7 @@ function detectPromptSections(userMessage) {
     sections.add("bt_schema");
   }
   // Generic task words trigger BT only if no external service is mentioned
-  if (/\b(tasks?|todo|done|overdue|due|project)\b/.test(text) &&
+  if (/\b(tasks?|todo|done|overdue|due|project|analytics|velocity|completion rate|productivity)\b/.test(text) &&
     !/\b(todoist|slack|github|gmail|calendar|asana|jira|notion|trello|linear)\b/.test(text)) {
     sections.add("bt_schema");
   }
