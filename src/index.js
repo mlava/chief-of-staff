@@ -4999,6 +4999,7 @@ function onload({ extensionAPI }) {
     recordUsageStat,
     recordGuardOutcome,
     recordEvalRun,
+    extractBalancedJsonObjects,
   });
   initIntentClassifier({
     callLlm,

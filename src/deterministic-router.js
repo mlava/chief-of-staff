@@ -485,6 +485,113 @@ export function parseSkillBudget(skillContent) {
   return result;
 }
 
+// ── Skill constraint parsing ──────────────────────────────────────────────────
+
+const CONSTRAINT_QUADRANTS = [
+  { id: "mustDo", header: /^\s*-?\s*Must\s+Do\s*(?:—|:)/i },
+  { id: "mustNotDo", header: /^\s*-?\s*Must\s+Not\s+Do\s*(?:—|:)/i },
+  { id: "prefer", header: /^\s*-?\s*Prefer\s*(?:—|:)/i },
+  { id: "escalate", header: /^\s*-?\s*Escalate\s*(?:—|:)/i },
+];
+
+/**
+ * Parse optional Constraints: section with four quadrants (Must Do, Must Not Do,
+ * Prefer, Escalate) from skill content.
+ * Returns { mustDo: string[]|null, mustNotDo: string[]|null, prefer: string[]|null, escalate: string[]|null }
+ */
+export function parseSkillConstraints(skillContent) {
+  const text = String(skillContent || "");
+  const lines = text.split("\n");
+  const result = { mustDo: null, mustNotDo: null, prefer: null, escalate: null };
+
+  // Phase 1: find the Constraints header and collect its child lines
+  let inConstraints = false;
+  let constraintsIndent = -1;
+  const constraintLines = [];
+
+  for (const line of lines) {
+    if (!inConstraints) {
+      if (/^\s*-?\s*Constraints\s*(?:—|:)/i.test(line)) {
+        inConstraints = true;
+        constraintsIndent = (line.match(/^(\s*)/)?.[1] || "").length;
+      }
+      continue;
+    }
+    const indent = (line.match(/^(\s*)/)?.[1] || "").length;
+    if (indent > constraintsIndent && line.trim()) {
+      constraintLines.push(line);
+    } else if (line.trim()) {
+      break;
+    }
+  }
+
+  if (!constraintLines.length) return result;
+
+  // Phase 2: parse quadrant headers and their children
+  let currentQuadrant = null;
+
+  for (const line of constraintLines) {
+    const trimmed = line.trim().replace(/^-\s*/, "");
+
+    // Check if this line starts a quadrant
+    let matched = false;
+    for (const q of CONSTRAINT_QUADRANTS) {
+      if (q.header.test(line)) {
+        currentQuadrant = q.id;
+        // Check for inline content after the header
+        const inlineMatch = trimmed.match(/(?:Must\s+(?:Not\s+)?Do|Prefer|Escalate)\s*(?:—|:)\s*(.+)/i);
+        if (inlineMatch && inlineMatch[1].trim()) {
+          if (!result[currentQuadrant]) result[currentQuadrant] = [];
+          result[currentQuadrant].push(inlineMatch[1].trim());
+        }
+        matched = true;
+        break;
+      }
+    }
+    if (matched) continue;
+
+    // Otherwise it's a child line of the current quadrant
+    if (currentQuadrant && trimmed) {
+      if (!result[currentQuadrant]) result[currentQuadrant] = [];
+      result[currentQuadrant].push(trimmed);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Format parsed constraints into a system prompt section.
+ * Returns empty string if no constraints are defined.
+ */
+function formatConstraintsPromptSection(constraints) {
+  if (!constraints) return "";
+  const { mustDo, mustNotDo, prefer, escalate } = constraints;
+  if (!mustDo && !mustNotDo && !prefer && !escalate) return "";
+
+  const sections = [];
+  sections.push("\n\n## Skill Constraints (Binding)");
+
+  if (mustDo && mustDo.length > 0) {
+    sections.push("\n**MUST DO** (non-negotiable requirements):");
+    for (const item of mustDo) sections.push(`- ${item}`);
+  }
+  if (mustNotDo && mustNotDo.length > 0) {
+    sections.push("\n**MUST NOT DO** (hard prohibitions — violation is a failure):");
+    for (const item of mustNotDo) sections.push(`- ${item}`);
+  }
+  if (prefer && prefer.length > 0) {
+    sections.push("\n**PREFER** (guidance when multiple valid approaches exist):");
+    for (const item of prefer) sections.push(`- ${item}`);
+  }
+  if (escalate && escalate.length > 0) {
+    sections.push("\n**ESCALATE** (stop and ask the user before proceeding):");
+    for (const item of escalate) sections.push(`- ${item}`);
+  }
+
+  return sections.join("\n");
+}
+
 /**
  * Resolve parsed tool names against the live tool registry and determine
  * which meta-tools (ROUTE/EXECUTE) need to be included for routed tools.
@@ -704,6 +811,14 @@ async function runDeterministicSkillInvocation(intent, options = {}) {
   if (toolWhitelist) {
     const scopedNames = [...toolWhitelist].filter(n => !n.startsWith("cos_") && !/^(ROAM_|LOCAL_MCP_|REMOTE_MCP_|EXT_)(ROUTE|EXECUTE)$/.test(n));
     systemPromptSuffix += `\n\nTOOL SCOPE: This skill has a restricted tool set. In addition to core Roam and COS tools, you have access to: ${scopedNames.join(", ")}. Do not attempt to call other tools — they are not available for this skill run. IMPORTANT: ROAM_EXECUTE is ONLY for Roam extended tools (discovered via ROAM_ROUTE). Do NOT pass LOCAL_MCP_EXECUTE, search_issues, or other non-Roam tool names to ROAM_EXECUTE — they will fail.`;
+  }
+
+  // Parse and inject skill constraints (Must Do / Must Not Do / Prefer / Escalate)
+  const constraints = parseSkillConstraints(skill.content);
+  const constraintsSection = formatConstraintsPromptSection(constraints);
+  if (constraintsSection) {
+    systemPromptSuffix += constraintsSection;
+    deps.debugLog(`[Chief flow] Skill "${skill.title}" constraints:`, constraints);
   }
 
   const systemPrompt = `${await buildDefaultSystemPrompt(skillPrompt)}
