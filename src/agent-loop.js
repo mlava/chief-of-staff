@@ -145,7 +145,9 @@ export async function runAgentLoop(userMessage, options = {}) {
     tier = null,
     gatheringGuard: initialGatheringGuard = null,
     readOnlyTools = false,
-    carryoverWriteReplayGuard = null
+    carryoverWriteReplayGuard = null,
+    toolWhitelist = null,
+    skillBudgetUsd = null
   } = options;
   let maxIterations = initialMaxIterations;
   let gatheringGuard = initialGatheringGuard;
@@ -168,9 +170,17 @@ export async function runAgentLoop(userMessage, options = {}) {
   }
 
   const allTools = await deps.getAvailableToolSchemas();
-  const tools = readOnlyTools
-    ? allTools.filter(t => deps.INBOX_READ_ONLY_TOOL_ALLOWLIST.has(t.name) || t.isMutating === false)
-    : filterToolsByRelevance(allTools, userMessage);
+  let tools;
+  if (readOnlyTools) {
+    tools = allTools.filter(t => deps.INBOX_READ_ONLY_TOOL_ALLOWLIST.has(t.name) || t.isMutating === false);
+  } else if (toolWhitelist) {
+    // Per-skill tool whitelist: only include whitelisted tools + always-available core tools
+    tools = allTools.filter(t =>
+      toolWhitelist.has(t.name) || t.name.startsWith("cos_") || deps.ROAM_CORE_TOOLS.has(t.name)
+    );
+  } else {
+    tools = filterToolsByRelevance(allTools, userMessage);
+  }
 
   const readOnlyAddendum = readOnlyTools
     ? `\n\nIMPORTANT: You are running in read-only mode (triggered by an inbox item). You can search, read, and gather information, but you CANNOT create, update, move, or delete any blocks, send emails, or perform any mutating actions. Summarise your findings clearly. The human will review and act on your summary.`
@@ -471,6 +481,20 @@ export async function runAgentLoop(userMessage, options = {}) {
           args: deps.safeJsonStringify(tc.arguments, 200)
         }))
       });
+
+      // Per-skill budget check — fires once, then allows one final synthesis iteration
+      if (skillBudgetUsd != null && trace.cost >= skillBudgetUsd && !trace.budgetExceeded) {
+        deps.debugLog("[Chief flow] Skill budget exceeded, allowing one final synthesis call", { cost: trace.cost, budget: skillBudgetUsd });
+        trace.budgetExceeded = true;
+        messages.push(formatAssistantMessage(provider, response));
+        messages.push({
+          role: "user",
+          content: "BUDGET REACHED — you have exceeded the skill's cost budget. Do NOT call any more tools. "
+            + "Synthesise a response from the data you have already gathered. "
+            + "If sections are incomplete, note what is missing and suggest the user re-run with a higher Budget: value."
+        });
+        continue;
+      }
 
       if (!toolCalls.length) {
         // Gathering completeness guard — check before allowing final response

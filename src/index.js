@@ -22,7 +22,7 @@ import {
   refreshChatPanelElementRefs, addSaveToDailyPageButton, addModelIndicator,
   getToastTheme
 } from "./chat-panel.js";
-import { initRoamNativeTools, resetRoamNativeToolsCache, getRoamNativeTools, buildRoamRouteTool, buildRoamExecuteTool } from "./roam-native-tools.js";
+import { initRoamNativeTools, resetRoamNativeToolsCache, getRoamNativeTools, buildRoamRouteTool, buildRoamExecuteTool, ROAM_CORE_TOOLS } from "./roam-native-tools.js";
 import { buildSupergatewayScript } from "./supergateway-script.js";
 import {
   initComposioMcp,
@@ -4990,6 +4990,17 @@ function onload({ extensionAPI }) {
     MAX_CONVERSATION_TURNS,
     MAX_AGENT_MESSAGES_CHAR_BUDGET,
     MIN_AGENT_MESSAGES_TO_KEEP,
+    // LLM deps for structured compaction v2
+    callLlm,
+    getLlmProvider,
+    getLlmModel,
+    getApiKeyForProvider,
+    isOpenAICompatible,
+    isProviderCoolingDown,
+    getModelCostRates,
+    accumulateSessionTokens,
+    recordCostEntry,
+    extractBalancedJsonObjects,
   });
   initSettingsConfig({
     getSettingString,
@@ -5346,6 +5357,7 @@ function onload({ extensionAPI }) {
     getSkillsPromptCache: () => skillsPromptCache,
     getMemoryPromptCache: () => memoryPromptCache,
     setLastAgentRunTrace: (t) => setLastAgentRunTrace(t),
+    getLastAgentRunTrace: () => getLastAgentRunTrace(),
     publishAskResponse, writeResponseToTodayDailyPage, writeStructuredResponseToTodayDailyPage,
     updateChiefMemory,
     findSkillEntryByName,
@@ -5400,6 +5412,7 @@ function onload({ extensionAPI }) {
     SETTINGS_KEYS,
     INBOX_READ_ONLY_TOOL_ALLOWLIST,
     WRITE_TOOL_NAMES,
+    ROAM_CORE_TOOLS,
   });
   initIdleScheduler({
     debugLog,
