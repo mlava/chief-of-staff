@@ -4999,6 +4999,7 @@ function onload({ extensionAPI }) {
     recordUsageStat,
     recordGuardOutcome,
     recordEvalRun,
+    extractBalancedJsonObjects,
   });
   initIntentClassifier({
     callLlm,
@@ -5427,6 +5428,7 @@ function onload({ extensionAPI }) {
     runAgentLoopWithFailover,
     SETTINGS_KEYS, MAX_AGENT_ITERATIONS_SKILL,
     MEMORY_PAGE_TITLES_BASE, SOURCE_TOOL_NAME_MAP,
+    evaluateAgentRun,
   });
   initAgentLoop({
     debugLog,

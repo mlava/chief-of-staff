@@ -485,6 +485,151 @@ export function parseSkillBudget(skillContent) {
   return result;
 }
 
+// ── Skill constraint parsing ──────────────────────────────────────────────────
+
+const CONSTRAINT_QUADRANTS = [
+  { id: "mustDo", header: /^\s*-?\s*Must\s+Do\s*(?:—|:)/i },
+  { id: "mustNotDo", header: /^\s*-?\s*Must\s+Not\s+Do\s*(?:—|:)/i },
+  { id: "prefer", header: /^\s*-?\s*Prefer\s*(?:—|:)/i },
+  { id: "escalate", header: /^\s*-?\s*Escalate\s*(?:—|:)/i },
+];
+
+/**
+ * Parse optional Constraints: section with four quadrants (Must Do, Must Not Do,
+ * Prefer, Escalate) from skill content.
+ * Returns { mustDo: string[]|null, mustNotDo: string[]|null, prefer: string[]|null, escalate: string[]|null }
+ */
+export function parseSkillConstraints(skillContent) {
+  const text = String(skillContent || "");
+  const lines = text.split("\n");
+  const result = { mustDo: null, mustNotDo: null, prefer: null, escalate: null };
+
+  // Phase 1: find the Constraints header and collect its child lines
+  let inConstraints = false;
+  let constraintsIndent = -1;
+  const constraintLines = [];
+
+  for (const line of lines) {
+    if (!inConstraints) {
+      if (/^\s*-?\s*Constraints\s*(?:—|:)/i.test(line)) {
+        inConstraints = true;
+        constraintsIndent = (line.match(/^(\s*)/)?.[1] || "").length;
+      }
+      continue;
+    }
+    const indent = (line.match(/^(\s*)/)?.[1] || "").length;
+    if (indent > constraintsIndent && line.trim()) {
+      constraintLines.push(line);
+    } else if (line.trim()) {
+      break;
+    }
+  }
+
+  if (!constraintLines.length) return result;
+
+  // Phase 2: parse quadrant headers and their children
+  let currentQuadrant = null;
+
+  for (const line of constraintLines) {
+    const trimmed = line.trim().replace(/^-\s*/, "");
+
+    // Check if this line starts a quadrant
+    let matched = false;
+    for (const q of CONSTRAINT_QUADRANTS) {
+      if (q.header.test(line)) {
+        currentQuadrant = q.id;
+        // Check for inline content after the header
+        const inlineMatch = trimmed.match(/(?:Must\s+(?:Not\s+)?Do|Prefer|Escalate)\s*(?:—|:)\s*(.+)/i);
+        if (inlineMatch && inlineMatch[1].trim()) {
+          if (!result[currentQuadrant]) result[currentQuadrant] = [];
+          result[currentQuadrant].push(inlineMatch[1].trim());
+        }
+        matched = true;
+        break;
+      }
+    }
+    if (matched) continue;
+
+    // Otherwise it's a child line of the current quadrant
+    if (currentQuadrant && trimmed) {
+      if (!result[currentQuadrant]) result[currentQuadrant] = [];
+      result[currentQuadrant].push(trimmed);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Format parsed constraints into a system prompt section.
+ * Returns empty string if no constraints are defined.
+ */
+function formatConstraintsPromptSection(constraints) {
+  if (!constraints) return "";
+  const { mustDo, mustNotDo, prefer, escalate } = constraints;
+  if (!mustDo && !mustNotDo && !prefer && !escalate) return "";
+
+  const sections = [];
+  sections.push("\n\n## Skill Constraints (Binding)");
+
+  if (mustDo && mustDo.length > 0) {
+    sections.push("\n**MUST DO** (non-negotiable requirements):");
+    for (const item of mustDo) sections.push(`- ${item}`);
+  }
+  if (mustNotDo && mustNotDo.length > 0) {
+    sections.push("\n**MUST NOT DO** (hard prohibitions — violation is a failure):");
+    for (const item of mustNotDo) sections.push(`- ${item}`);
+  }
+  if (prefer && prefer.length > 0) {
+    sections.push("\n**PREFER** (guidance when multiple valid approaches exist):");
+    for (const item of prefer) sections.push(`- ${item}`);
+  }
+  if (escalate && escalate.length > 0) {
+    sections.push("\n**ESCALATE** (stop and ask the user before proceeding):");
+    for (const item of escalate) sections.push(`- ${item}`);
+  }
+
+  return sections.join("\n");
+}
+
+// ── Skill rubric parsing ──────────────────────────────────────────────────────
+
+/**
+ * Parse optional Rubric: section from skill content.
+ * Each child line is one checkable quality criterion.
+ * Returns string[] (empty if no Rubric: field).
+ */
+export function parseSkillRubric(skillContent) {
+  const lines = String(skillContent || "").split("\n");
+
+  let inRubric = false;
+  let rubricIndent = -1;
+  const criteria = [];
+
+  for (const line of lines) {
+    if (!inRubric) {
+      if (/^\s*-?\s*Rubric\s*(?:—|:)/i.test(line)) {
+        inRubric = true;
+        rubricIndent = (line.match(/^(\s*)/)?.[1] || "").length;
+        // Check for inline content
+        const inlineMatch = line.match(/Rubric\s*(?:—|:)\s*(.+)/i);
+        if (inlineMatch && inlineMatch[1].trim()) {
+          criteria.push(inlineMatch[1].trim());
+        }
+      }
+      continue;
+    }
+    const indent = (line.match(/^(\s*)/)?.[1] || "").length;
+    if (indent > rubricIndent && line.trim()) {
+      criteria.push(line.trim().replace(/^-\s*/, ""));
+    } else if (line.trim()) {
+      break;
+    }
+  }
+
+  return criteria;
+}
+
 /**
  * Resolve parsed tool names against the live tool registry and determine
  * which meta-tools (ROUTE/EXECUTE) need to be included for routed tools.
@@ -706,6 +851,14 @@ async function runDeterministicSkillInvocation(intent, options = {}) {
     systemPromptSuffix += `\n\nTOOL SCOPE: This skill has a restricted tool set. In addition to core Roam and COS tools, you have access to: ${scopedNames.join(", ")}. Do not attempt to call other tools — they are not available for this skill run. IMPORTANT: ROAM_EXECUTE is ONLY for Roam extended tools (discovered via ROAM_ROUTE). Do NOT pass LOCAL_MCP_EXECUTE, search_issues, or other non-Roam tool names to ROAM_EXECUTE — they will fail.`;
   }
 
+  // Parse and inject skill constraints (Must Do / Must Not Do / Prefer / Escalate)
+  const constraints = parseSkillConstraints(skill.content);
+  const constraintsSection = formatConstraintsPromptSection(constraints);
+  if (constraintsSection) {
+    systemPromptSuffix += constraintsSection;
+    deps.debugLog(`[Chief flow] Skill "${skill.title}" constraints:`, constraints);
+  }
+
   const systemPrompt = `${await buildDefaultSystemPrompt(skillPrompt)}
 
 ## Active Skill (Explicitly Requested)
@@ -746,7 +899,7 @@ ${systemPromptSuffix}${mcpToolHintsSection}`;
     },
     onTextChunk
   });
-  const responseText = String(result?.text || "").trim().replace(/\[Key reference:[^\]]*\]\s*/g, "").trim() || "No response generated.";
+  let responseText = String(result?.text || "").trim().replace(/\[Key reference:[^\]]*\]\s*/g, "").trim() || "No response generated.";
 
   // Audit: declared vs actually-called tools + budget usage
   if (typeof deps.getLastAgentRunTrace === "function") {
@@ -763,6 +916,9 @@ ${systemPromptSuffix}${mcpToolHintsSection}`;
         `iterations=${trace?.iterations || 0}${parsedBudget.maxIterations ? "/" + parsedBudget.maxIterations : ""}`);
     }
   }
+
+  // Preserve the actual briefing content for eval before it gets overwritten
+  let evalResponseText = responseText;
 
   // If it's a daily-page-write skill, write the output to the DNP from code.
   if (isDailyPageWriteSkill) {
@@ -787,19 +943,39 @@ ${systemPromptSuffix}${mcpToolHintsSection}`;
       if (/^\s+([-*]|\d+[.)]) /.test(line)) return line.trimStart();
       return line;
     }).join("\n");
-
     if (cleanedText.length > 40) {
       try {
         const heading = `[[Chief of Staff Daily Briefing]]`;
         const writeResult = await deps.writeStructuredResponseToTodayDailyPage(heading, cleanedText);
         showInfoToastIfAllowed("Saved to Roam", `Added under ${writeResult.pageTitle}.`, suppressToasts);
-        return `Briefing written to today's daily page under ${heading}.`;
+        responseText = `Briefing written to today's daily page under ${heading}.`;
       } catch (error) {
         deps.debugLog("[Chief flow] Skill auto-write to DNP failed:", error?.message || error);
       }
     } else {
       deps.debugLog("[Chief flow] Skill response doesn't look like briefing content, skipping DNP write:", responseText.slice(0, 200));
     }
+  }
+
+  // Non-blocking skill eval (opt-in, non-fatal)
+  // Use evalResponseText (actual briefing content) rather than the confirmation message
+  const textForEval = evalResponseText || responseText;
+  if (typeof deps.evaluateAgentRun === "function") {
+    try {
+      const evalTrace = typeof deps.getLastAgentRunTrace === "function" ? deps.getLastAgentRunTrace() : null;
+      const rubric = parseSkillRubric(skill.content);
+      deps.debugLog("[Chief flow] Triggering skill eval:", skill.title, "rubric:", rubric.length, "trace:", !!evalTrace);
+      deps.evaluateAgentRun(evalTrace, skillPrompt, textForEval, {
+        skillName: skill.title,
+        rubricChecks: rubric.length > 0 ? rubric : null
+      }).catch(err => {
+        deps.debugLog("[Chief flow] Skill eval error (non-fatal):", err?.message || err);
+      });
+    } catch (evalErr) {
+      deps.debugLog("[Chief flow] Skill eval setup error (non-fatal):", evalErr?.message || evalErr);
+    }
+  } else {
+    deps.debugLog("[Chief flow] evaluateAgentRun not available in deps");
   }
 
   return responseText;

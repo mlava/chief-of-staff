@@ -24,6 +24,8 @@ https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 - **Dry-run mode** — simulate any mutating operation before it executes. Useful for reviewing what the agent would do before committing.
 - **Linked refs filtering** — automatically removes Chief of Staff namespace pages from the linked references section of every non-COS page you visit, keeping your graph tidy. Filters are merged with your existing manual filters (never overwritten) and applied once per page per session, so manual changes are respected. Enabled by default; toggle off in Advanced settings if needed.
 - **Correction capture** — opt-in background feature that detects when you edit COS outputs (briefings, pinned responses) and records the differences on `[[Chief of Staff/Corrections]]`. Corrections are cross-referenced with the Review Queue for feedback loop closure. Runs during idle time only — enable in Settings → Show Automatic Actions.
+- **Post-run evaluation** — opt-in LLM-as-judge that scores each agent interaction on task completion, factual grounding, and safety (1–5 rubric) plus five deterministic binary pass/fail checks (e.g. "were all claims tool-backed?", "did the response answer the question?"). Skills can define custom `Rubric:` criteria that are evaluated alongside the standard checks. Low scores, failed checks, or failed rubric items route to `[[Chief of Staff/Review Queue]]` with exactly what failed. Enable in Settings → Show Automatic Actions.
+- **Skill constraints** — skills can define structured behavioural boundaries via a `Constraints:` field with four quadrants: Must Do (non-negotiable requirements), Must Not Do (hard prohibitions), Prefer (soft guidance), and Escalate (stop and ask the user). Injected as binding system instructions for each skill run.
 - **Guided onboarding** — first-run onboarding walks you through API key setup, memory page bootstrapping, and chat panel introduction.
 
 ---
@@ -50,7 +52,7 @@ Here's what crosses the network when something does run:
 
 **Safety defaults** — Any action that modifies your graph (creating, editing, or deleting blocks) requires your explicit approval via a confirmation prompt. Read-only operations (searching, fetching) proceed automatically.
 
-**Automatic Actions** — Optional background features that run during idle time. Each is gated behind its own settings toggle (all off by default) under Settings → Show Automatic Actions. The first is **Correction Capture**: when enabled, it tracks blocks COS writes to your graph (briefings, pinned responses) and periodically scans for edits you've made. Differences are recorded on `[[Chief of Staff/Corrections]]` and cross-referenced with the Review Queue. This data never leaves your browser — it's a local diff between stored originals and current block text. Future automatic actions (e.g. graph statistics, stale task detection) will follow the same pattern: individually toggled, idle-time only, no LLM calls unless explicitly configured.
+**Automatic Actions** — Optional background features, each gated behind its own settings toggle (all off by default) under Settings → Show Automatic Actions. Current features: **Correction Capture** tracks blocks COS writes and detects your edits (local diff, no LLM); **Post-Run Evaluation** scores each interaction via an LLM judge with rubric scores + binary pass/fail checks (one cheap mini-tier call per evaluated run, ~$0.001-0.003). Future automatic actions (e.g. graph statistics, stale task detection) will follow the same pattern.
 
 For full technical details on security measures, injection defences, and credential handling, see [Security](#security).
 
@@ -544,6 +546,8 @@ Skills support several optional fields that control tool access and cost. All ar
 | **Tier:** | `mini`, `power`, or `ludicrous` | `power` | Which model tier the skill runs at. Mini is ~60-80% cheaper; ludicrous uses the most capable (and most expensive) models. |
 | **Budget:** | Dollar amount, e.g. `$0.05` | No cap | Hard cost cap per skill run. The agent loop halts when the accumulated cost exceeds this amount. |
 | **Iterations:** | Integer, e.g. `4` | Source-based calculation or 20 | Maximum number of LLM calls per skill run. Minimum 2 (one for tool calls, one for synthesis). |
+| **Constraints:** | Four quadrants: Must Do, Must Not Do, Prefer, Escalate | None | Structured behavioural boundaries injected as binding system instructions. |
+| **Rubric:** | Checkable quality criteria, one per line | Standard eval only | Skill-specific pass/fail checks scored by the eval-judge after each run. Results appear in the Review Queue. |
 
 **Tools vs Sources:** `Sources:` defines what the assistant *must* call (enforced by the gathering guard). `Tools:` defines what tools are *available* at all (enforced by filtering the tool set before the LLM sees it). Tools should be a superset of Sources — if a source tool is missing from the Tools list, it is auto-added with a warning.
 
@@ -555,6 +559,8 @@ Skills support several optional fields that control tool access and cost. All ar
 - Use **cross-references** to other Chief of Staff pages (e.g. "Sources: Chief of Staff/Decisions") to ground the assistant in your real data.
 - Skills that say "Write output to today's daily page" will produce structured output on your daily note page — useful for briefings and reviews you want to see in your daily workflow.
 - You can reference Composio tools by name in sources (e.g. "Google Calendar", "Gmail") and the assistant will call them during skill execution.
+
+For a comprehensive guide to writing reliable, cost-efficient skills — including patterns, anti-patterns, the constraint architecture, per-skill eval rubrics, and a tuning workflow — see [`public/skills-best-practices.md`](public/skills-best-practices.md).
 
 ---
 

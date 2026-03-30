@@ -519,36 +519,7 @@ export function buildSettingsConfig(extensionAPI) {
           type: "switch",
           value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.intentGateEnabled, false)
         }
-      }/*,
-      {
-        id: deps.SETTINGS_KEYS.evalEnabled,
-        name: "Post-Run Evaluation",
-        description: "Enable automatic quality scoring after each agent interaction using an LLM judge. Adds roughly $0.001–0.003 per evaluated run.",
-        action: {
-          type: "switch",
-          value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.evalEnabled, false)
-        }
-      },
-      {
-        id: deps.SETTINGS_KEYS.evalSampleRate,
-        name: "Evaluation Sample Rate",
-        description: "Fraction of runs to evaluate (0.0–1.0). Use 1.0 to evaluate every run, 0.1 for 10% random sampling. Only relevant when Post-Run Evaluation is enabled.",
-        action: {
-          type: "input",
-          value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.evalSampleRate, "1.0"),
-          placeholder: "1.0"
-        }
-      },
-      {
-        id: deps.SETTINGS_KEYS.evalReviewThreshold,
-        name: "Evaluation Review Threshold",
-        description: "Score at or below this value (1–5) triggers the review queue. Default 2 means only clearly problematic interactions are flagged.",
-        action: {
-          type: "input",
-          value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.evalReviewThreshold, "2"),
-          placeholder: "2"
-        }
-      }*/
+      }
     );
   }
 
@@ -582,6 +553,35 @@ export function buildSettingsConfig(extensionAPI) {
               }
             }, 100);
           }
+        }
+      },
+      {
+        id: deps.SETTINGS_KEYS.evalEnabled,
+        name: "Post-Run Evaluation",
+        description: "Automatic quality scoring after each agent interaction using an LLM judge. Produces 1-5 rubric scores plus binary pass/fail checks. Low scores or failed checks are routed to [[Chief of Staff/Review Queue]]. Adds roughly $0.001–0.003 per evaluated run.",
+        action: {
+          type: "switch",
+          value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.evalEnabled, false)
+        }
+      },
+      {
+        id: deps.SETTINGS_KEYS.evalSampleRate,
+        name: "Evaluation Sample Rate",
+        description: "Fraction of runs to evaluate (0.0–1.0). Use 1.0 to evaluate every run, 0.1 for 10% random sampling. Only relevant when Post-Run Evaluation is enabled.",
+        action: {
+          type: "input",
+          value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.evalSampleRate, "1.0"),
+          placeholder: "1.0"
+        }
+      },
+      {
+        id: deps.SETTINGS_KEYS.evalReviewThreshold,
+        name: "Evaluation Review Threshold",
+        description: "Score at or below this value (1–5) triggers the review queue. Default 2 means only clearly problematic interactions are flagged. Failed binary checks always trigger review regardless of this threshold.",
+        action: {
+          type: "input",
+          value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.evalReviewThreshold, "2"),
+          placeholder: "2"
         }
       }
     );
