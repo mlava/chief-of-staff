@@ -24,7 +24,7 @@ let hashChangeHandler = null;     // listener ref for teardown
 function discoverCosPages() {
   try {
     const results = window.roamAlphaAPI?.data?.q?.(
-      '[:find ?title :where [?p :node/title ?title] [(clojure.string/starts-with? ?title "Chief of Staff")]]'
+      '[:find ?title :where [?p :node/title ?title] (or [(= ?title "Chief of Staff")] [(clojure.string/starts-with? ?title "Chief of Staff/")])]'
     );
     return (results || []).map(r => r[0]);
   } catch (e) {

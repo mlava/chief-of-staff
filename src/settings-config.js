@@ -21,6 +21,7 @@ export function initSettingsConfig(injected) {
 const SETTINGS_SHOW_INTEGRATIONS = "show-integration-settings";
 const SETTINGS_SHOW_EXTENSION_TOOLS = "show-extension-tools";
 const SETTINGS_SHOW_ADVANCED = "show-advanced-settings";
+const SETTINGS_SHOW_AUTOMATIC_ACTIONS = "show-automatic-actions";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -548,6 +549,41 @@ export function buildSettingsConfig(extensionAPI) {
           placeholder: "2"
         }
       }*/
+    );
+  }
+
+  // --- Tier 4 toggle: Automatic Actions ----------------------------------------
+  const showAutoActions = ensureSettingBool(extensionAPI, SETTINGS_SHOW_AUTOMATIC_ACTIONS, false);
+  settings.push({
+    id: SETTINGS_SHOW_AUTOMATIC_ACTIONS,
+    name: "Show Automatic Actions",
+    description: "Background features that run when Roam is idle. Each feature has its own toggle below. All are off by default.",
+    action: {
+      type: "switch",
+      value: showAutoActions,
+      onChange: () => rebuildSettingsPanel(extensionAPI),
+    }
+  });
+
+  if (showAutoActions) {
+    settings.push(
+      {
+        id: deps.SETTINGS_KEYS.correctionCaptureEnabled,
+        name: "Correction Capture",
+        description: "Detect when you edit COS outputs on your daily page and record the differences on [[Chief of Staff/Corrections]]. Runs during idle time only — no impact on active use.",
+        action: {
+          type: "switch",
+          value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.correctionCaptureEnabled, false),
+          onChange: () => {
+            // Defer to let Roam persist the new value, then sync the idle task
+            setTimeout(() => {
+              if (typeof deps.onCorrectionCaptureToggle === "function") {
+                deps.onCorrectionCaptureToggle(deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.correctionCaptureEnabled, false));
+              }
+            }, 100);
+          }
+        }
+      }
     );
   }
 
