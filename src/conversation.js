@@ -598,6 +598,434 @@ function mergeCompactedSummaries(priorSummary, newSummary) {
   return merged;
 }
 
+// ── Structured Compaction v2 ──────────────────────────────────────────────────
+// Anchored iterative summarisation with explicit sections.
+
+const COMPACTION_LLM_MAX_OUTPUT_TOKENS = 500;
+
+const COMPACTION_SYSTEM_PROMPT = `You are a conversation compactor for a Roam Research AI assistant. Summarise ONLY the new conversation turns into structured sections. Total output must be under 3500 characters.
+
+## Session Intent
+One sentence: what is the user working toward?
+
+## Modifications
+Bulleted list of confirmed graph changes:
+- <action> [[Page Title]] (block <uid>)
+Actions: created, updated, deleted, moved. Only include changes confirmed by the Confirmed Artifacts below. Write "None." if no changes.
+
+## Decisions Made
+Bulleted list of user preferences, choices, or conclusions. Write "None." if none.
+
+## Next Steps
+Bulleted list of items discussed but not yet done. Write "None." if none.
+
+## Key References
+Entity identifiers to preserve: MCP keys (Name → Key), block UIDs ((uid)), page refs [[Page]]. Write "None." if none.
+
+Rules:
+- Do NOT repeat the existing summary.
+- Never fabricate modifications — only list what Confirmed Artifacts show.
+- Preserve UIDs and keys exactly as written.
+- Record only the final decision if the user changed their mind.`;
+
+// Action words that indicate a write operation, paired with proximity to a ref
+const WRITE_ACTION_PATTERN = /\b(created|wrote|added|saved|updated|modified|moved|deleted|removed)\b/i;
+
+/**
+ * Extract artifact modifications from conversation turns by scanning assistant
+ * text for write-action words near page/block references.
+ * Rule-based and synchronous — always succeeds.
+ */
+export function extractArtifactsFromTurns(turns) {
+  const modifications = [];
+  const seen = new Set();
+
+  for (const turn of (turns || [])) {
+    const text = turn?.assistant || "";
+    if (!text) continue;
+
+    // Split into sentences for proximity matching
+    const sentences = text.split(/(?<=[.!?\n])\s+/);
+    for (const sentence of sentences) {
+      const actionMatch = sentence.match(WRITE_ACTION_PATTERN);
+      if (!actionMatch) continue;
+      const action = actionMatch[1].toLowerCase();
+
+      // Normalise action verbs to canonical forms
+      const normAction = /^(wrote|added|saved)$/i.test(action) ? "created"
+        : /^(modified)$/i.test(action) ? "updated"
+          : /^(removed)$/i.test(action) ? "deleted"
+            : action;
+
+      // Extract page refs from this sentence
+      const pageMatches = sentence.match(/\[\[([^\]]+)\]\]/g) || [];
+      for (const pageRef of pageMatches) {
+        const page = pageRef.slice(2, -2);
+        const key = `${normAction}:${page}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          modifications.push({ action: normAction, target: `[[${page}]]`, uid: null });
+        }
+      }
+
+      // Extract block refs from this sentence
+      const blockMatches = sentence.match(/\(\(([a-zA-Z0-9_-]{9})\)\)/g) || [];
+      for (const blockRef of blockMatches) {
+        const uid = blockRef.slice(2, -2);
+        const key = `${normAction}:${uid}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          modifications.push({ action: normAction, target: `((${uid}))`, uid });
+        }
+      }
+
+      // Also detect "block <uid>" pattern (e.g. "created block abc123def")
+      const blockIdMatch = sentence.match(/block\s+([a-zA-Z0-9_-]{9})/);
+      if (blockIdMatch) {
+        const uid = blockIdMatch[1];
+        const key = `${normAction}:${uid}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          modifications.push({ action: normAction, target: `((${uid}))`, uid });
+        }
+      }
+    }
+  }
+
+  // Also collect the standard extracted data
+  const allTools = [];
+  const allPages = [];
+  const allKeyRefs = [];
+  for (const turn of (turns || [])) {
+    allTools.push(...extractToolMentions(turn?.assistant));
+    const refs = extractRoamRefs(turn?.assistant);
+    allPages.push(...refs.pages);
+    allKeyRefs.push(...extractKeyReferences(turn?.assistant));
+  }
+
+  return {
+    modifications,
+    tools: [...new Set(allTools)],
+    pages: [...new Set(allPages)],
+    keyRefs: [...new Set(allKeyRefs)]
+  };
+}
+
+// Section header patterns — lenient (##, ###, or bare heading)
+const SECTION_PATTERNS = {
+  sessionIntent: /^#{1,3}\s*Session Intent\s*$/im,
+  modifications: /^#{1,3}\s*Modifications\s*$/im,
+  decisions: /^#{1,3}\s*Decisions Made\s*$/im,
+  nextSteps: /^#{1,3}\s*Next Steps\s*$/im,
+  keyReferences: /^#{1,3}\s*Key References\s*$/im,
+};
+
+/**
+ * Parse structured compaction summary into sections.
+ * Handles both new structured format (## headers) and old flat format (Topics:/Tools:).
+ * Returns { sessionIntent, modifications, decisions, nextSteps, keyReferences, turnCount }.
+ */
+export function parseStructuredSummary(text) {
+  if (!text) return null;
+  const str = String(text);
+
+  // Extract turn count from header
+  const turnCountMatch = str.match(/\[Compacted context:\s*(\d+)\s*earlier turns\]/);
+  const turnCount = turnCountMatch ? parseInt(turnCountMatch[1], 10) : null;
+
+  // Detect format: new (has ## headers) or old (has Topics: line)
+  const hasStructuredHeaders = SECTION_PATTERNS.sessionIntent.test(str);
+
+  if (hasStructuredHeaders) {
+    // New structured format — extract each section
+    return {
+      turnCount,
+      sessionIntent: extractSection(str, SECTION_PATTERNS.sessionIntent),
+      modifications: extractSectionLines(str, SECTION_PATTERNS.modifications),
+      decisions: extractSectionLines(str, SECTION_PATTERNS.decisions),
+      nextSteps: extractSectionLines(str, SECTION_PATTERNS.nextSteps),
+      keyReferences: extractSection(str, SECTION_PATTERNS.keyReferences),
+    };
+  }
+
+  // Old flat format — map to new structure for backward compatibility
+  const topicMatch = str.match(/Topics:\s*([^\n]+)/);
+  const toolMatch = str.match(/Tools used:\s*([^\n]+)/);
+  const pageMatch = str.match(/Pages referenced:\s*([^\n]+)/);
+  const keyMatch = str.match(/Key references:\s*([^\n]+)/);
+
+  const topics = topicMatch ? topicMatch[1] : null;
+  const tools = toolMatch ? toolMatch[1] : "";
+  const pages = pageMatch ? pageMatch[1] : "";
+  const keys = keyMatch ? keyMatch[1] : "";
+
+  // Combine tools + pages + keys into key references to preserve them
+  const keyRefParts = [tools, pages, keys].filter(Boolean);
+  const combinedKeyRefs = keyRefParts.length > 0 ? keyRefParts.join("; ") : null;
+
+  return {
+    turnCount,
+    sessionIntent: topics,
+    modifications: null,
+    decisions: null,
+    nextSteps: null,
+    keyReferences: combinedKeyRefs,
+  };
+}
+
+/**
+ * Extract the text content under a section header, stopping at the next header.
+ */
+function extractSection(text, headerPattern) {
+  const lines = text.split("\n");
+  let capturing = false;
+  const content = [];
+
+  for (const line of lines) {
+    if (headerPattern.test(line)) {
+      capturing = true;
+      continue;
+    }
+    if (capturing) {
+      // Stop at next section header
+      if (/^#{1,3}\s+\S/.test(line)) break;
+      if (line.trim()) content.push(line.trim());
+    }
+  }
+
+  const result = content.join("\n").trim();
+  return (result && result.toLowerCase() !== "none." && result.toLowerCase() !== "none") ? result : null;
+}
+
+/**
+ * Extract bulleted lines under a section header.
+ */
+function extractSectionLines(text, headerPattern) {
+  const raw = extractSection(text, headerPattern);
+  if (!raw) return null;
+  const lines = raw.split("\n")
+    .map(l => l.replace(/^-\s*/, "").trim())
+    .filter(Boolean);
+  return lines.length > 0 ? lines : null;
+}
+
+/**
+ * Merge two structured summaries (prior + incoming), deduplicating per section.
+ */
+export function mergeStructuredSummaries(priorText, incomingText) {
+  const prior = parseStructuredSummary(priorText);
+  const incoming = parseStructuredSummary(incomingText);
+  if (!incoming) return priorText; // nothing to merge
+  if (!prior) return incomingText;
+
+  const totalTurns = (prior.turnCount || 0) + (incoming.turnCount || 0);
+
+  // Session intent: incoming replaces prior (most recent assessment)
+  const sessionIntent = incoming.sessionIntent || prior.sessionIntent;
+
+  // Modifications: concatenate, deduplicate by target
+  const mods = [...(prior.modifications || [])];
+  const modTargets = new Set(mods.map(m => m.toLowerCase()));
+  for (const m of (incoming.modifications || [])) {
+    if (!modTargets.has(m.toLowerCase())) {
+      mods.push(m);
+      modTargets.add(m.toLowerCase());
+    }
+  }
+
+  // Decisions: concatenate, deduplicate by normalised text
+  const decisions = [...(prior.decisions || [])];
+  const decNorm = new Set(decisions.map(d => d.toLowerCase().trim()));
+  for (const d of (incoming.decisions || [])) {
+    if (!decNorm.has(d.toLowerCase().trim())) {
+      decisions.push(d);
+      decNorm.add(d.toLowerCase().trim());
+    }
+  }
+
+  // Next steps: incoming replaces prior (stale next-steps are noise)
+  const nextSteps = incoming.nextSteps || prior.nextSteps;
+
+  // Key references: concatenate, deduplicate
+  const priorKeys = prior.keyReferences ? prior.keyReferences.split(/[;\n]/).map(k => k.trim()).filter(Boolean) : [];
+  const incomingKeys = incoming.keyReferences ? incoming.keyReferences.split(/[;\n]/).map(k => k.trim()).filter(Boolean) : [];
+  const allKeys = [...new Set([...priorKeys, ...incomingKeys])];
+  const keyReferences = allKeys.length > 0 ? allKeys.join("; ") : null;
+
+  return formatStructuredSummary({
+    sessionIntent,
+    modifications: mods.length > 0 ? mods : null,
+    decisions: decisions.length > 0 ? decisions : null,
+    nextSteps,
+    keyReferences,
+  }, totalTurns);
+}
+
+/**
+ * Format a parsed structured summary back into the Markdown section format.
+ */
+export function formatStructuredSummary(parsed, turnCount) {
+  const parts = [];
+  parts.push(`[Compacted context: ${turnCount || 0} earlier turns]`);
+
+  parts.push("");
+  parts.push("## Session Intent");
+  parts.push(parsed.sessionIntent || "General conversation.");
+
+  parts.push("");
+  parts.push("## Modifications");
+  if (parsed.modifications && parsed.modifications.length > 0) {
+    for (const m of parsed.modifications) parts.push(`- ${m}`);
+  } else {
+    parts.push("None.");
+  }
+
+  parts.push("");
+  parts.push("## Decisions Made");
+  if (parsed.decisions && parsed.decisions.length > 0) {
+    for (const d of parsed.decisions) parts.push(`- ${d}`);
+  } else {
+    parts.push("None.");
+  }
+
+  parts.push("");
+  parts.push("## Next Steps");
+  if (parsed.nextSteps && parsed.nextSteps.length > 0) {
+    for (const s of parsed.nextSteps) parts.push(`- ${s}`);
+  } else {
+    parts.push("None.");
+  }
+
+  parts.push("");
+  parts.push("## Key References");
+  parts.push(parsed.keyReferences || "None.");
+
+  return parts.join("\n");
+}
+
+/**
+ * Build the compaction prompt for the LLM call.
+ * Returns { system: string, userMessage: string }.
+ */
+export function buildCompactionPrompt(turns, existingSummary, artifacts) {
+  const userParts = [];
+
+  if (existingSummary) {
+    userParts.push(`Existing summary (context only — do NOT re-summarise):\n${existingSummary}`);
+  }
+
+  // Confirmed artifacts from rule-based extraction
+  userParts.push("Confirmed artifacts (from tool results):");
+  if (artifacts?.modifications?.length > 0) {
+    for (const m of artifacts.modifications) {
+      userParts.push(`- ${m.action} ${m.target}${m.uid ? ` (${m.uid})` : ""}`);
+    }
+  } else {
+    userParts.push("None.");
+  }
+
+  // Turns to summarise (truncated for token budget)
+  userParts.push(`\nNew turns to summarise (${turns.length} turns):`);
+  for (let i = 0; i < turns.length; i++) {
+    const t = turns[i];
+    const userText = String(t?.user || "").slice(0, 800);
+    const assistantText = String(t?.assistant || "")
+      .replace(/^\[Key reference:[^\]]*\]\s*/, "") // strip key ref prefix
+      .slice(0, 800);
+    userParts.push(`[Turn ${i + 1}] User: ${userText}\nAssistant: ${assistantText}`);
+  }
+
+  return {
+    system: COMPACTION_SYSTEM_PROMPT,
+    userMessage: userParts.join("\n")
+  };
+}
+
+/**
+ * LLM-based compaction with structured sections.
+ * Returns formatted summary string, or null on any failure (caller falls back to rule-based).
+ */
+async function compactTurnsWithLlm(turns, existingSummary) {
+  try {
+    const extensionAPI = deps.getExtensionAPIRef?.();
+    if (!extensionAPI || !deps.callLlm) return null;
+
+    const provider = deps.getLlmProvider?.(extensionAPI);
+    if (!provider || deps.isProviderCoolingDown?.(provider)) return null;
+    const apiKey = deps.getApiKeyForProvider?.(extensionAPI, provider);
+    if (!apiKey) return null;
+    const model = deps.getLlmModel?.(extensionAPI, provider);
+
+    // Phase 1: rule-based artifact extraction (always succeeds)
+    const artifacts = extractArtifactsFromTurns(turns);
+
+    // Phase 2: LLM call
+    const { system, userMessage } = buildCompactionPrompt(turns, existingSummary, artifacts);
+    deps.debugLog?.("[Chief flow] Compaction LLM call:", provider, model, turns.length, "turns");
+
+    const response = await deps.callLlm(
+      provider, apiKey, model, system,
+      [{ role: "user", content: userMessage }],
+      [], // no tools
+      { maxOutputTokens: COMPACTION_LLM_MAX_OUTPUT_TOKENS }
+    );
+
+    // Extract text from response (provider-agnostic)
+    let responseText = "";
+    if (deps.isOpenAICompatible?.(provider)) {
+      responseText = response?.choices?.[0]?.message?.content || "";
+    } else {
+      const textBlocks = (response?.content || []).filter(b => b.type === "text");
+      responseText = textBlocks.map(b => b.text).join("") || "";
+    }
+
+    // Track cost
+    const usage = response?.usage || {};
+    const inputTokens = usage.input_tokens || usage.prompt_tokens || 0;
+    const outputTokens = usage.output_tokens || usage.completion_tokens || 0;
+    if (deps.getModelCostRates && deps.accumulateSessionTokens && deps.recordCostEntry) {
+      const costRates = deps.getModelCostRates(model);
+      const cost = (inputTokens / 1_000_000 * costRates.inputPerM) + (outputTokens / 1_000_000 * costRates.outputPerM);
+      deps.recordCostEntry("compaction-" + model, inputTokens, outputTokens, cost);
+      deps.accumulateSessionTokens(inputTokens, outputTokens, cost);
+    }
+
+    // Parse structured response
+    const parsed = parseStructuredSummary(responseText);
+    if (!parsed || !parsed.sessionIntent) {
+      deps.debugLog?.("[Chief flow] Compaction LLM: failed to parse structured response, falling back");
+      return null;
+    }
+
+    // Ensure rule-based artifacts are included (LLM may have omitted some)
+    if (artifacts.modifications.length > 0) {
+      const existingMods = new Set((parsed.modifications || []).map(m => m.toLowerCase()));
+      const missingMods = artifacts.modifications
+        .map(m => `${m.action} ${m.target}${m.uid ? ` (${m.uid})` : ""}`)
+        .filter(m => !existingMods.has(m.toLowerCase()));
+      if (missingMods.length > 0) {
+        parsed.modifications = [...(parsed.modifications || []), ...missingMods];
+      }
+    }
+
+    // Ensure key references from rule-based extraction survive
+    if (artifacts.keyRefs.length > 0) {
+      const existingKeys = parsed.keyReferences || "";
+      const missing = artifacts.keyRefs.filter(k => !existingKeys.includes(k));
+      if (missing.length > 0) {
+        parsed.keyReferences = [existingKeys, ...missing].filter(Boolean).join("; ");
+      }
+    }
+
+    return formatStructuredSummary(parsed, turns.length);
+  } catch (err) {
+    deps.debugLog?.("[Chief flow] Compaction LLM failed (non-fatal):", err?.message);
+    return null;
+  }
+}
+
+let compactionInFlight = false;
+
 /**
  * Run compaction on the conversation turns array.
  * If there are more than COMPACTION_TRIGGER_TURNS, compact the oldest turns
@@ -605,56 +1033,76 @@ function mergeCompactedSummaries(priorSummary, newSummary) {
  *
  * Returns true if compaction occurred.
  */
-export function maybeCompactConversation() {
+export async function maybeCompactConversation() {
   if (conversationTurns.length < COMPACTION_TRIGGER_TURNS) return false;
+  if (compactionInFlight) return false;
+  compactionInFlight = true;
 
-  // How many turns to compact: everything except the most recent COMPACTION_KEEP_RECENT
-  const compactCount = conversationTurns.length - COMPACTION_KEEP_RECENT;
-  if (compactCount < 2) return false; // Not worth compacting fewer than 2 turns
+  try {
+    // How many turns to compact: everything except the most recent COMPACTION_KEEP_RECENT
+    const compactCount = conversationTurns.length - COMPACTION_KEEP_RECENT;
+    if (compactCount < 2) return false;
 
-  const turnsToCompact = conversationTurns.slice(0, compactCount);
-  const recentTurns = conversationTurns.slice(compactCount);
+    const turnsToCompact = conversationTurns.slice(0, compactCount);
+    const recentTurns = conversationTurns.slice(compactCount);
 
-  // Check if the first turn is already a compacted summary — merge into it
-  const existingCompacted = turnsToCompact[0]?.isCompacted
-    ? turnsToCompact.shift()
-    : null;
+    // Check if the first turn is already a compacted summary — merge into it
+    const existingCompacted = turnsToCompact[0]?.isCompacted
+      ? turnsToCompact.shift()
+      : null;
 
-  if (turnsToCompact.length === 0 && !existingCompacted) return false;
+    if (turnsToCompact.length === 0 && !existingCompacted) return false;
 
-  const compacted = compactTurns(turnsToCompact);
-  if (!compacted) return false;
+    const existingSummary = existingCompacted?.assistant || null;
 
-  // If we had a prior compacted turn, merge its context
-  if (existingCompacted) {
-    const priorSummary = existingCompacted.assistant || "";
-    const newSummary = compacted.assistant || "";
-    const priorTurnCount = (priorSummary.match(/\[Compacted context: (\d+) earlier turns\]/) || [])[1];
-    const priorCount = parseInt(priorTurnCount, 10) || 0;
-    const totalCount = priorCount + turnsToCompact.length;
-    compacted.assistant = newSummary.replace(
-      /\[Compacted context: \d+ earlier turns\]/,
-      `[Compacted context: ${totalCount} earlier turns]`
+    // Try LLM-based structured compaction first, fall back to rule-based
+    let summaryText = await compactTurnsWithLlm(turnsToCompact, existingSummary);
+    let usedLlm = !!summaryText;
+
+    if (!summaryText) {
+      // Fallback: rule-based compaction
+      const ruleBased = compactTurns(turnsToCompact);
+      if (!ruleBased) return false;
+      summaryText = ruleBased.assistant;
+
+      // Even in fallback, append rule-based artifact tracking as a Modifications section
+      const artifacts = extractArtifactsFromTurns(turnsToCompact);
+      if (artifacts.modifications.length > 0) {
+        const modLines = artifacts.modifications.map(m => `- ${m.action} ${m.target}${m.uid ? ` (${m.uid})` : ""}`);
+        summaryText += `\n\n## Modifications\n${modLines.join("\n")}`;
+      }
+    }
+
+    // Merge with existing compacted turn if present
+    if (existingCompacted) {
+      summaryText = mergeStructuredSummaries(existingSummary, summaryText);
+    }
+
+    const compacted = {
+      user: "[compacted]",
+      assistant: summaryText,
+      createdAt: existingCompacted?.createdAt || turnsToCompact[0]?.createdAt || Date.now(),
+      isCompacted: true
+    };
+
+    conversationTurns = [compacted, ...recentTurns];
+    deps.debugLog?.(
+      `[Chief flow] Compacted conversation (${usedLlm ? "LLM" : "rule-based"}):`,
+      compactCount, "turns -> 1 summary +",
+      recentTurns.length, "recent =",
+      conversationTurns.length, "total"
     );
-    compacted.assistant = mergeCompactedSummaries(priorSummary, compacted.assistant);
-    compacted.createdAt = existingCompacted.createdAt;
+    return true;
+  } finally {
+    compactionInFlight = false;
   }
-
-  conversationTurns = [compacted, ...recentTurns];
-  deps.debugLog?.(
-    "[Chief flow] Compacted conversation:",
-    compactCount, "turns -> 1 summary +",
-    recentTurns.length, "recent =",
-    conversationTurns.length, "total"
-  );
-  return true;
 }
 
 /**
  * Manual /compact command — force compaction regardless of turn count.
  * Returns a summary of what was compacted, or null if nothing to compact.
  */
-export function forceCompact() {
+export async function forceCompact() {
   if (conversationTurns.length < 2) return null;
 
   // Keep last 2 turns intact (minimum for continuity)
@@ -669,26 +1117,42 @@ export function forceCompact() {
     ? turnsToCompact.shift()
     : null;
 
-  const compacted = compactTurns(turnsToCompact.length > 0 ? turnsToCompact : []);
+  const existingSummary = existingCompacted?.assistant || null;
 
-  if (compacted && existingCompacted) {
-    const priorSummary = existingCompacted.assistant || "";
-    const priorTurnCount = (priorSummary.match(/\[Compacted context: (\d+) earlier turns\]/) || [])[1];
-    const priorCount = parseInt(priorTurnCount, 10) || 0;
-    const totalCount = priorCount + turnsToCompact.length;
-    compacted.assistant = compacted.assistant.replace(
-      /\[Compacted context: \d+ earlier turns\]/,
-      `[Compacted context: ${totalCount} earlier turns]`
-    );
-    compacted.assistant = mergeCompactedSummaries(priorSummary, compacted.assistant);
-    compacted.createdAt = existingCompacted.createdAt;
-  } else if (!compacted && existingCompacted) {
-    // Only the prior compacted turn exists, nothing new to add
+  // Try LLM-based compaction, fall back to rule-based
+  let summaryText = turnsToCompact.length > 0
+    ? await compactTurnsWithLlm(turnsToCompact, existingSummary)
+    : null;
+
+  if (!summaryText && turnsToCompact.length > 0) {
+    const ruleBased = compactTurns(turnsToCompact);
+    if (ruleBased) {
+      summaryText = ruleBased.assistant;
+      const artifacts = extractArtifactsFromTurns(turnsToCompact);
+      if (artifacts.modifications.length > 0) {
+        const modLines = artifacts.modifications.map(m => `- ${m.action} ${m.target}${m.uid ? ` (${m.uid})` : ""}`);
+        summaryText += `\n\n## Modifications\n${modLines.join("\n")}`;
+      }
+    }
+  }
+
+  if (!summaryText && existingCompacted) {
     conversationTurns = [existingCompacted, ...recentTurns];
     return null;
   }
+  if (!summaryText) return null;
 
-  if (!compacted) return null;
+  // Merge with existing compacted turn if present
+  if (existingCompacted) {
+    summaryText = mergeStructuredSummaries(existingSummary, summaryText);
+  }
+
+  const compacted = {
+    user: "[compacted]",
+    assistant: summaryText,
+    createdAt: existingCompacted?.createdAt || turnsToCompact[0]?.createdAt || Date.now(),
+    isCompacted: true
+  };
 
   conversationTurns = [compacted, ...recentTurns];
   deps.debugLog?.("[Chief flow] Force-compacted:", compactCount, "turns -> 1 summary");
@@ -737,7 +1201,11 @@ export function appendConversationTurn(userText, assistantText, extensionAPI) {
   // summary instead of hard-dropping them.  Falls back to hard-drop only if
   // compaction alone can't keep us under the limit.
   if (conversationTurns.length >= COMPACTION_TRIGGER_TURNS) {
-    maybeCompactConversation();
+    maybeCompactConversation().then(compacted => {
+      if (compacted) persistConversationContext(api);
+    }).catch(err => {
+      deps.debugLog?.("[Chief flow] Async compaction failed (non-fatal):", err?.message);
+    });
   }
   if (conversationTurns.length > deps.MAX_CONVERSATION_TURNS) {
     conversationTurns = conversationTurns.slice(conversationTurns.length - deps.MAX_CONVERSATION_TURNS);

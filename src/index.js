@@ -4990,6 +4990,17 @@ function onload({ extensionAPI }) {
     MAX_CONVERSATION_TURNS,
     MAX_AGENT_MESSAGES_CHAR_BUDGET,
     MIN_AGENT_MESSAGES_TO_KEEP,
+    // LLM deps for structured compaction v2
+    callLlm,
+    getLlmProvider,
+    getLlmModel,
+    getApiKeyForProvider,
+    isOpenAICompatible,
+    isProviderCoolingDown,
+    getModelCostRates,
+    accumulateSessionTokens,
+    recordCostEntry,
+    extractBalancedJsonObjects,
   });
   initSettingsConfig({
     getSettingString,

@@ -883,7 +883,7 @@ async function handleChatPanelSend() {
     chatPanelInput.value = "";
     removeEmptyStateHint();
     if (deps.forceCompact) {
-      const result = deps.forceCompact();
+      const result = await deps.forceCompact();
       if (result) {
         appendChatPanelMessage("assistant", `Compacted ${result.compactedCount} earlier turns into a summary. ${result.remainingTurns} turns remaining.\n\n${result.summary}`);
         if (deps.flushPersistConversationContext) deps.flushPersistConversationContext();
