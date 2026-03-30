@@ -406,15 +406,6 @@ export async function runAgentLoop(userMessage, options = {}) {
             deps.debugLog("[Chief flow] Daily cap now exceeded after this call — next iteration will halt", postCapCheck);
           }
         }
-        // Per-skill budget check (streaming path)
-        if (skillBudgetUsd != null && trace.cost >= skillBudgetUsd) {
-          deps.debugLog("[Chief flow] Skill budget exceeded (streaming)", { cost: trace.cost, budget: skillBudgetUsd });
-          trace.budgetExceeded = true;
-          trace.finishedAt = Date.now();
-          trace.resultTextPreview = "(budget exceeded)";
-          deps.updateChatPanelCostIndicator();
-          return { text: `Skill budget reached ($${trace.cost.toFixed(3)} of $${skillBudgetUsd.toFixed(3)} limit). Returning what I have so far.`, messages, mcpResultTexts };
-        }
         response = {
           choices: [{
             message: {
@@ -479,15 +470,6 @@ export async function runAgentLoop(userMessage, options = {}) {
             deps.debugLog("[Chief flow] Daily cap now exceeded after this call — next iteration will halt", postCapCheck);
           }
         }
-        // Per-skill budget check (non-streaming path)
-        if (skillBudgetUsd != null && trace.cost >= skillBudgetUsd) {
-          deps.debugLog("[Chief flow] Skill budget exceeded (non-streaming)", { cost: trace.cost, budget: skillBudgetUsd });
-          trace.budgetExceeded = true;
-          trace.finishedAt = Date.now();
-          trace.resultTextPreview = "(budget exceeded)";
-          deps.updateChatPanelCostIndicator();
-          return { text: `Skill budget reached ($${trace.cost.toFixed(3)} of $${skillBudgetUsd.toFixed(3)} limit). Returning what I have so far.`, messages, mcpResultTexts };
-        }
         toolCalls = extractToolCalls(provider, response);
       }
 
@@ -499,6 +481,20 @@ export async function runAgentLoop(userMessage, options = {}) {
           args: deps.safeJsonStringify(tc.arguments, 200)
         }))
       });
+
+      // Per-skill budget check — fires once, then allows one final synthesis iteration
+      if (skillBudgetUsd != null && trace.cost >= skillBudgetUsd && !trace.budgetExceeded) {
+        deps.debugLog("[Chief flow] Skill budget exceeded, allowing one final synthesis call", { cost: trace.cost, budget: skillBudgetUsd });
+        trace.budgetExceeded = true;
+        messages.push(formatAssistantMessage(provider, response));
+        messages.push({
+          role: "user",
+          content: "BUDGET REACHED — you have exceeded the skill's cost budget. Do NOT call any more tools. "
+            + "Synthesise a response from the data you have already gathered. "
+            + "If sections are incomplete, note what is missing and suggest the user re-run with a higher Budget: value."
+        });
+        continue;
+      }
 
       if (!toolCalls.length) {
         // Gathering completeness guard — check before allowing final response
