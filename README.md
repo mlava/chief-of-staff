@@ -23,6 +23,7 @@ https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 - **Three model tiers with automatic routing** — most requests use a fast, cheap model. Append `/power` or `/ludicrous` to your message to force a more capable tier, or let the extension auto-escalate based on request complexity. You can also force a specific provider with `/claude`, `/gemini`, `/openai`, `/mistral`, or `/groq`. See [How tiers work](#how-tiers-work) for details.
 - **Dry-run mode** — simulate any mutating operation before it executes. Useful for reviewing what the agent would do before committing.
 - **Linked refs filtering** — automatically removes Chief of Staff namespace pages from the linked references section of every non-COS page you visit, keeping your graph tidy. Filters are merged with your existing manual filters (never overwritten) and applied once per page per session, so manual changes are respected. Enabled by default; toggle off in Advanced settings if needed.
+- **Correction capture** — opt-in background feature that detects when you edit COS outputs (briefings, pinned responses) and records the differences on `[[Chief of Staff/Corrections]]`. Corrections are cross-referenced with the Review Queue for feedback loop closure. Runs during idle time only — enable in Settings → Show Automatic Actions.
 - **Guided onboarding** — first-run onboarding walks you through API key setup, memory page bootstrapping, and chat panel introduction.
 
 ---
@@ -49,7 +50,7 @@ Here's what crosses the network when something does run:
 
 **Safety defaults** — Any action that modifies your graph (creating, editing, or deleting blocks) requires your explicit approval via a confirmation prompt. Read-only operations (searching, fetching) proceed automatically.
 
-Future releases may introduce optional background features (e.g. graph statistics, stale task detection, link suggestions) that use idle-time processing to scan parts of your graph locally. These will always be gated behind individual settings toggles — off by default, clearly described, and never sending graph data to an LLM unless explicitly configured to do so.
+**Automatic Actions** — Optional background features that run during idle time. Each is gated behind its own settings toggle (all off by default) under Settings → Show Automatic Actions. The first is **Correction Capture**: when enabled, it tracks blocks COS writes to your graph (briefings, pinned responses) and periodically scans for edits you've made. Differences are recorded on `[[Chief of Staff/Corrections]]` and cross-referenced with the Review Queue. This data never leaves your browser — it's a local diff between stored originals and current block text. Future automatic actions (e.g. graph statistics, stale task detection) will follow the same pattern: individually toggled, idle-time only, no LLM calls unless explicitly configured.
 
 For full technical details on security measures, injection defences, and credential handling, see [Security](#security).
 

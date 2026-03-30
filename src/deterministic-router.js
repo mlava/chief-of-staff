@@ -703,7 +703,7 @@ async function runDeterministicSkillInvocation(intent, options = {}) {
   // Append tool scope notice so the LLM knows its constraints
   if (toolWhitelist) {
     const scopedNames = [...toolWhitelist].filter(n => !n.startsWith("cos_") && !/^(ROAM_|LOCAL_MCP_|REMOTE_MCP_|EXT_)(ROUTE|EXECUTE)$/.test(n));
-    systemPromptSuffix += `\n\nTOOL SCOPE: This skill has a restricted tool set. In addition to core Roam and COS tools, you have access to: ${scopedNames.join(", ")}. Do not attempt to call other tools — they are not available for this skill run.`;
+    systemPromptSuffix += `\n\nTOOL SCOPE: This skill has a restricted tool set. In addition to core Roam and COS tools, you have access to: ${scopedNames.join(", ")}. Do not attempt to call other tools — they are not available for this skill run. IMPORTANT: ROAM_EXECUTE is ONLY for Roam extended tools (discovered via ROAM_ROUTE). Do NOT pass LOCAL_MCP_EXECUTE, search_issues, or other non-Roam tool names to ROAM_EXECUTE — they will fail.`;
   }
 
   const systemPrompt = `${await buildDefaultSystemPrompt(skillPrompt)}

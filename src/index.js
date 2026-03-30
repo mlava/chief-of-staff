@@ -4,6 +4,7 @@ import {
   clearIntentCache, getCachedClassification
 } from "./intent-classifier.js";
 import { initCosLinkedRefsFilter, teardownCosLinkedRefsFilter } from "./cos-linked-refs-filter.js";
+import { initCorrectionCapture, trackCosWrite, readBackBlockTree, scanForCorrections, getTrackedWrites, trackDismissedSuggestion, DIFF_SCAN_INTERVAL_MS } from "./correction-capture.js";
 import iziToast from "izitoast";
 import { launchOnboarding, teardownOnboarding } from "./onboarding/onboarding.js";
 import { computeRoutingScore, recordTurnOutcome, sessionTrajectory } from "./tier-routing.js";
@@ -317,7 +318,8 @@ const SETTINGS_KEYS = {
   evalSampleRate: "eval-sample-rate",
   evalReviewThreshold: "eval-review-threshold",
   cosLinkedRefsFilter: "cos-linked-refs-filter",
-  intentGateEnabled: "intent-gate-enabled"
+  intentGateEnabled: "intent-gate-enabled",
+  correctionCaptureEnabled: "correction-capture-enabled"
 };
 const TOOLS_SCHEMA_VERSION = 3;
 const AUTH_POLL_INTERVAL_MS = 9000;
@@ -1912,8 +1914,22 @@ async function writeResponseToTodayDailyPage(userPrompt, responseText) {
   const assistantName = getAssistantDisplayName();
   const headerText = `**${assistantName}** — ${String(userPrompt || "").trim() || "Ask"}`;
   const parentUid = await createRoamBlock(pageUid, headerText, "last");
-  await createRoamBlock(parentUid, String(responseText || "").trim() || "No response generated.", "last");
-  return { pageUid, pageTitle, parentUid };
+  const responseBlockText = String(responseText || "").trim() || "No response generated.";
+  await createRoamBlock(parentUid, responseBlockText, "last");
+  const result = { pageUid, pageTitle, parentUid };
+
+  // Correction capture: track this write for later diff detection
+  try {
+    if (getSettingBool(extensionAPIRef, SETTINGS_KEYS.correctionCaptureEnabled, false)) {
+      const blocks = readBackBlockTree(parentUid);
+      if (blocks.length > 0) {
+        const trace = getLastAgentRunTrace();
+        trackCosWrite({ ...result, blocks, source: "chat-pin", promptPreview: trace?.promptPreview || "" });
+      }
+    }
+  } catch (_) { /* non-fatal */ }
+
+  return result;
 }
 
 /**
@@ -2016,7 +2032,20 @@ async function writeStructuredResponseToTodayDailyPage(heading, responseText) {
     await createRoamBlock(headerUid, String(responseText || "").trim(), "last");
   }
 
-  return { pageUid, pageTitle, parentUid: headerUid };
+  const result = { pageUid, pageTitle, parentUid: headerUid };
+
+  // Correction capture: track this structured write for later diff detection
+  try {
+    if (getSettingBool(extensionAPIRef, SETTINGS_KEYS.correctionCaptureEnabled, false)) {
+      const blocks = readBackBlockTree(headerUid);
+      if (blocks.length > 0) {
+        const trace2 = getLastAgentRunTrace();
+        trackCosWrite({ ...result, blocks, source: `skill:${heading}`, promptPreview: trace2?.promptPreview || "" });
+      }
+    }
+  } catch (_) { /* non-fatal */ }
+
+  return result;
 }
 
 function getMemoryPromptCacheSignature() {
@@ -3449,6 +3478,10 @@ function setChiefNamespaceGlobals() {
       register: (taskDef) => registerIdleTask(taskDef),
       unregister: (id) => unregisterIdleTask(id),
     },
+    corrections: {
+      tracked: () => getTrackedWrites(),
+      scan: () => scanForCorrections({ offset: 0, corrections: [] }, { timeRemaining: () => 5000 }),
+    },
   };
 }
 
@@ -3933,17 +3966,25 @@ async function askChiefOfStaff(userMessage, options = {}) {
           : [];
         if (interpretations.length >= 2) {
           const selected = await promptIntentClarification(interpretations);
-          if (!selected) { askChiefInFlight = false; return; }
+          if (!selected) {
+            trackDismissedSuggestion({ type: "dismissed", originalPrompt: prompt, classifiedIntent: classification?.intent });
+            askChiefInFlight = false; return;
+          }
           if (selected.selectedIndex === -1) {
             const clarified = await promptTextWithToast({
               title: "Clarify your request",
               placeholder: "What did you mean?",
               confirmLabel: "Submit"
             });
-            if (!clarified) { askChiefInFlight = false; return; }
+            if (!clarified) {
+              trackDismissedSuggestion({ type: "dismissed", originalPrompt: prompt, classifiedIntent: classification?.intent });
+              askChiefInFlight = false; return;
+            }
+            trackDismissedSuggestion({ type: "overridden", originalPrompt: prompt, classifiedIntent: classification?.intent, userOverride: clarified });
             prompt = clarified;
             recordUsageStat("intentUserOverrides");
           } else {
+            trackDismissedSuggestion({ type: "overridden", originalPrompt: prompt, classifiedIntent: classification?.intent, userOverride: selected.selectedText });
             prompt = selected.selectedText;
             recordUsageStat("intentUserOverrides");
           }
@@ -3957,10 +3998,15 @@ async function askChiefOfStaff(userMessage, options = {}) {
             placeholder: "What did you actually want?",
             confirmLabel: "Submit"
           });
-          if (!clarified) { askChiefInFlight = false; return; }
+          if (!clarified) {
+            trackDismissedSuggestion({ type: "rejected", originalPrompt: prompt, classifiedIntent: classification?.intent });
+            askChiefInFlight = false; return;
+          }
+          trackDismissedSuggestion({ type: "overridden", originalPrompt: prompt, classifiedIntent: classification?.intent, userOverride: clarified });
           prompt = clarified;
           recordUsageStat("intentUserOverrides");
         } else if (confirmed === null) {
+          trackDismissedSuggestion({ type: "dismissed", originalPrompt: prompt, classifiedIntent: classification?.intent });
           askChiefInFlight = false; return;
         }
       } else {
@@ -5027,6 +5073,22 @@ function onload({ extensionAPI }) {
       const normalized = normalizeRemoteMcpUrl(serverUrl);
       return getMcpOAuthStatus(normalized);
     },
+    onCorrectionCaptureToggle: (enabled) => {
+      if (enabled) {
+        registerIdleTask({
+          id: "correction-diff-scan",
+          priority: 70,
+          intervalMs: DIFF_SCAN_INTERVAL_MS,
+          init: () => ({ offset: 0, corrections: [] }),
+          processChunk: scanForCorrections,
+          onComplete: () => { debugLog("[Corrections] Idle scan cycle complete"); }
+        });
+        debugLog("[Corrections] Idle task registered (setting toggled on)");
+      } else {
+        unregisterIdleTask("correction-diff-scan");
+        debugLog("[Corrections] Idle task unregistered (setting toggled off)");
+      }
+    },
   });
   initLlmProviders({
     debugLog,
@@ -5483,6 +5545,29 @@ function onload({ extensionAPI }) {
   primeInboxStaticUIDs(); // no-op: inboxStaticUIDs is already set (instruction-only)
   setupExtensionBroadcastListeners();
   startCronScheduler();
+
+  // Correction capture: initialise and register idle task if enabled
+  initCorrectionCapture({
+    debugLog,
+    getExtensionAPIRef: () => extensionAPIRef,
+    getRoamAlphaApi: () => window.roamAlphaAPI,
+    getSettingBool,
+    ensurePageUidByTitle: (title) => ensurePageUidByTitle(title),
+    createRoamBlock: (parentUid, text, order) => createRoamBlock(parentUid, text, order),
+    formatRoamDate,
+    SETTINGS_KEYS,
+  });
+  if (getSettingBool(extensionAPIRef, SETTINGS_KEYS.correctionCaptureEnabled, false)) {
+    registerIdleTask({
+      id: "correction-diff-scan",
+      priority: 70,
+      intervalMs: DIFF_SCAN_INTERVAL_MS,
+      init: () => ({ offset: 0, corrections: [] }),
+      processChunk: scanForCorrections,
+      onComplete: () => { debugLog("[Corrections] Idle scan cycle complete"); }
+    });
+  }
+
   startIdleScheduler();
   scheduleRuntimeAibomRefresh(1200);
   // Restore chat panel if it was open before reload.
