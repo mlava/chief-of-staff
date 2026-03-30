@@ -592,6 +592,44 @@ function formatConstraintsPromptSection(constraints) {
   return sections.join("\n");
 }
 
+// ── Skill rubric parsing ──────────────────────────────────────────────────────
+
+/**
+ * Parse optional Rubric: section from skill content.
+ * Each child line is one checkable quality criterion.
+ * Returns string[] (empty if no Rubric: field).
+ */
+export function parseSkillRubric(skillContent) {
+  const lines = String(skillContent || "").split("\n");
+
+  let inRubric = false;
+  let rubricIndent = -1;
+  const criteria = [];
+
+  for (const line of lines) {
+    if (!inRubric) {
+      if (/^\s*-?\s*Rubric\s*(?:—|:)/i.test(line)) {
+        inRubric = true;
+        rubricIndent = (line.match(/^(\s*)/)?.[1] || "").length;
+        // Check for inline content
+        const inlineMatch = line.match(/Rubric\s*(?:—|:)\s*(.+)/i);
+        if (inlineMatch && inlineMatch[1].trim()) {
+          criteria.push(inlineMatch[1].trim());
+        }
+      }
+      continue;
+    }
+    const indent = (line.match(/^(\s*)/)?.[1] || "").length;
+    if (indent > rubricIndent && line.trim()) {
+      criteria.push(line.trim().replace(/^-\s*/, ""));
+    } else if (line.trim()) {
+      break;
+    }
+  }
+
+  return criteria;
+}
+
 /**
  * Resolve parsed tool names against the live tool registry and determine
  * which meta-tools (ROUTE/EXECUTE) need to be included for routed tools.
@@ -861,7 +899,7 @@ ${systemPromptSuffix}${mcpToolHintsSection}`;
     },
     onTextChunk
   });
-  const responseText = String(result?.text || "").trim().replace(/\[Key reference:[^\]]*\]\s*/g, "").trim() || "No response generated.";
+  let responseText = String(result?.text || "").trim().replace(/\[Key reference:[^\]]*\]\s*/g, "").trim() || "No response generated.";
 
   // Audit: declared vs actually-called tools + budget usage
   if (typeof deps.getLastAgentRunTrace === "function") {
@@ -878,6 +916,9 @@ ${systemPromptSuffix}${mcpToolHintsSection}`;
         `iterations=${trace?.iterations || 0}${parsedBudget.maxIterations ? "/" + parsedBudget.maxIterations : ""}`);
     }
   }
+
+  // Preserve the actual briefing content for eval before it gets overwritten
+  let evalResponseText = responseText;
 
   // If it's a daily-page-write skill, write the output to the DNP from code.
   if (isDailyPageWriteSkill) {
@@ -902,19 +943,39 @@ ${systemPromptSuffix}${mcpToolHintsSection}`;
       if (/^\s+([-*]|\d+[.)]) /.test(line)) return line.trimStart();
       return line;
     }).join("\n");
-
     if (cleanedText.length > 40) {
       try {
         const heading = `[[Chief of Staff Daily Briefing]]`;
         const writeResult = await deps.writeStructuredResponseToTodayDailyPage(heading, cleanedText);
         showInfoToastIfAllowed("Saved to Roam", `Added under ${writeResult.pageTitle}.`, suppressToasts);
-        return `Briefing written to today's daily page under ${heading}.`;
+        responseText = `Briefing written to today's daily page under ${heading}.`;
       } catch (error) {
         deps.debugLog("[Chief flow] Skill auto-write to DNP failed:", error?.message || error);
       }
     } else {
       deps.debugLog("[Chief flow] Skill response doesn't look like briefing content, skipping DNP write:", responseText.slice(0, 200));
     }
+  }
+
+  // Non-blocking skill eval (opt-in, non-fatal)
+  // Use evalResponseText (actual briefing content) rather than the confirmation message
+  const textForEval = evalResponseText || responseText;
+  if (typeof deps.evaluateAgentRun === "function") {
+    try {
+      const evalTrace = typeof deps.getLastAgentRunTrace === "function" ? deps.getLastAgentRunTrace() : null;
+      const rubric = parseSkillRubric(skill.content);
+      deps.debugLog("[Chief flow] Triggering skill eval:", skill.title, "rubric:", rubric.length, "trace:", !!evalTrace);
+      deps.evaluateAgentRun(evalTrace, skillPrompt, textForEval, {
+        skillName: skill.title,
+        rubricChecks: rubric.length > 0 ? rubric : null
+      }).catch(err => {
+        deps.debugLog("[Chief flow] Skill eval error (non-fatal):", err?.message || err);
+      });
+    } catch (evalErr) {
+      deps.debugLog("[Chief flow] Skill eval setup error (non-fatal):", evalErr?.message || evalErr);
+    }
+  } else {
+    deps.debugLog("[Chief flow] evaluateAgentRun not available in deps");
   }
 
   return responseText;

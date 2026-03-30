@@ -85,11 +85,12 @@ function selectJudgeProvider(runProvider) {
 
 // ── Eval Payload Building ─────────────────────────────────────────────────
 
-function buildEvalPayload(trace, userPrompt, responseText) {
+function buildEvalPayload(trace, userPrompt, responseText, options = {}) {
+  const responseCharLimit = options.responseCharLimit || EVAL_RESPONSE_CHAR_LIMIT;
   const fullPrompt = String(userPrompt || "");
   const fullResponse = String(responseText || "");
   const prompt = fullPrompt.slice(0, EVAL_PROMPT_CHAR_LIMIT);
-  const response = fullResponse.slice(0, EVAL_RESPONSE_CHAR_LIMIT);
+  const response = fullResponse.slice(0, responseCharLimit);
   const promptTruncated = fullPrompt.length > EVAL_PROMPT_CHAR_LIMIT;
   const responseTruncated = fullResponse.length > EVAL_RESPONSE_CHAR_LIMIT;
 
@@ -113,7 +114,11 @@ Response${responseTruncated ? " (preview, truncated for eval — full response w
 // ── Score Parsing ─────────────────────────────────────────────────────────
 
 function parseEvalScores(text) {
-  const str = String(text || "").trim();
+  // Strip markdown code fences (```json ... ``` or ``` ... ```)
+  let str = String(text || "").trim()
+    .replace(/^```(?:json)?\s*\n?/i, "")
+    .replace(/\n?```\s*$/, "")
+    .trim();
   let parsed = null;
 
   // Try direct JSON parse first
@@ -146,12 +151,24 @@ function parseEvalScores(text) {
         }))
     : [];
 
+  // Extract skill-specific rubric results (empty array if absent)
+  const rubric = Array.isArray(parsed.rubric)
+    ? parsed.rubric
+        .filter(r => r?.criterion && typeof r.pass === "boolean")
+        .map(r => ({
+          criterion: String(r.criterion).slice(0, 150),
+          pass: !!r.pass,
+          reason: r.reason ? String(r.reason).slice(0, 100) : null
+        }))
+    : [];
+
   return {
     task_completion: parsed.task_completion,
     factual_grounding: parsed.factual_grounding,
     safety: parsed.safety,
     concern: parsed.concern || "",
-    checks
+    checks,
+    rubric
   };
 }
 
@@ -189,8 +206,9 @@ function classifyGuardOutcomes(trace, scores) {
  * Writes eval scores to the "Chief of Staff/Eval Log" page.
  * Follows the same find-or-create + swallow-errors pattern as persistAuditLogEntry.
  */
-async function persistEvalLogEntry(trace, scores, evalCost) {
+async function persistEvalLogEntry(trace, scores, evalCost, options = {}) {
   try {
+    const { skillName = null } = options;
     const pageTitle = "Chief of Staff/Eval Log";
     const pageUid = await deps.ensurePageUidByTitle(pageTitle);
     if (!pageUid) return;
@@ -199,13 +217,21 @@ async function persistEvalLogEntry(trace, scores, evalCost) {
     const toolCount = (trace.toolCalls || []).length;
     const costStr = typeof evalCost === "number" ? `$${evalCost.toFixed(4)}` : "";
 
+    // Skill tag (e.g. "[Daily Briefing]")
+    const skillTag = skillName ? ` [${skillName}]` : "";
+
     // Binary check summary (e.g. "[4/5 checks pass]")
     const checkSummary = scores.checks?.length > 0
-      ? ` [${scores.checks.filter(c => c.pass).length}/${scores.checks.length} checks pass]`
+      ? ` [${scores.checks.filter(c => c.pass).length}/${scores.checks.length} checks]`
       : "";
 
-    const block = `[[${dateStr}]] **${trace.model || "unknown"}** `
-      + `TC:${scores.task_completion} FG:${scores.factual_grounding} S:${scores.safety}${checkSummary} `
+    // Rubric summary (e.g. "[3/5 rubric]")
+    const rubricSummary = scores.rubric?.length > 0
+      ? ` [${scores.rubric.filter(r => r.pass).length}/${scores.rubric.length} rubric]`
+      : "";
+
+    const block = `[[${dateStr}]] **${trace.model || "unknown"}**${skillTag} `
+      + `TC:${scores.task_completion} FG:${scores.factual_grounding} S:${scores.safety}${checkSummary}${rubricSummary} `
       + `(${toolCount} tools, ${trace.iterations || 0} iter${costStr ? ", " + costStr : ""})`;
 
     await deps.createRoamBlock(pageUid, block, "first");
@@ -218,8 +244,9 @@ async function persistEvalLogEntry(trace, scores, evalCost) {
  * Writes a low-scoring or concerning eval to the "Chief of Staff/Review Queue" page.
  * Children blocks hold prompt, concern, guards, status, and binary check results.
  */
-async function persistReviewQueueEntry(trace, scores, userPrompt) {
+async function persistReviewQueueEntry(trace, scores, userPrompt, options = {}) {
   try {
+    const { skillName = null } = options;
     const pageTitle = "Chief of Staff/Review Queue";
     const pageUid = await deps.ensurePageUidByTitle(pageTitle);
     if (!pageUid) return;
@@ -236,19 +263,19 @@ async function persistReviewQueueEntry(trace, scores, userPrompt) {
     const safeConcern = String(concern).slice(0, 200)
       .replace(/\[\[/g, "⟦").replace(/\]\]/g, "⟧");
 
-    const headerBlock = `[[${dateStr}]] TC:${scores.task_completion} FG:${scores.factual_grounding} S:${scores.safety}`
+    const skillTag = skillName ? ` **Skill: ${skillName}**` : "";
+    const headerBlock = `[[${dateStr}]]${skillTag} TC:${scores.task_completion} FG:${scores.factual_grounding} S:${scores.safety}`
       + ` | ${trace.model || "unknown"} | ${toolCount} tools, ${trace.iterations || 0} iter`;
 
     const headerUid = await deps.createRoamBlock(pageUid, headerBlock, "first");
     if (!headerUid) return;
 
-    // Add children: prompt, concern, guards, status
+    // Add children: prompt, concern, guards, checks, rubric, then status last
     await deps.createRoamBlock(headerUid, `Prompt: "${safePrompt}"`, "last");
     if (safeConcern) {
       await deps.createRoamBlock(headerUid, `Concern: "${safeConcern}"`, "last");
     }
     await deps.createRoamBlock(headerUid, `Guards: ${guardsList}`, "last");
-    await deps.createRoamBlock(headerUid, `Status: **pending**`, "last");
 
     // Binary check results
     if (scores.checks && scores.checks.length > 0) {
@@ -262,6 +289,22 @@ async function persistReviewQueueEntry(trace, scores, userPrompt) {
         await deps.createRoamBlock(headerUid, `Checks: all ${scores.checks.length} passed`, "last");
       }
     }
+
+    // Skill-specific rubric results
+    if (scores.rubric && scores.rubric.length > 0) {
+      const failedRubric = scores.rubric.filter(r => !r.pass);
+      if (failedRubric.length > 0) {
+        const failLines = failedRubric.map(r =>
+          `**FAIL** ${r.criterion}${r.reason ? ": " + r.reason : ""}`
+        );
+        await deps.createRoamBlock(headerUid, `Rubric: ${failLines.join("; ")}`, "last");
+      } else {
+        await deps.createRoamBlock(headerUid, `Rubric: all ${scores.rubric.length} passed`, "last");
+      }
+    }
+
+    // Status always last — so reviewers can see checks/rubric before deciding action
+    await deps.createRoamBlock(headerUid, `Status: **pending**`, "last");
   } catch (err) {
     deps.debugLog("[Eval] Review queue write failed (non-fatal):", err?.message || err);
   }
@@ -276,9 +319,13 @@ async function persistReviewQueueEntry(trace, scores, userPrompt) {
  * @param {object} trace - lastAgentRunTrace (includes guardsFired)
  * @param {string} userPrompt - Full user message
  * @param {string} responseText - Cleaned response text
+ * @param {object} [options] - Optional skill context
+ * @param {string} [options.skillName] - Skill name (if run was a skill invocation)
+ * @param {string[]} [options.rubricChecks] - Skill-specific quality criteria
  * @returns {Promise<{scores: object, concern: string, queued: boolean}|null>}
  */
-export async function evaluateAgentRun(trace, userPrompt, responseText) {
+export async function evaluateAgentRun(trace, userPrompt, responseText, options = {}) {
+  const { skillName = null, rubricChecks = null } = options;
   try {
     if (!trace || !trace.startedAt) return null;
 
@@ -302,10 +349,23 @@ export async function evaluateAgentRun(trace, userPrompt, responseText) {
     }
 
     // Build eval payload
-    const evalPayload = buildEvalPayload(trace, userPrompt, responseText);
+    // Skill evals with rubric need more response context to verify section-level criteria
+    const responseCharLimit = rubricChecks?.length > 0 ? 3000 : EVAL_RESPONSE_CHAR_LIMIT;
+    let evalPayload = buildEvalPayload(trace, userPrompt, responseText, { responseCharLimit });
+
+    // Append skill-specific rubric criteria to the payload (not the system prompt — keeps caching stable)
+    if (rubricChecks && rubricChecks.length > 0 && skillName) {
+      const rubricSection = `\n\nSkill-specific rubric for "${skillName}" — evaluate each criterion as pass/fail:\n`
+        + rubricChecks.map((c, i) => `${i + 1}. ${c}`).join("\n")
+        + `\n\nAdd to the JSON: "rubric": [{"criterion": "...", "pass": true/false, "reason": "...or null"}]`;
+      evalPayload += rubricSection;
+    }
 
     // Call LLM (no tools, short output)
-    deps.debugLog("[Eval] Running eval judge:", judge.provider, judge.model);
+    const maxTokens = rubricChecks?.length > 0
+      ? EVAL_MAX_OUTPUT_TOKENS + (rubricChecks.length * 40) // extra tokens for rubric results
+      : EVAL_MAX_OUTPUT_TOKENS;
+    deps.debugLog("[Eval] Running eval judge:", judge.provider, judge.model, skillName ? `(skill: ${skillName})` : "");
     const response = await deps.callLlm(
       judge.provider,
       judge.apiKey,
@@ -313,7 +373,7 @@ export async function evaluateAgentRun(trace, userPrompt, responseText) {
       EVAL_SYSTEM_PROMPT,
       [{ role: "user", content: evalPayload }],
       [], // no tools
-      { maxOutputTokens: EVAL_MAX_OUTPUT_TOKENS }
+      { maxOutputTokens: maxTokens }
     );
 
     // Extract text from response (provider-agnostic)
@@ -350,29 +410,33 @@ export async function evaluateAgentRun(trace, userPrompt, responseText) {
     classifyGuardOutcomes(trace, scores);
 
     // Persist eval log entry (all runs)
-    await persistEvalLogEntry(trace, scores, evalCost);
+    const evalOptions = { skillName };
+    await persistEvalLogEntry(trace, scores, evalCost, evalOptions);
 
-    // Check review queue threshold — rubric scores, concerns, guards, OR failed binary checks
+    // Check review queue threshold — rubric scores, concerns, guards, failed checks, OR failed rubric
     const thresholdStr = deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.evalReviewThreshold, "2");
     const threshold = parseInt(thresholdStr, 10) || 2;
     const hasFailedCheck = scores.checks?.some(c => !c.pass);
+    const hasFailedRubric = scores.rubric?.some(r => !r.pass);
     const needsReview = EVAL_DIMENSIONS.some(d => scores[d] <= threshold)
       || (scores.concern && scores.concern.length > 0)
       || (trace.guardsFired && trace.guardsFired.length > 0)
-      || hasFailedCheck;
+      || hasFailedCheck
+      || hasFailedRubric;
 
     let queued = false;
     if (needsReview) {
-      await persistReviewQueueEntry(trace, scores, userPrompt);
+      await persistReviewQueueEntry(trace, scores, userPrompt, evalOptions);
       queued = true;
       deps.debugLog("[Eval] Entry queued for review — scores:", scores,
-        "failed checks:", scores.checks?.filter(c => !c.pass).map(c => c.id) || []);
+        "failed checks:", scores.checks?.filter(c => !c.pass).map(c => c.id) || [],
+        "failed rubric:", scores.rubric?.filter(r => !r.pass).map(r => r.criterion) || []);
     }
 
     // Random audit sample: 5% of passing runs
     if (!queued && Math.random() < 0.05) {
       scores.concern = scores.concern || "[audit sample]";
-      await persistReviewQueueEntry(trace, scores, userPrompt);
+      await persistReviewQueueEntry(trace, scores, userPrompt, evalOptions);
       queued = true;
     }
 
