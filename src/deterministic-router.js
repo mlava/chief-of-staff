@@ -364,6 +364,218 @@ export function parseSkillSources(skillContent, knownToolNames = null) {
   return sources;
 }
 
+// ── Skill tool whitelist parsing ──────────────────────────────────────────────
+
+/**
+ * Parse the optional `Tools:` field from skill content.
+ * Returns an array of resolved LLM tool names, or empty array if no Tools: field.
+ * Authors use shorthand names (bt_search, list-events); these are resolved via
+ * SOURCE_TOOL_NAME_MAP and the live tool registry, same as parseSkillSources.
+ */
+export function parseSkillTools(skillContent, knownToolNames = null) {
+  const lines = String(skillContent || "").split("\n");
+
+  // Phase 1: find the "Tools" header and collect its child lines
+  let inTools = false;
+  let toolsIndent = -1;
+  const toolLines = [];
+
+  for (const line of lines) {
+    if (!inTools) {
+      if (/^\s*-?\s*Tools\s*(?:—|:)/i.test(line)) {
+        // Inline tools on the same line as the header (e.g. "Tools: bt_search, roam_get_page")
+        const inlineMatch = line.match(/Tools\s*(?:—|:)\s*(.+)/i);
+        if (inlineMatch && inlineMatch[1].trim()) {
+          toolLines.push(inlineMatch[1].trim());
+        }
+        inTools = true;
+        toolsIndent = (line.match(/^(\s*)/)?.[1] || "").length;
+      }
+      continue;
+    }
+    const indent = (line.match(/^(\s*)/)?.[1] || "").length;
+    if (indent > toolsIndent && line.trim()) {
+      toolLines.push(line.trim().replace(/^-\s*/, ""));
+    } else if (line.trim()) {
+      break;
+    }
+  }
+
+  if (!toolLines.length) return [];
+
+  // Phase 2: split by commas and resolve each tool name
+  const SOURCE_TOOL_NAME_MAP = deps.SOURCE_TOOL_NAME_MAP;
+  const resolved = [];
+  const seen = new Set();
+
+  for (const raw of toolLines) {
+    const tokens = raw.split(",").map(t => t.trim().replace(/`/g, "")).filter(Boolean);
+    for (const token of tokens) {
+      // Three-level matching (longest first), same as parseSkillSources
+      const threeWord = token.match(/^([\w]+[-_][\w]+[-_][\w]+)/)?.[1] || "";
+      const twoWord = token.match(/^([\w]+[-_][\w]+)/)?.[1] || "";
+      const oneWord = token.match(/^([\w]+)/)?.[1] || "";
+
+      const mapped = SOURCE_TOOL_NAME_MAP[threeWord]
+        || SOURCE_TOOL_NAME_MAP[twoWord]
+        || SOURCE_TOOL_NAME_MAP[oneWord];
+      if (mapped && !seen.has(mapped)) {
+        seen.add(mapped);
+        resolved.push(mapped);
+        continue;
+      }
+
+      // Fallback: check live tool registry
+      if (knownToolNames) {
+        const direct = knownToolNames.has(threeWord) ? threeWord
+          : knownToolNames.has(twoWord) ? twoWord
+            : knownToolNames.has(oneWord) ? oneWord
+              : null;
+        if (direct && !seen.has(direct)) {
+          seen.add(direct);
+          resolved.push(direct);
+          continue;
+        }
+      }
+
+      // Also accept the raw token verbatim (e.g. COMPOSIO slugs like WEATHERMAP_WEATHER)
+      if (!seen.has(token)) {
+        // Only accept if it looks like a tool name (alphanumeric + separators)
+        if (/^[\w][\w-]*$/.test(token)) {
+          seen.add(token);
+          resolved.push(token);
+        } else {
+          console.warn(`[Chief flow] Skill tool whitelist: unrecognised tool "${token}" — skipped.`);
+        }
+      }
+    }
+  }
+  return resolved;
+}
+
+/**
+ * Parse optional Budget:, Tier:, and Iterations: fields from skill content.
+ * All are single-value fields (not lists), so no indent-based parsing needed.
+ * Returns { budgetUsd: number|null, tier: string|null, maxIterations: number|null }.
+ */
+export function parseSkillBudget(skillContent) {
+  const text = String(skillContent || "");
+  const result = { budgetUsd: null, tier: null, maxIterations: null };
+
+  // Budget: $0.05 or Budget: 0.05
+  const budgetMatch = text.match(/^\s*-?\s*Budget\s*(?:—|:)\s*\$?([\d.]+)/im);
+  if (budgetMatch) {
+    const val = parseFloat(budgetMatch[1]);
+    if (!isNaN(val) && val > 0) result.budgetUsd = val;
+  }
+
+  // Tier: mini | power | ludicrous
+  const tierMatch = text.match(/^\s*-?\s*Tier\s*(?:—|:)\s*(mini|power|ludicrous)/im);
+  if (tierMatch) {
+    result.tier = tierMatch[1].toLowerCase();
+  }
+
+  // Iterations: 6 (minimum 2: one for tool calls, one for synthesis)
+  const iterMatch = text.match(/^\s*-?\s*Iterations\s*(?:—|:)\s*(\d+)/im);
+  if (iterMatch) {
+    const val = parseInt(iterMatch[1], 10);
+    if (!isNaN(val) && val >= 1) result.maxIterations = Math.max(2, Math.min(val, deps.MAX_AGENT_ITERATIONS_SKILL));
+  }
+
+  return result;
+}
+
+/**
+ * Resolve parsed tool names against the live tool registry and determine
+ * which meta-tools (ROUTE/EXECUTE) need to be included for routed tools.
+ * Returns { whitelist: Set<string>, warnings: string[] }.
+ */
+function resolveToolWhitelist(parsedToolNames, allToolSchemas, localMcpTools, remoteMcpTools) {
+  const whitelist = new Set();
+  const warnings = [];
+
+  // Build lookup maps
+  const schemaByName = new Map();
+  for (const t of allToolSchemas) schemaByName.set(t.name, t);
+
+  const localByName = new Map();
+  for (const t of localMcpTools) localByName.set(t.name, t);
+
+  const remoteByName = new Map();
+  for (const t of remoteMcpTools) remoteByName.set(t.name, t);
+
+  // Composio slug lookup
+  const composioRegistry = getToolkitSchemaRegistry();
+  const composioSlugs = new Set();
+  for (const tk of Object.values(composioRegistry.toolkits || {})) {
+    for (const slug of Object.keys(tk.tools || {})) composioSlugs.add(slug);
+  }
+
+  for (const name of parsedToolNames) {
+    const schema = schemaByName.get(name);
+
+    if (schema) {
+      whitelist.add(name);
+      // Check if this is a routed (non-direct) tool and include its meta-tools
+      if (schema._isRemote && !schema._isDirect) {
+        whitelist.add("REMOTE_MCP_ROUTE");
+        whitelist.add("REMOTE_MCP_EXECUTE");
+      } else if (schema._serverName && !schema._isDirect && !schema._isRemote) {
+        // Local MCP routed tool
+        whitelist.add("LOCAL_MCP_ROUTE");
+        whitelist.add("LOCAL_MCP_EXECUTE");
+      } else if (schema._extensionName && !schema._isDirect) {
+        whitelist.add("EXT_ROUTE");
+        whitelist.add("EXT_EXECUTE");
+      }
+      continue;
+    }
+
+    // Check local MCP tools (may not be in allToolSchemas if routed)
+    const localTool = localByName.get(name);
+    if (localTool) {
+      whitelist.add(name);
+      if (!localTool._isDirect) {
+        whitelist.add("LOCAL_MCP_ROUTE");
+        whitelist.add("LOCAL_MCP_EXECUTE");
+      }
+      continue;
+    }
+
+    // Check remote MCP tools
+    const remoteTool = remoteByName.get(name);
+    if (remoteTool) {
+      whitelist.add(name);
+      if (!remoteTool._isDirect) {
+        whitelist.add("REMOTE_MCP_ROUTE");
+        whitelist.add("REMOTE_MCP_EXECUTE");
+      }
+      continue;
+    }
+
+    // Check Composio slugs
+    if (composioSlugs.has(name)) {
+      whitelist.add(name);
+      whitelist.add("COMPOSIO_MULTI_EXECUTE_TOOL");
+      continue;
+    }
+
+    // Routed Roam tools (roam_batch_write, roam_find_todos, etc.) aren't in allToolSchemas
+    // directly — they're accessed via ROAM_ROUTE → ROAM_EXECUTE. Include the meta-tools.
+    if (name.startsWith("roam_")) {
+      whitelist.add(name);
+      whitelist.add("ROAM_ROUTE");
+      whitelist.add("ROAM_EXECUTE");
+      continue;
+    }
+
+    // Not found anywhere — graceful degradation
+    warnings.push(`tool "${name}" not currently available (MCP server down or tool not installed)`);
+  }
+
+  return { whitelist, warnings };
+}
+
 async function runDeterministicSkillInvocation(intent, options = {}) {
   const { suppressToasts = false, onToolCall = null, onTextChunk = null } = options;
   const skillName = String(intent?.skillName || "").trim();
@@ -409,6 +621,33 @@ async function runDeterministicSkillInvocation(intent, options = {}) {
     for (const slug of Object.keys(tk.tools || {})) knownToolNames.add(slug);
   }
   const expectedSources = parseSkillSources(skill.content, knownToolNames);
+
+  // Parse optional tool whitelist
+  const parsedToolNames = parseSkillTools(skill.content, knownToolNames);
+
+  // Validate: if both Sources and Tools specified, ensure all source tools are in the whitelist
+  if (parsedToolNames.length > 0 && expectedSources.length > 0) {
+    const toolSet = new Set(parsedToolNames);
+    for (const src of expectedSources) {
+      if (!toolSet.has(src.tool)) {
+        console.warn(`[Chief flow] Skill "${skill.title}": source tool "${src.tool}" not in Tools whitelist — auto-adding.`);
+        parsedToolNames.push(src.tool);
+      }
+    }
+  }
+
+  // Resolve whitelist against live tool registry
+  let toolWhitelist = null;
+  if (parsedToolNames.length > 0) {
+    const { whitelist, warnings } = resolveToolWhitelist(
+      parsedToolNames, toolSchemas, getLocalMcpTools(), getRemoteMcpTools()
+    );
+    for (const w of warnings) {
+      console.warn(`[Chief flow] Skill "${skill.title}" tool whitelist: ${w}`);
+    }
+    toolWhitelist = whitelist;
+    deps.debugLog(`[Chief flow] Tool whitelist for "${skill.title}": [${[...toolWhitelist].join(", ")}] (${warnings.length} warnings)`);
+  }
 
   // Pre-resolve MCP tool schemas: if a skill source references a namespaced MCP
   // tool (e.g. "sentry_mcp__search_issues"), inject its schema into the system
@@ -461,6 +700,12 @@ async function runDeterministicSkillInvocation(intent, options = {}) {
     }
   }
 
+  // Append tool scope notice so the LLM knows its constraints
+  if (toolWhitelist) {
+    const scopedNames = [...toolWhitelist].filter(n => !n.startsWith("cos_") && !/^(ROAM_|LOCAL_MCP_|REMOTE_MCP_|EXT_)(ROUTE|EXECUTE)$/.test(n));
+    systemPromptSuffix += `\n\nTOOL SCOPE: This skill has a restricted tool set. In addition to core Roam and COS tools, you have access to: ${scopedNames.join(", ")}. Do not attempt to call other tools — they are not available for this skill run.`;
+  }
+
   const systemPrompt = `${await buildDefaultSystemPrompt(skillPrompt)}
 
 ## Active Skill (Explicitly Requested)
@@ -472,16 +717,29 @@ ${systemPromptSuffix}${mcpToolHintsSection}`;
     deps.debugLog(`[Chief flow] Gathering guard active: ${expectedSources.length} expected sources for "${skill.title}"`);
   }
 
-  // Boost iteration cap for skills with many sources (need sources + skill fetch + time + synthesis + buffer)
-  const skillMaxIterations = gatheringGuard
+  // Parse optional per-skill budget constraints (Budget:, Tier:, Iterations:)
+  const parsedBudget = parseSkillBudget(skill.content);
+  const skillTier = parsedBudget.tier || "power";
+  const skillPowerMode = skillTier !== "mini";
+
+  // Iteration cap: explicit Iterations: field > source-based calculation > default
+  const sourceBasedIterations = gatheringGuard
     ? Math.min(expectedSources.length + 4, deps.MAX_AGENT_ITERATIONS_SKILL)
     : undefined;
+  const skillMaxIterations = parsedBudget.maxIterations || sourceBasedIterations;
+
+  if (parsedBudget.budgetUsd || parsedBudget.tier || parsedBudget.maxIterations) {
+    deps.debugLog(`[Chief flow] Skill "${skill.title}" budget: tier=${skillTier}, budget=${parsedBudget.budgetUsd ? "$" + parsedBudget.budgetUsd : "none"}, iterations=${skillMaxIterations || "default"}`);
+  }
 
   const result = await deps.runAgentLoopWithFailover(skillPrompt, {
     systemPrompt,
-    powerMode: true,
+    powerMode: skillPowerMode,
+    tier: skillTier,
     gatheringGuard,
+    toolWhitelist: toolWhitelist || undefined,
     ...(skillMaxIterations ? { maxIterations: skillMaxIterations } : {}),
+    ...(parsedBudget.budgetUsd ? { skillBudgetUsd: parsedBudget.budgetUsd } : {}),
     onToolCall: (name, args) => {
       showInfoToastIfAllowed("Using tool", name, suppressToasts);
       if (onToolCall) onToolCall(name, args);
@@ -489,6 +747,22 @@ ${systemPromptSuffix}${mcpToolHintsSection}`;
     onTextChunk
   });
   const responseText = String(result?.text || "").trim().replace(/\[Key reference:[^\]]*\]\s*/g, "").trim() || "No response generated.";
+
+  // Audit: declared vs actually-called tools + budget usage
+  if (typeof deps.getLastAgentRunTrace === "function") {
+    const trace = deps.getLastAgentRunTrace();
+    if (toolWhitelist) {
+      const calledNames = new Set((trace?.toolCalls || []).map(tc => tc.name).filter(Boolean));
+      const declaredNonCore = [...toolWhitelist].filter(n => !n.startsWith("cos_") && !/^(ROAM_|LOCAL_MCP_|REMOTE_MCP_|EXT_)(ROUTE|EXECUTE)$/.test(n));
+      const unusedDeclared = declaredNonCore.filter(n => !calledNames.has(n));
+      deps.debugLog(`[Chief flow] Skill "${skill.title}" tool audit: declared=${declaredNonCore.length}, called=${calledNames.size}, unused=[${unusedDeclared.join(", ")}]`);
+    }
+    if (parsedBudget.budgetUsd || parsedBudget.tier || parsedBudget.maxIterations) {
+      deps.debugLog(`[Chief flow] Skill "${skill.title}" budget audit: tier=${skillTier}, ` +
+        `cost=$${(trace?.cost || 0).toFixed(3)}${parsedBudget.budgetUsd ? "/$" + parsedBudget.budgetUsd.toFixed(3) : ""}, ` +
+        `iterations=${trace?.iterations || 0}${parsedBudget.maxIterations ? "/" + parsedBudget.maxIterations : ""}`);
+    }
+  }
 
   // If it's a daily-page-write skill, write the output to the DNP from code.
   if (isDailyPageWriteSkill) {

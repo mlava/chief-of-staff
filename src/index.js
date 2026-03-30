@@ -22,7 +22,7 @@ import {
   refreshChatPanelElementRefs, addSaveToDailyPageButton, addModelIndicator,
   getToastTheme
 } from "./chat-panel.js";
-import { initRoamNativeTools, resetRoamNativeToolsCache, getRoamNativeTools, buildRoamRouteTool, buildRoamExecuteTool } from "./roam-native-tools.js";
+import { initRoamNativeTools, resetRoamNativeToolsCache, getRoamNativeTools, buildRoamRouteTool, buildRoamExecuteTool, ROAM_CORE_TOOLS } from "./roam-native-tools.js";
 import { buildSupergatewayScript } from "./supergateway-script.js";
 import {
   initComposioMcp,
@@ -5346,6 +5346,7 @@ function onload({ extensionAPI }) {
     getSkillsPromptCache: () => skillsPromptCache,
     getMemoryPromptCache: () => memoryPromptCache,
     setLastAgentRunTrace: (t) => setLastAgentRunTrace(t),
+    getLastAgentRunTrace: () => getLastAgentRunTrace(),
     publishAskResponse, writeResponseToTodayDailyPage, writeStructuredResponseToTodayDailyPage,
     updateChiefMemory,
     findSkillEntryByName,
@@ -5400,6 +5401,7 @@ function onload({ extensionAPI }) {
     SETTINGS_KEYS,
     INBOX_READ_ONLY_TOOL_ALLOWLIST,
     WRITE_TOOL_NAMES,
+    ROAM_CORE_TOOLS,
   });
   initIdleScheduler({
     debugLog,

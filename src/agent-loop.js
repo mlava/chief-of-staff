@@ -145,7 +145,9 @@ export async function runAgentLoop(userMessage, options = {}) {
     tier = null,
     gatheringGuard: initialGatheringGuard = null,
     readOnlyTools = false,
-    carryoverWriteReplayGuard = null
+    carryoverWriteReplayGuard = null,
+    toolWhitelist = null,
+    skillBudgetUsd = null
   } = options;
   let maxIterations = initialMaxIterations;
   let gatheringGuard = initialGatheringGuard;
@@ -168,9 +170,17 @@ export async function runAgentLoop(userMessage, options = {}) {
   }
 
   const allTools = await deps.getAvailableToolSchemas();
-  const tools = readOnlyTools
-    ? allTools.filter(t => deps.INBOX_READ_ONLY_TOOL_ALLOWLIST.has(t.name) || t.isMutating === false)
-    : filterToolsByRelevance(allTools, userMessage);
+  let tools;
+  if (readOnlyTools) {
+    tools = allTools.filter(t => deps.INBOX_READ_ONLY_TOOL_ALLOWLIST.has(t.name) || t.isMutating === false);
+  } else if (toolWhitelist) {
+    // Per-skill tool whitelist: only include whitelisted tools + always-available core tools
+    tools = allTools.filter(t =>
+      toolWhitelist.has(t.name) || t.name.startsWith("cos_") || deps.ROAM_CORE_TOOLS.has(t.name)
+    );
+  } else {
+    tools = filterToolsByRelevance(allTools, userMessage);
+  }
 
   const readOnlyAddendum = readOnlyTools
     ? `\n\nIMPORTANT: You are running in read-only mode (triggered by an inbox item). You can search, read, and gather information, but you CANNOT create, update, move, or delete any blocks, send emails, or perform any mutating actions. Summarise your findings clearly. The human will review and act on your summary.`
@@ -396,6 +406,15 @@ export async function runAgentLoop(userMessage, options = {}) {
             deps.debugLog("[Chief flow] Daily cap now exceeded after this call — next iteration will halt", postCapCheck);
           }
         }
+        // Per-skill budget check (streaming path)
+        if (skillBudgetUsd != null && trace.cost >= skillBudgetUsd) {
+          deps.debugLog("[Chief flow] Skill budget exceeded (streaming)", { cost: trace.cost, budget: skillBudgetUsd });
+          trace.budgetExceeded = true;
+          trace.finishedAt = Date.now();
+          trace.resultTextPreview = "(budget exceeded)";
+          deps.updateChatPanelCostIndicator();
+          return { text: `Skill budget reached ($${trace.cost.toFixed(3)} of $${skillBudgetUsd.toFixed(3)} limit). Returning what I have so far.`, messages, mcpResultTexts };
+        }
         response = {
           choices: [{
             message: {
@@ -459,6 +478,15 @@ export async function runAgentLoop(userMessage, options = {}) {
           if (postCapCheck.exceeded) {
             deps.debugLog("[Chief flow] Daily cap now exceeded after this call — next iteration will halt", postCapCheck);
           }
+        }
+        // Per-skill budget check (non-streaming path)
+        if (skillBudgetUsd != null && trace.cost >= skillBudgetUsd) {
+          deps.debugLog("[Chief flow] Skill budget exceeded (non-streaming)", { cost: trace.cost, budget: skillBudgetUsd });
+          trace.budgetExceeded = true;
+          trace.finishedAt = Date.now();
+          trace.resultTextPreview = "(budget exceeded)";
+          deps.updateChatPanelCostIndicator();
+          return { text: `Skill budget reached ($${trace.cost.toFixed(3)} of $${skillBudgetUsd.toFixed(3)} limit). Returning what I have so far.`, messages, mcpResultTexts };
         }
         toolCalls = extractToolCalls(provider, response);
       }

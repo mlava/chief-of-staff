@@ -508,7 +508,10 @@ Each skill is a top-level block (the skill name) with child blocks (the instruct
 ```text
 - Daily Briefing
   - Objective: Summarise today's calendar, overdue tasks, and recent decisions.
-  - Sources: Google Calendar (today), Better Tasks (overdue + due today), Chief of Staff/Decisions.
+  - Sources: get_calendar_events, bt_search, search_email
+  - Tools: get_calendar_events, list_calendars, bt_search, bt_get_projects, search_email, WEATHERMAP_WEATHER, roam_batch_write
+  - Tier: mini
+  - Budget: $0.03
   - Output: A concise briefing with calendar, tasks, and decision sections.
   - Write output to today's daily page.
 ```
@@ -528,6 +531,22 @@ There are six skills installed during onboarding, however a series of other skil
 Skills are reloaded automatically when you edit the page (via a live pull watch). The prompt receives a compact skill index (all skill names + first-line summaries), while the full skill body is loaded only when you invoke a specific skill. You can invoke a skill by name: "run my Weekly Review" or "do a Daily Briefing".
 
 When a skill lists **Sources**, a gathering completeness guard ensures the assistant calls all required data tools before writing output. For example, if your Weekly Review lists "Better Tasks" as a source, the assistant must query Better Tasks before generating the review — it cannot skip the query and hallucinate task data.
+
+### Optional skill fields
+
+Skills support several optional fields that control tool access and cost. All are optional — if absent, current defaults apply.
+
+| Field | Format | Default | What it does |
+|-------|--------|---------|--------------|
+| **Sources:** | Comma-separated tool names or `[[Page]]` refs | None | Gathering completeness guard — forces the assistant to call these tools before writing output |
+| **Tools:** | Comma-separated tool names | Full tool set (~80-110 tools) | Restricts which tools are available for this skill run. Reduces token cost and tightens security. Core Roam and COS tools are always available regardless. |
+| **Tier:** | `mini`, `power`, or `ludicrous` | `power` | Which model tier the skill runs at. Mini is ~60-80% cheaper; ludicrous uses the most capable (and most expensive) models. |
+| **Budget:** | Dollar amount, e.g. `$0.05` | No cap | Hard cost cap per skill run. The agent loop halts when the accumulated cost exceeds this amount. |
+| **Iterations:** | Integer, e.g. `4` | Source-based calculation or 20 | Maximum number of LLM calls per skill run. Minimum 2 (one for tool calls, one for synthesis). |
+
+**Tools vs Sources:** `Sources:` defines what the assistant *must* call (enforced by the gathering guard). `Tools:` defines what tools are *available* at all (enforced by filtering the tool set before the LLM sees it). Tools should be a superset of Sources — if a source tool is missing from the Tools list, it is auto-added with a warning.
+
+**Tool names:** Use the same shorthand names in both fields — `bt_search`, `list-events`, `roam_get_page`, `WEATHERMAP_WEATHER`, etc. Names are resolved against the live tool registry. If a tool is behind a router (e.g. a local MCP tool), the routing meta-tools are included automatically.
 
 ### Tips
 
