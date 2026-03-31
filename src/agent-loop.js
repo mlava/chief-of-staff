@@ -1070,20 +1070,36 @@ export async function runAgentLoop(userMessage, options = {}) {
 export async function runAgentLoopWithFailover(userMessage, options = {}) {
   const extensionAPI = deps.getExtensionAPIRef();
   const baseTier = options.tier || (options.powerMode ? "power" : "mini");
+  const { excludeProviders = null, preferProvider = null } = options;
 
   // Use chain order to pick primary provider for all tiers.
   // This ensures auto-escalation (e.g. mini→power) stays on a working provider,
   // rather than falling back to user's default which may not have a valid key/proxy.
   let primaryProvider;
   if (!options.providerOverride) {
-    const chain = deps.FAILOVER_CHAINS[baseTier] || deps.FAILOVER_CHAINS.mini;
-    primaryProvider = chain.find(p => extensionAPI && !!getApiKeyForProvider(extensionAPI, p) && !isProviderCoolingDown(p))
-      || (extensionAPI ? getLlmProvider(extensionAPI) : deps.DEFAULT_LLM_PROVIDER);
+    let chain = deps.FAILOVER_CHAINS[baseTier] || deps.FAILOVER_CHAINS.mini;
+    // Per-skill provider exclusions (e.g. Models: -Gemini)
+    if (excludeProviders?.size > 0) {
+      chain = chain.filter(p => !excludeProviders.has(p));
+    }
+    // Per-skill provider preference (e.g. Models: +Mistral)
+    if (preferProvider) {
+      const preferred = chain.find(p => p === preferProvider && extensionAPI && !!getApiKeyForProvider(extensionAPI, p) && !isProviderCoolingDown(p));
+      if (preferred) primaryProvider = preferred;
+    }
+    if (!primaryProvider) {
+      primaryProvider = chain.find(p => extensionAPI && !!getApiKeyForProvider(extensionAPI, p) && !isProviderCoolingDown(p))
+        || (extensionAPI ? getLlmProvider(extensionAPI) : deps.DEFAULT_LLM_PROVIDER);
+    }
   } else {
     primaryProvider = options.providerOverride;
   }
-  const fallbacks = (options.disableFailover || !extensionAPI)
+  let fallbacks = (options.disableFailover || !extensionAPI)
     ? [] : getFailoverProviders(primaryProvider, extensionAPI, baseTier);
+  // Also filter fallbacks by exclusion list
+  if (excludeProviders?.size > 0) {
+    fallbacks = fallbacks.filter(p => !excludeProviders.has(p));
+  }
 
   // First attempt: primary provider
   let lastError;

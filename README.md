@@ -548,6 +548,7 @@ Skills support several optional fields that control tool access and cost. All ar
 | **Iterations:** | Integer, e.g. `4` | Source-based calculation or 20 | Maximum number of LLM calls per skill run. Minimum 2 (one for tool calls, one for synthesis). |
 | **Constraints:** | Four quadrants: Must Do, Must Not Do, Prefer, Escalate | None | Structured behavioural boundaries injected as binding system instructions. |
 | **Rubric:** | Checkable quality criteria, one per line | Standard eval only | Skill-specific pass/fail checks scored by the eval-judge after each run. Results appear in the Review Queue. |
+| **Models:** | `+Mistral`, `-Gemini`, or comma-separated | All providers | Per-skill provider preference. `+Provider` prefers it; `-Provider` excludes it. Useful when a provider struggles with a specific skill's tool patterns. |
 
 **Tools vs Sources:** `Sources:` defines what the assistant *must* call (enforced by the gathering guard). `Tools:` defines what tools are *available* at all (enforced by filtering the tool set before the LLM sees it). Tools should be a superset of Sources — if a source tool is missing from the Tools list, it is auto-added with a warning.
 
