@@ -630,6 +630,37 @@ export function parseSkillRubric(skillContent) {
   return criteria;
 }
 
+// ── Skill model preference parsing ────────────────────────────────────────────
+
+/**
+ * Parse optional Models: field from skill content.
+ * Supports include (+Provider) and exclude (-Provider) syntax.
+ * Returns { exclude: string[], prefer: string[] } with lowercase provider names.
+ */
+export function parseSkillModels(skillContent) {
+  const lines = String(skillContent || "").split("\n");
+  const exclude = [];
+  const prefer = [];
+
+  for (const line of lines) {
+    const match = line.match(/^\s*-?\s*Models\s*(?:—|:)\s*(.+)/i);
+    if (!match) continue;
+    const tokens = match[1].split(",").map(t => t.trim()).filter(Boolean);
+    for (const token of tokens) {
+      if (token.startsWith("-")) {
+        exclude.push(token.slice(1).trim().toLowerCase());
+      } else if (token.startsWith("+")) {
+        prefer.push(token.slice(1).trim().toLowerCase());
+      } else {
+        prefer.push(token.trim().toLowerCase());
+      }
+    }
+    break;
+  }
+
+  return { exclude, prefer };
+}
+
 /**
  * Resolve parsed tool names against the live tool registry and determine
  * which meta-tools (ROUTE/EXECUTE) need to be included for routed tools.
@@ -885,6 +916,12 @@ ${systemPromptSuffix}${mcpToolHintsSection}`;
     deps.debugLog(`[Chief flow] Skill "${skill.title}" budget: tier=${skillTier}, budget=${parsedBudget.budgetUsd ? "$" + parsedBudget.budgetUsd : "none"}, iterations=${skillMaxIterations || "default"}`);
   }
 
+  // Parse optional per-skill model preferences (Models: +Mistral, -Gemini)
+  const skillModels = parseSkillModels(skill.content);
+  if (skillModels.exclude.length > 0 || skillModels.prefer.length > 0) {
+    deps.debugLog(`[Chief flow] Skill "${skill.title}" models: exclude=[${skillModels.exclude}], prefer=[${skillModels.prefer}]`);
+  }
+
   const result = await deps.runAgentLoopWithFailover(skillPrompt, {
     systemPrompt,
     powerMode: skillPowerMode,
@@ -893,6 +930,8 @@ ${systemPromptSuffix}${mcpToolHintsSection}`;
     toolWhitelist: toolWhitelist || undefined,
     ...(skillMaxIterations ? { maxIterations: skillMaxIterations } : {}),
     ...(parsedBudget.budgetUsd ? { skillBudgetUsd: parsedBudget.budgetUsd } : {}),
+    ...(skillModels.exclude.length > 0 ? { excludeProviders: new Set(skillModels.exclude) } : {}),
+    ...(skillModels.prefer.length > 0 ? { preferProvider: skillModels.prefer[0] } : {}),
     onToolCall: (name, args) => {
       showInfoToastIfAllowed("Using tool", name, suppressToasts);
       if (onToolCall) onToolCall(name, args);

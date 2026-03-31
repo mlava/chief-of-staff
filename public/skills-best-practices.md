@@ -348,7 +348,8 @@ When building or refining a skill, follow this progression:
 | **Iterations:** | Max LLM calls | Source-based or 20 | Safety net — prevents infinite loops |
 | **Constraints:** | Behavioural boundaries | None | Indirect — reduces rework by preventing unwanted actions |
 | **Rubric:** | Skill-specific eval criteria | Standard checks only | Indirect — surfaces failures faster, reduces correction cycles |
+| **Models:** | Provider include/exclude | All providers | Direct — avoids wasted iterations on providers that struggle with specific tool patterns |
 
 ---
 
-*This document reflects Chief of Staff features as of March 2026. All fields described here — Sources, Tools, Tier, Budget, Iterations, Constraints, and Rubric — are implemented and available in the current release.*
+*This document reflects Chief of Staff features as of March 2026. All fields described here — Sources, Tools, Tier, Budget, Iterations, Constraints, Rubric, and Models — are implemented and available in the current release.*
