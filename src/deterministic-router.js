@@ -2155,12 +2155,13 @@ export async function tryRunDeterministicAskIntent(prompt, context = {}) {
       const budgetStr = deps.getSettingString(extensionAPIRef, deps.SETTINGS_KEYS?.skillAutoresearchBudget, "2.00");
       const budget = parseFloat(budgetStr) || 2.0;
       // Fire-and-forget — do NOT await
-      deps.runSkillOptimization(entry.title, { budgetUsd: budget }).catch(err => {
+      deps.runSkillOptimization(entry.title, { budgetUsd: budget, withTools: !!optimizeIntent.withTools }).catch(err => {
         deps.debugLog("[Autoresearch] Background optimization failed:", err?.message);
         deps.showErrorToast("Optimisation Failed", err?.message || "Unknown error");
       });
+      const modeLabel = optimizeIntent.withTools ? "tool-calling" : "LLM-only";
       return deps.publishAskResponse(prompt,
-        `Starting optimisation of "${entry.title}" (budget: $${budget.toFixed(2)}). `
+        `Starting optimisation of "${entry.title}" (${modeLabel}, budget: $${budget.toFixed(2)}). `
         + `This runs in the background \u2014 I'll show a toast when it's done with results to accept or revert.`,
         assistantName, suppressToasts);
     }

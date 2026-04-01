@@ -329,7 +329,8 @@ const SETTINGS_KEYS = {
   intentGateEnabled: "intent-gate-enabled",
   correctionCaptureEnabled: "correction-capture-enabled",
   skillAutoresearchEnabled: "skill-autoresearch-enabled",
-  skillAutoresearchBudget: "skill-autoresearch-budget"
+  skillAutoresearchBudget: "skill-autoresearch-budget",
+  skillAutoresearchToolCalling: "skill-autoresearch-tool-calling"
 };
 const TOOLS_SCHEMA_VERSION = 3;
 const AUTH_POLL_INTERVAL_MS = 9000;
@@ -5209,6 +5210,7 @@ function onload({ extensionAPI }) {
     runAgentLoop: runAgentLoopWithFailover,
     buildSystemPrompt: buildDefaultSystemPrompt,
     getLastAgentRunTrace: () => getLastAgentRunTrace(),
+    getToolCallingSetting: () => getSettingBool(extensionAPIRef, SETTINGS_KEYS.skillAutoresearchToolCalling, false),
   });
   initIntentClassifier({
     callLlm,

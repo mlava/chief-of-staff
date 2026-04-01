@@ -89,37 +89,47 @@ function makeSetupResponse(testCaseCount = 3, criteriaCount = 2) {
 describe("parseSkillOptimizeIntent", () => {
   it("matches 'optimize my Daily Briefing skill'", () => {
     const result = parseSkillOptimizeIntent("optimize my Daily Briefing skill");
-    assert.deepStrictEqual(result, { skillName: "Daily Briefing" });
+    assert.deepStrictEqual(result, { skillName: "Daily Briefing", withTools: false });
   });
 
   it("matches 'improve the research skill'", () => {
     const result = parseSkillOptimizeIntent("improve the research skill");
-    assert.deepStrictEqual(result, { skillName: "research" });
+    assert.deepStrictEqual(result, { skillName: "research", withTools: false });
   });
 
   it("matches British spelling 'optimise my writing skill'", () => {
     const result = parseSkillOptimizeIntent("optimise my writing skill");
-    assert.deepStrictEqual(result, { skillName: "writing" });
+    assert.deepStrictEqual(result, { skillName: "writing", withTools: false });
   });
 
   it("matches 'refine Daily Briefing'", () => {
     const result = parseSkillOptimizeIntent("refine Daily Briefing");
-    assert.deepStrictEqual(result, { skillName: "Daily Briefing" });
+    assert.deepStrictEqual(result, { skillName: "Daily Briefing", withTools: false });
   });
 
   it("matches 'enhance my Task Triage skill'", () => {
     const result = parseSkillOptimizeIntent("enhance my Task Triage skill");
-    assert.deepStrictEqual(result, { skillName: "Task Triage" });
+    assert.deepStrictEqual(result, { skillName: "Task Triage", withTools: false });
   });
 
   it("matches with 'please' prefix", () => {
     const result = parseSkillOptimizeIntent("please optimize my briefing skill");
-    assert.deepStrictEqual(result, { skillName: "briefing" });
+    assert.deepStrictEqual(result, { skillName: "briefing", withTools: false });
   });
 
   it("matches quoted skill name", () => {
     const result = parseSkillOptimizeIntent('optimize "Daily Briefing"');
-    assert.deepStrictEqual(result, { skillName: "Daily Briefing" });
+    assert.deepStrictEqual(result, { skillName: "Daily Briefing", withTools: false });
+  });
+
+  it("parses --with-tools flag", () => {
+    const result = parseSkillOptimizeIntent("optimise Daily Briefing --with-tools");
+    assert.deepStrictEqual(result, { skillName: "Daily Briefing", withTools: true });
+  });
+
+  it("parses --with-tools flag with quoted name", () => {
+    const result = parseSkillOptimizeIntent('optimize "Daily Briefing" --with-tools');
+    assert.deepStrictEqual(result, { skillName: "Daily Briefing", withTools: true });
   });
 
   it("returns null for 'run skill Daily Briefing'", () => {
@@ -344,10 +354,11 @@ describe("selectMutationAspect", () => {
     assert.strictEqual(result, "add_or_fix_sources");
   });
 
-  it("Phase A: returns add_or_fix_sources when Sources have parameter hints", () => {
+  it("Phase A: skips add_or_fix_sources when Sources exist (even with parameter hints — locked)", () => {
     const skill = "- Sources:\n  - roam_search (query: test)\n- Rubric:\n  - check\n- Constraints:\n  - Must Do: x";
     const result = selectMutationAspect("failures", new Set(["add_rubric", "add_constraints"]), skill);
-    assert.strictEqual(result, "add_or_fix_sources");
+    // Sources is locked during mutation — skip to Phase B
+    assert.strictEqual(result, "approach_specificity");
   });
 
   it("Phase A: skips add_or_fix_sources when Sources are clean", () => {

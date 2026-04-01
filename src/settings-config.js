@@ -602,6 +602,15 @@ export function buildSettingsConfig(extensionAPI) {
           value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.skillAutoresearchBudget, "2.00"),
           placeholder: "2.00"
         }
+      },
+      {
+        id: deps.SETTINGS_KEYS.skillAutoresearchToolCalling,
+        name: "Enable Tool-Calling Simulation",
+        description: "When enabled, optimisation runs real tool calls (calendar, email, etc.) during simulation. Slower and less reliable but tests tool usage. Default: off (LLM-only simulation). Can also be enabled per-run with --with-tools flag.",
+        action: {
+          type: "switch",
+          value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.skillAutoresearchToolCalling, false)
+        }
       }
     );
   }

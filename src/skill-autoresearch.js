@@ -61,8 +61,12 @@ export function isOptimizationRunning() { return activeOptimization !== null; }
  * @returns {{ skillName: string }|null}
  */
 export function parseSkillOptimizeIntent(userMessage) {
-  const text = String(userMessage || "").trim();
+  let text = String(userMessage || "").trim();
   if (!text) return null;
+
+  // Extract --with-tools flag before matching (so it doesn't interfere with quotes/name)
+  const withTools = /\s+--with-tools\s*$/i.test(text);
+  if (withTools) text = text.replace(/\s+--with-tools\s*$/i, "").trim();
 
   // "optimize my Daily Briefing skill", "improve the research skill", "optimise skill: X"
   const m = text.match(
@@ -71,7 +75,7 @@ export function parseSkillOptimizeIntent(userMessage) {
   if (!m) return null;
   const name = m[1].replace(/\s+skill$/i, "").trim();
   if (!name) return null;
-  return { skillName: name };
+  return { skillName: name, withTools };
 }
 
 // ── LLM Response Text Extraction ─────────────────────────────────────────
@@ -471,13 +475,32 @@ export async function validateAndFixToolReferences(content) {
 
   for (const ref of refs) {
     if (knownNames.has(ref)) continue; // valid
+    // Accept cross-source deduped names (e.g. sentry__search_issues) — the deduped
+    // name may not exist yet if there's no collision, but the intent is valid
+    if (ref.indexOf("__") > 0) continue;
 
-    // Invalid tool name — strip from Sources:/Tools: lines
+    // Invalid tool name — strip from Sources:/Tools: sections ONLY (not Approach/Output text).
+    // The global regex was previously stripping tool names from Approach prose too,
+    // causing damage like "For sentry__search_issues use args:" → "For  use args:".
     const escapedRef = ref.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    fixedContent = fixedContent.replace(
-      new RegExp(`(?:,\\s*)?\\b${escapedRef}\\b(?:\\s*,)?`, "g"),
-      ""
-    );
+    const lines = fixedContent.split("\n");
+    let inSection = false;
+    let sectionIndent = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (/^\s*-?\s*(?:Sources|Tools)\s*(?:—|:)/i.test(lines[i])) {
+        inSection = true;
+        sectionIndent = (lines[i].match(/^(\s*)/)?.[1] || "").length;
+        // Also strip from inline header (e.g. "Tools: a, invalid_tool, b")
+        lines[i] = lines[i].replace(new RegExp(`(?:,\\s*)?\\b${escapedRef}\\b(?:\\s*,)?`, "g"), "");
+        continue;
+      }
+      if (inSection) {
+        const indent = (lines[i].match(/^(\s*)/)?.[1] || "").length;
+        if (indent <= sectionIndent && lines[i].trim()) { inSection = false; continue; }
+        lines[i] = lines[i].replace(new RegExp(`(?:,\\s*)?\\b${escapedRef}\\b(?:\\s*,)?`, "g"), "");
+      }
+    }
+    fixedContent = lines.join("\n");
     stripped.push(ref);
   }
 
@@ -556,7 +579,9 @@ export function selectMutationAspect(failingSummary, triedAspects, skillContent,
       if (aspect === "add_rubric" && sections.rubric) continue;
       if (aspect === "add_constraints" && sections.constraints) continue;
       if (aspect === "add_or_fix_sources") {
-        if (sections.sources && !hasSourcesWithParameterHints(skillContent)) continue;
+        // Skip entirely if Sources already exists — it's locked during mutation
+        // to protect hand-curated tool configuration
+        if (sections.sources) continue;
       }
       return aspect;
     }
@@ -593,7 +618,57 @@ CRITICAL RULES:
 - Preserve the existing structure (indented list items with "- " prefixes).
 - Prefer adding a constraint, rubric criterion, or instruction line over rewriting existing ones.`;
 
+/**
+ * Extract a named section (Sources, Tools, Models) from skill content.
+ * Returns { start, end, text } or null if not found.
+ */
+function extractSection(content, sectionName) {
+  const lines = content.split("\n");
+  const headerRe = new RegExp(`^\\s*-?\\s*${sectionName}\\s*(?:—|:)`, "i");
+  let start = -1, headerIndent = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (start < 0) {
+      if (headerRe.test(lines[i])) {
+        start = i;
+        headerIndent = (lines[i].match(/^(\s*)/)?.[1] || "").length;
+      }
+      continue;
+    }
+    // End of section: same or lower indent with non-empty content
+    const indent = (lines[i].match(/^(\s*)/)?.[1] || "").length;
+    if (indent <= headerIndent && lines[i].trim()) {
+      return { start, end: i, text: lines.slice(start, i).join("\n") };
+    }
+  }
+  if (start >= 0) return { start, end: lines.length, text: lines.slice(start).join("\n") };
+  return null;
+}
+
+/**
+ * Replace a section in content, or append if not found.
+ */
+function replaceSection(content, sectionName, originalSectionText) {
+  const current = extractSection(content, sectionName);
+  if (current) {
+    const lines = content.split("\n");
+    const before = lines.slice(0, current.start);
+    const after = lines.slice(current.end);
+    return [...before, ...originalSectionText.split("\n"), ...after].join("\n");
+  }
+  // Section was removed — append it back
+  return content + "\n" + originalSectionText;
+}
+
 async function mutateSkill(state, currentContent, failingSummary, aspect, passRate, miniModel) {
+  // Detect locked sections: Sources and Tools contain hand-curated tool config
+  // (tool names, parameters, server routing) that mutations should not rewrite.
+  const lockedSections = {};
+  for (const name of ["Sources", "Tools", "Models"]) {
+    const section = extractSection(currentContent, name);
+    if (section) lockedSections[name] = section.text;
+  }
+  const hasLockedSections = Object.keys(lockedSections).length > 0;
+
   let aspectGuidance;
 
   switch (aspect) {
@@ -621,6 +696,10 @@ Derive the constraints from the skill's existing Approach instructions and the f
       aspectGuidance = `Mutate ONLY the "${aspect.replace(/_/g, " ")}" aspect. Make one targeted change to improve the failing criteria.`;
   }
 
+  const lockedWarning = hasLockedSections
+    ? `\n\nLOCKED SECTIONS — do NOT modify, rewrite, or remove these sections: ${Object.keys(lockedSections).join(", ")}. They contain hand-curated tool configuration. Copy them exactly as-is into your output.`
+    : "";
+
   const userPrompt = `The current version scores ${Math.round(passRate * 100)}% on evaluation criteria.
 
 Failing test cases and criteria:
@@ -629,7 +708,7 @@ ${failingSummary}
 Current skill body:
 ${currentContent}
 
-${aspectGuidance}
+${aspectGuidance}${lockedWarning}
 Return the complete updated skill body.`;
 
   const response = await deps.callLlmMini(
@@ -642,6 +721,18 @@ Return the complete updated skill body.`;
   let text = extractResponseText(response, deps.getMiniProvider());
   // Strip code fences if present
   text = text.replace(/^```(?:markdown|md)?\s*\n?/i, "").replace(/\n?```\s*$/, "").trim();
+
+  // Post-validate: restore locked sections if the mutation changed them
+  if (hasLockedSections) {
+    for (const [name, originalText] of Object.entries(lockedSections)) {
+      const mutated = extractSection(text, name);
+      if (!mutated || mutated.text !== originalText) {
+        text = replaceSection(text, name, originalText);
+        deps.debugLog(`[Autoresearch] Restored locked section: ${name}`);
+      }
+    }
+  }
+
   return text;
 }
 
@@ -743,6 +834,7 @@ async function persistDebriefResults(state) {
  * @param {string} skillName - Name of the skill to optimize
  * @param {object} [options]
  * @param {number} [options.budgetUsd] - Max spend (defaults to settings or OPTIMIZATION_DEFAULTS)
+ * @param {boolean} [options.withTools] - Opt-in to tool-calling simulation (default: false, uses LLM-only)
  * @returns {Promise<{improved: boolean, baselineRate: number, finalRate: number, cost: number, reason: string}>}
  */
 export async function runSkillOptimization(skillName, options = {}) {
@@ -798,11 +890,18 @@ export async function runSkillOptimization(skillName, options = {}) {
       throw new Error(`Skill "${skillName}" has no content to optimize.`);
     }
 
-    // ── Detect tool-calling mode ────────────────────────────────────
-    const { sections } = detectMissingSections(state.originalContent);
-    state.useToolCalling = sections.sources || sections.tools;
+    // ── Tool-calling mode: opt-in only ─────────────────────────────
+    // LLM-only simulation is the default — it's fast, reliable, and tests
+    // structure/reasoning/format which improves any skill. Tool-calling
+    // simulation is slow and flaky for skills with many external tools.
+    // Opt-in via: --with-tools flag, or settings toggle.
+    const toolCallingSetting = typeof deps.getToolCallingSetting === "function"
+      ? deps.getToolCallingSetting()
+      : false;
+    state.useToolCalling = !!(options.withTools || toolCallingSetting);
     if (state.useToolCalling) {
-      deps.debugLog("[Autoresearch] Tool-calling mode enabled (skill has Sources/Tools)");
+      deps.debugLog("[Autoresearch] Tool-calling mode enabled",
+        options.withTools ? "(--with-tools flag)" : "(settings toggle)");
     }
 
     // ── Phase 1a: Generate test cases + criteria (with one retry) ───
@@ -884,6 +983,14 @@ export async function runSkillOptimization(skillName, options = {}) {
     // Seed wall criteria with unprovable ones so they're excluded from mutation prompts
     for (const id of excludedCriteria) wallCriteria.add(id);
 
+    // Locked sections from original skill — restored after each mutation + validation
+    // to prevent tool reference stripping from damaging hand-curated Sources/Tools
+    const originalLockedSections = {};
+    for (const name of ["Sources", "Tools", "Models"]) {
+      const section = extractSection(state.originalContent, name);
+      if (section) originalLockedSections[name] = section.text;
+    }
+
     while (true) {
       const stopCheck = shouldStop(state, budgetUsd);
       if (stopCheck.stop) {
@@ -917,7 +1024,15 @@ export async function runSkillOptimization(skillName, options = {}) {
         deps.debugLog("[Autoresearch] Stripped invalid tool references:",
           validation.stripped.join(", "));
       }
-      const validatedContent = validation.content;
+      // Restore locked sections after validation — prevents validateAndFixToolReferences
+      // from stripping tool names (e.g. sentry__search_issues) from hand-curated Sources
+      let validatedContent = validation.content;
+      for (const [name, originalText] of Object.entries(originalLockedSections)) {
+        const current = extractSection(validatedContent, name);
+        if (!current || current.text !== originalText) {
+          validatedContent = replaceSection(validatedContent, name, originalText);
+        }
+      }
 
       // Simulate mutated version
       const iterationStart = Date.now();
