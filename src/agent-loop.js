@@ -124,6 +124,48 @@ export function cleanupAgentLoop() {
   lastAgentRunTrace = null;
 }
 
+// ── Tool result cache helpers ────────────────────────────────────────────────
+
+const NON_CACHEABLE_TOOLS = new Set([
+  "LOCAL_MCP_ROUTE", "REMOTE_MCP_ROUTE", "EXT_ROUTE", "ROAM_ROUTE",
+]);
+
+/**
+ * Deterministic JSON.stringify with sorted keys — ensures identical objects
+ * produce identical strings regardless of property insertion order.
+ */
+function stableStringify(obj) {
+  if (obj === null || obj === undefined) return String(obj);
+  if (typeof obj !== "object") return JSON.stringify(obj);
+  if (Array.isArray(obj)) return `[${obj.map(stableStringify).join(",")}]`;
+  const keys = Object.keys(obj).sort();
+  return `{${keys.map(k => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(",")}}`;
+}
+
+/**
+ * Builds a stable cache key for tool result caching (autoresearch optimization).
+ * Returns null for non-cacheable tools (ROUTE/discovery) or un-serializable args.
+ * Strips Composio session fields which are ephemeral connection tokens.
+ * Uses sorted-key serialization so {a:1,b:2} and {b:2,a:1} produce the same key.
+ */
+export function buildToolCacheKey(toolName, args) {
+  if (NON_CACHEABLE_TOOLS.has(toolName)) return null;
+  let keyArgs = args;
+  if (args && typeof args === "object") {
+    const { session_id, session, ...rest } = args;
+    if (toolName === "COMPOSIO_MULTI_EXECUTE_TOOL" && Array.isArray(rest.tools)) {
+      rest.tools = rest.tools.map(t => {
+        if (!t?.arguments) return t;
+        const { session_id: _s1, session: _s2, ...tRest } = t.arguments;
+        return { ...t, arguments: tRest };
+      });
+    }
+    keyArgs = rest;
+  }
+  try { return `${toolName}::${stableStringify(keyArgs)}`; }
+  catch { return null; }
+}
+
 // ── Core agent loop ─────────────────────────────────────────────────────────
 
 /**
@@ -148,7 +190,8 @@ export async function runAgentLoop(userMessage, options = {}) {
     skipApproval = false,
     carryoverWriteReplayGuard = null,
     toolWhitelist = null,
-    skillBudgetUsd = null
+    skillBudgetUsd = null,
+    toolResultCache = null
   } = options;
   let maxIterations = initialMaxIterations;
   let gatheringGuard = initialGatheringGuard;
@@ -846,34 +889,57 @@ export async function runAgentLoop(userMessage, options = {}) {
         let result;
         let errorMessage = "";
         const toolArgs = withComposioSessionArgs(toolCall.name, toolCall.arguments, composioSessionId);
-        try {
-          result = await executeToolCall(toolCall.name, toolArgs, { readOnly: readOnlyTools, skipApproval });
-          const discoveredSessionId = extractComposioSessionIdFromToolResult(result);
-          if (discoveredSessionId) composioSessionId = discoveredSessionId;
-        } catch (error) {
-          errorMessage = error?.message || "Tool call failed";
-          const isComposioTool = String(toolCall.name || "").toUpperCase().startsWith("COMPOSIO_");
-          const isValidationError = /validation|invalid/i.test(errorMessage);
-          if (isComposioTool && isValidationError && composioSessionId) {
-            try {
-              const retryArgs = withComposioSessionArgs(toolCall.name, toolArgs, composioSessionId);
-              result = await executeToolCall(toolCall.name, retryArgs, { readOnly: readOnlyTools, skipApproval });
-              errorMessage = "";
-              const discoveredSessionId = extractComposioSessionIdFromToolResult(result);
-              if (discoveredSessionId) composioSessionId = discoveredSessionId;
-            } catch (retryError) {
-              errorMessage = retryError?.message || errorMessage;
-              result = { error: errorMessage };
+
+        // ── Tool result cache (autoresearch optimization) ──────────────
+        let cacheKey = null;
+        let cacheHit = false;
+        if (toolResultCache) {
+          cacheKey = buildToolCacheKey(toolCall.name, toolArgs);
+          if (cacheKey) {
+            const cached = toolResultCache.get(cacheKey);
+            if (cached !== undefined) {
+              result = cached;
+              cacheHit = true;
             }
-          } else {
-            result = { error: errorMessage };
           }
         }
+
+        if (!cacheHit) {
+          try {
+            result = await executeToolCall(toolCall.name, toolArgs, { readOnly: readOnlyTools, skipApproval });
+            const discoveredSessionId = extractComposioSessionIdFromToolResult(result);
+            if (discoveredSessionId) composioSessionId = discoveredSessionId;
+          } catch (error) {
+            errorMessage = error?.message || "Tool call failed";
+            const isComposioTool = String(toolCall.name || "").toUpperCase().startsWith("COMPOSIO_");
+            const isValidationError = /validation|invalid/i.test(errorMessage);
+            if (isComposioTool && isValidationError && composioSessionId) {
+              try {
+                const retryArgs = withComposioSessionArgs(toolCall.name, toolArgs, composioSessionId);
+                result = await executeToolCall(toolCall.name, retryArgs, { readOnly: readOnlyTools, skipApproval });
+                errorMessage = "";
+                const discoveredSessionId = extractComposioSessionIdFromToolResult(result);
+                if (discoveredSessionId) composioSessionId = discoveredSessionId;
+              } catch (retryError) {
+                errorMessage = retryError?.message || errorMessage;
+                result = { error: errorMessage };
+              }
+            } else {
+              result = { error: errorMessage };
+            }
+          }
+          // Store successful results in cache. Skip errors — they may be transient
+          // (timeouts, rate limits, connection issues) and the next attempt might succeed.
+          if (toolResultCache && cacheKey && !errorMessage && !result?.error) {
+            toolResultCache.set(cacheKey, result);
+          }
+        }
+
         const durationMs = Date.now() - startedAt;
         iterToolExecutionCount++;
         toolCallCounts.set(rateLimitKey, (toolCallCounts.get(rateLimitKey) || 0) + 1);
-        recordUsageStat("toolCall", toolCall.name);
-        deps.debugLog("[Chief flow] tool result:", {
+        if (!cacheHit) recordUsageStat("toolCall", toolCall.name);
+        deps.debugLog(cacheHit ? "[Chief flow] tool cache HIT:" : "[Chief flow] tool result:", {
           tool: toolCall.name,
           durationMs,
           error: errorMessage || null,

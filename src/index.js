@@ -330,7 +330,8 @@ const SETTINGS_KEYS = {
   correctionCaptureEnabled: "correction-capture-enabled",
   skillAutoresearchEnabled: "skill-autoresearch-enabled",
   skillAutoresearchBudget: "skill-autoresearch-budget",
-  skillAutoresearchToolCalling: "skill-autoresearch-tool-calling"
+  skillAutoresearchToolCalling: "skill-autoresearch-tool-calling",
+  skillAutoresearchToolCache: "skill-autoresearch-tool-cache"
 };
 const TOOLS_SCHEMA_VERSION = 3;
 const AUTH_POLL_INTERVAL_MS = 9000;
@@ -5084,6 +5085,13 @@ function onload({ extensionAPI }) {
   invalidateMemoryPromptCache();
   invalidateSkillsPromptCache();
   extensionAPIRef = extensionAPI;
+
+  // Seed default-ON settings that haven't been set yet (Roam Depot renders
+  // undefined as OFF for switches, even when the code default is true)
+  if (extensionAPI?.settings?.get?.(SETTINGS_KEYS.skillAutoresearchToolCache) === undefined) {
+    extensionAPI.settings.set(SETTINGS_KEYS.skillAutoresearchToolCache, true);
+  }
+
   initUsageTracking({
     SETTINGS_KEYS,
     getExtensionAPIRef: () => extensionAPIRef,
@@ -5211,6 +5219,7 @@ function onload({ extensionAPI }) {
     buildSystemPrompt: buildDefaultSystemPrompt,
     getLastAgentRunTrace: () => getLastAgentRunTrace(),
     getToolCallingSetting: () => getSettingBool(extensionAPIRef, SETTINGS_KEYS.skillAutoresearchToolCalling, false),
+    getToolCacheSetting: () => getSettingBool(extensionAPIRef, SETTINGS_KEYS.skillAutoresearchToolCache, true),
   });
   initIntentClassifier({
     callLlm,

@@ -17,8 +17,9 @@ export const OPTIMIZATION_DEFAULTS = {
   consecutiveDiscardLimit: 3,
   regressionThreshold: 2,
   wallCriterionFailLimit: 2,
-  toolCallingTimeoutMs: 120_000,
-  iterationWallClockMs: 180_000,
+  baselineToolCallingTimeoutMs: 120_000,  // generous for baseline (populates cache)
+  toolCallingTimeoutMs: 90_000,           // shorter for mutations (cache-assisted)
+  iterationWallClockMs: 150_000,
   defaultBudgetUsd: 2.0,
   simulationMaxTokens: 1200,
   mutationMaxTokens: 2000,
@@ -209,7 +210,7 @@ async function simulateSkillRun(state, skillContent, testPrompt, miniModel) {
  * Read tools execute normally; write tools are excluded from the whitelist.
  * Returns the final response text.
  */
-async function simulateSkillRunWithTools(state, skillContent, testPrompt) {
+async function simulateSkillRunWithTools(state, skillContent, testPrompt, toolResultCache, timeoutMs) {
   const knownNames = typeof deps.getKnownToolNames === "function"
     ? await deps.getKnownToolNames()
     : new Set();
@@ -244,7 +245,7 @@ async function simulateSkillRunWithTools(state, skillContent, testPrompt) {
   // Run agent loop in isolation, with wall-clock timeout.
   // NOT readOnlyTools — we want real tool execution for read tools.
   // Write tools are excluded via the whitelist above.
-  const timeoutMs = OPTIMIZATION_DEFAULTS.toolCallingTimeoutMs;
+  const effectiveTimeout = timeoutMs || OPTIMIZATION_DEFAULTS.toolCallingTimeoutMs;
   let result;
   try {
     result = await Promise.race([
@@ -257,14 +258,15 @@ async function simulateSkillRunWithTools(state, skillContent, testPrompt) {
         maxIterations: 8,
         skillBudgetUsd: 0.15,
         tier: "power",
+        toolResultCache: toolResultCache || undefined,
       }),
       new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("SIMULATION_TIMEOUT")), timeoutMs)
+        setTimeout(() => reject(new Error("SIMULATION_TIMEOUT")), effectiveTimeout)
       ),
     ]);
   } catch (err) {
     if (err?.message === "SIMULATION_TIMEOUT") {
-      deps.debugLog("[Autoresearch] Tool-calling simulation timed out after", timeoutMs / 1000, "s — scoring as empty response");
+      deps.debugLog("[Autoresearch] Tool-calling simulation timed out after", effectiveTimeout / 1000, "s — scoring as empty response");
       return { text: "", timedOut: true };
     }
     throw err;
@@ -288,7 +290,7 @@ async function simulateSkillRunWithTools(state, skillContent, testPrompt) {
  * inconclusive=true when first tool-calling test case times out or wall-clock
  * deadline exceeded — caller should skip scoring and not count toward plateau.
  */
-async function simulateAllTestCases(state, skillContent, testCases, miniModel, wallClockDeadline) {
+async function simulateAllTestCases(state, skillContent, testCases, miniModel, wallClockDeadline, toolResultCache, timeoutMs) {
   const budgetStop = shouldStopForBudget(state, state.budgetUsd);
   if (budgetStop) return { responses: [], inconclusive: false };
 
@@ -303,7 +305,7 @@ async function simulateAllTestCases(state, skillContent, testCases, miniModel, w
         deps.debugLog("[Autoresearch] Iteration wall-clock exceeded before test case", responses.length + 1);
         break;
       }
-      const result = await simulateSkillRunWithTools(state, skillContent, tc.prompt);
+      const result = await simulateSkillRunWithTools(state, skillContent, tc.prompt, toolResultCache, timeoutMs);
       if (result.timedOut && responses.length === 0) {
         inconclusive = true;
         deps.debugLog("[Autoresearch] First test case timed out — skipping remaining, marking inconclusive");
@@ -904,6 +906,16 @@ export async function runSkillOptimization(skillName, options = {}) {
         options.withTools ? "(--with-tools flag)" : "(settings toggle)");
     }
 
+    // Tool result cache: shared across all test cases and iterations.
+    // Same tool+args returns cached result instead of re-executing.
+    const toolCacheSetting = typeof deps.getToolCacheSetting === "function"
+      ? deps.getToolCacheSetting()
+      : true; // default ON when tool-calling is enabled
+    const toolResultCache = (state.useToolCalling && toolCacheSetting) ? new Map() : null;
+    if (toolResultCache) {
+      deps.debugLog("[Autoresearch] Tool result cache enabled");
+    }
+
     // ── Phase 1a: Generate test cases + criteria (with one retry) ───
     const miniModel = deps.getMiniModel();
     const maxTestCases = state.useToolCalling ? 3 : OPTIMIZATION_DEFAULTS.maxTestCases;
@@ -934,7 +946,8 @@ export async function runSkillOptimization(skillName, options = {}) {
     if (!judgeConfig) throw new Error("No LLM provider available for evaluation judge.");
 
     const baselineSimResult = await simulateAllTestCases(
-      state, state.originalContent, state.testCases, miniModel
+      state, state.originalContent, state.testCases, miniModel, undefined, toolResultCache,
+      OPTIMIZATION_DEFAULTS.baselineToolCallingTimeoutMs
     );
     if (baselineSimResult.inconclusive) {
       deps.debugLog("[Autoresearch] Baseline simulation timed out — falling back to LLM-only mode");
@@ -1038,7 +1051,7 @@ export async function runSkillOptimization(skillName, options = {}) {
       const iterationStart = Date.now();
       const wallClockDeadline = iterationStart + OPTIMIZATION_DEFAULTS.iterationWallClockMs;
       const simResult = await simulateAllTestCases(
-        state, validatedContent, state.testCases, miniModel, wallClockDeadline
+        state, validatedContent, state.testCases, miniModel, wallClockDeadline, toolResultCache
       );
       if (simResult.inconclusive) {
         deps.debugLog("[Autoresearch] Iteration", state.iteration, "inconclusive (timeout/overtime) — not counting toward plateau");
@@ -1134,6 +1147,10 @@ export async function runSkillOptimization(skillName, options = {}) {
           `Iteration ${state.iteration}: ${pct}% pass rate (${accepted} accepted, $${state.totalCostUsd.toFixed(2)} spent)`
         );
       }
+    }
+
+    if (toolResultCache) {
+      deps.debugLog("[Autoresearch] Tool cache entries:", toolResultCache.size);
     }
 
     // ── Phase 3: Debrief ────────────────────────────────────────────

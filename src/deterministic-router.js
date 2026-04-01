@@ -2159,7 +2159,10 @@ export async function tryRunDeterministicAskIntent(prompt, context = {}) {
         deps.debugLog("[Autoresearch] Background optimization failed:", err?.message);
         deps.showErrorToast("Optimisation Failed", err?.message || "Unknown error");
       });
-      const modeLabel = optimizeIntent.withTools ? "tool-calling" : "LLM-only";
+      // Check both the flag and the settings toggle to determine the actual mode
+      const toolCallingSetting = extensionAPIRef?.settings?.get?.(deps.SETTINGS_KEYS?.skillAutoresearchToolCalling);
+      const willUseTools = optimizeIntent.withTools || toolCallingSetting;
+      const modeLabel = willUseTools ? "tool-calling" : "LLM-only";
       return deps.publishAskResponse(prompt,
         `Starting optimisation of "${entry.title}" (${modeLabel}, budget: $${budget.toFixed(2)}). `
         + `This runs in the background \u2014 I'll show a toast when it's done with results to accept or revert.`,

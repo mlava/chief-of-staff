@@ -611,6 +611,15 @@ export function buildSettingsConfig(extensionAPI) {
           type: "switch",
           value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.skillAutoresearchToolCalling, false)
         }
+      },
+      {
+        id: deps.SETTINGS_KEYS.skillAutoresearchToolCache,
+        name: "Cache Tool Results During Optimisation",
+        description: "When tool-calling simulation is enabled, cache tool results so identical calls across test cases and iterations return instantly. Disable to force fresh calls every time (useful for debugging tool flakiness). Default: on.",
+        action: {
+          type: "switch",
+          value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.skillAutoresearchToolCache, true)
+        }
       }
     );
   }

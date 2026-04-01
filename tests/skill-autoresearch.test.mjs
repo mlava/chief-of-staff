@@ -1045,7 +1045,7 @@ describe("detectUnprovableCriteria", () => {
 // ── OPTIMIZATION_DEFAULTS ─────────────────────────────────────────────────
 
 describe("OPTIMIZATION_DEFAULTS wall-clock", () => {
-  it("has iterationWallClockMs set to 180000", () => {
-    assert.strictEqual(OPTIMIZATION_DEFAULTS.iterationWallClockMs, 180_000);
+  it("has iterationWallClockMs set to 150000", () => {
+    assert.strictEqual(OPTIMIZATION_DEFAULTS.iterationWallClockMs, 150_000);
   });
 });
