@@ -53,6 +53,118 @@ Checks:
 
 Return JSON only: {"task_completion": N, "factual_grounding": N, "safety": N, "concern": "brief note or empty string", "checks": [{"id": "check_id", "pass": true/false, "reason": "...or null"}]}`;
 
+// ── Lightweight Binary Scorer (for #98 Skill Autoresearch) ───────────────
+
+const BINARY_SCORER_SYSTEM_PROMPT = `You are evaluating an AI response against specific pass/fail criteria.
+For each criterion, answer true (pass) or false (fail).
+If fail, include a brief reason (max 15 words).
+
+Return JSON only: {"checks": [{"id": "check_id", "pass": true/false, "reason": "...or null"}]}`;
+
+const BINARY_SCORER_MAX_TOKENS = 250;
+
+/**
+ * Parses the binary scorer LLM response into an array of check results.
+ * Simpler than parseEvalScores — no dimension scores, just checks.
+ * @param {string} text - Raw LLM response text
+ * @returns {Array<{id: string, pass: boolean, reason: string|null}>|null}
+ */
+function parseBinaryScoreResponse(text) {
+  let str = String(text || "").trim()
+    .replace(/^```(?:json)?\s*\n?/i, "")
+    .replace(/\n?```\s*$/, "")
+    .trim();
+
+  let parsed = null;
+  try {
+    parsed = JSON.parse(str);
+  } catch (_) {
+    // Fallback: look for {"checks": [...]}
+    const match = str.match(/\{[^{}]*"checks"\s*:\s*\[[\s\S]*?\]\s*\}/);
+    if (match) {
+      try { parsed = JSON.parse(match[0]); } catch (_2) { /* fall through */ }
+    }
+  }
+
+  // Last resort: extractBalancedJsonObjects
+  if (!parsed && deps.extractBalancedJsonObjects) {
+    const objects = deps.extractBalancedJsonObjects(str);
+    if (objects.length > 0) parsed = objects[0].parsed;
+  }
+
+  if (!parsed || !Array.isArray(parsed.checks)) return null;
+
+  return parsed.checks
+    .filter(c => c?.id && typeof c.pass === "boolean")
+    .map(c => ({
+      id: String(c.id),
+      pass: !!c.pass,
+      reason: c.reason ? String(c.reason).slice(0, 100) : null
+    }));
+}
+
+/**
+ * Lightweight binary scorer for #98 Skill Autoresearch Loop.
+ * Scores a response against an array of pass/fail criteria via LLM judge.
+ * Does NOT persist to eval log or review queue — caller handles persistence.
+ *
+ * @param {string} responseText - The LLM response to evaluate
+ * @param {Array<{id: string, prompt: string}>} checks - Binary criteria to evaluate
+ * @param {object} judgeConfig - { provider, apiKey, model } for the judge LLM
+ * @returns {Promise<{results: Array<{id: string, pass: boolean, reason: string|null}>, cost: number, inputTokens: number, outputTokens: number}>}
+ */
+export async function scoreWithBinaryChecks(responseText, checks, judgeConfig) {
+  const { provider, apiKey, model } = judgeConfig;
+  if (!provider || !apiKey || !model) {
+    throw new Error("scoreWithBinaryChecks: judgeConfig requires provider, apiKey, and model");
+  }
+  if (!Array.isArray(checks) || checks.length === 0) {
+    return { results: [], cost: 0, inputTokens: 0, outputTokens: 0 };
+  }
+
+  // Build user payload with check criteria and response to evaluate
+  const checksSection = checks.map((c, i) => `${i + 1}. ${c.id}: ${c.prompt}`).join("\n");
+  const truncatedResponse = String(responseText || "").slice(0, 3000);
+  const payload = `Criteria:\n${checksSection}\n\nResponse to evaluate:\n${truncatedResponse}`;
+
+  const maxTokens = BINARY_SCORER_MAX_TOKENS + (checks.length * 20);
+
+  const response = await deps.callLlm(
+    provider, apiKey, model,
+    BINARY_SCORER_SYSTEM_PROMPT,
+    [{ role: "user", content: payload }],
+    [],
+    { maxOutputTokens: maxTokens }
+  );
+
+  // Extract text (provider-agnostic)
+  let textContent = "";
+  if (deps.isOpenAICompatible(provider)) {
+    textContent = response?.choices?.[0]?.message?.content || "";
+  } else {
+    const textBlocks = (response?.content || []).filter(b => b.type === "text");
+    textContent = textBlocks.map(b => b.text).join("") || "";
+  }
+
+  // Track cost
+  const usage = response?.usage || {};
+  const inputTokens = usage.input_tokens || usage.prompt_tokens || 0;
+  const outputTokens = usage.output_tokens || usage.completion_tokens || 0;
+  const costRates = deps.getModelCostRates(model);
+  const cost = (inputTokens / 1_000_000 * costRates.inputPerM) + (outputTokens / 1_000_000 * costRates.outputPerM);
+  deps.recordCostEntry("autoresearch-judge-" + model, inputTokens, outputTokens, cost);
+  deps.accumulateSessionTokens(inputTokens, outputTokens, cost);
+
+  // Parse results
+  const results = parseBinaryScoreResponse(textContent);
+  if (!results) {
+    deps.debugLog("[Eval] scoreWithBinaryChecks: failed to parse response:", textContent.slice(0, 200));
+    return { results: [], cost, inputTokens, outputTokens };
+  }
+
+  return { results, cost, inputTokens, outputTokens };
+}
+
 // ── Provider Selection ────────────────────────────────────────────────────
 
 /**
@@ -363,7 +475,7 @@ export async function evaluateAgentRun(trace, userPrompt, responseText, options 
 
     // Call LLM (no tools, short output)
     const maxTokens = rubricChecks?.length > 0
-      ? EVAL_MAX_OUTPUT_TOKENS + (rubricChecks.length * 40) // extra tokens for rubric results
+      ? EVAL_MAX_OUTPUT_TOKENS + (rubricChecks.length * 60) // extra tokens for rubric results (was 40, increased to avoid truncation)
       : EVAL_MAX_OUTPUT_TOKENS;
     deps.debugLog("[Eval] Running eval judge:", judge.provider, judge.model, skillName ? `(skill: ${skillName})` : "");
     const response = await deps.callLlm(

@@ -145,6 +145,7 @@ export async function runAgentLoop(userMessage, options = {}) {
     tier = null,
     gatheringGuard: initialGatheringGuard = null,
     readOnlyTools = false,
+    skipApproval = false,
     carryoverWriteReplayGuard = null,
     toolWhitelist = null,
     skillBudgetUsd = null
@@ -846,7 +847,7 @@ export async function runAgentLoop(userMessage, options = {}) {
         let errorMessage = "";
         const toolArgs = withComposioSessionArgs(toolCall.name, toolCall.arguments, composioSessionId);
         try {
-          result = await executeToolCall(toolCall.name, toolArgs, { readOnly: readOnlyTools });
+          result = await executeToolCall(toolCall.name, toolArgs, { readOnly: readOnlyTools, skipApproval });
           const discoveredSessionId = extractComposioSessionIdFromToolResult(result);
           if (discoveredSessionId) composioSessionId = discoveredSessionId;
         } catch (error) {
@@ -856,7 +857,7 @@ export async function runAgentLoop(userMessage, options = {}) {
           if (isComposioTool && isValidationError && composioSessionId) {
             try {
               const retryArgs = withComposioSessionArgs(toolCall.name, toolArgs, composioSessionId);
-              result = await executeToolCall(toolCall.name, retryArgs, { readOnly: readOnlyTools });
+              result = await executeToolCall(toolCall.name, retryArgs, { readOnly: readOnlyTools, skipApproval });
               errorMessage = "";
               const discoveredSessionId = extractComposioSessionIdFromToolResult(result);
               if (discoveredSessionId) composioSessionId = discoveredSessionId;
@@ -1046,6 +1047,19 @@ export async function runAgentLoop(userMessage, options = {}) {
       if (totalChars + msgStr.length > 20000) break;
       totalChars += msgStr.length;
       trimmedCarry.unshift(carryMessages[i]);
+    }
+    // Strip orphaned tool result messages from the front — if slicing cut between
+    // an assistant message with tool_calls and its tool result messages, the results
+    // become orphaned and OpenAI rejects with "messages with role 'tool' must be a
+    // response to a preceding message with 'tool_calls'".
+    while (trimmedCarry.length > 0) {
+      const first = trimmedCarry[0];
+      // OpenAI format: role === "tool"
+      if (first.role === "tool") { trimmedCarry.shift(); continue; }
+      // Anthropic format: role === "user" with only tool_result blocks
+      if (first.role === "user" && Array.isArray(first.content)
+        && first.content.every(b => b.type === "tool_result")) { trimmedCarry.shift(); continue; }
+      break;
     }
     error.agentContext = {
       accumulatedMessages: trimmedCarry,

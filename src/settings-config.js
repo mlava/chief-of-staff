@@ -583,6 +583,25 @@ export function buildSettingsConfig(extensionAPI) {
           value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.evalReviewThreshold, "2"),
           placeholder: "2"
         }
+      },
+      {
+        id: deps.SETTINGS_KEYS.skillAutoresearchEnabled,
+        name: "Skill Auto-Optimisation",
+        description: "Enable the Karpathy Loop for skill improvement. When enabled, you can say \"optimise my X skill\" or use the cos_skill_optimize tool. Generates test cases, scores the current version, iteratively mutates and evaluates, then presents results with accept/revert.",
+        action: {
+          type: "switch",
+          value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.skillAutoresearchEnabled, false)
+        }
+      },
+      {
+        id: deps.SETTINGS_KEYS.skillAutoresearchBudget,
+        name: "Max Budget Per Skill (USD)",
+        description: "Maximum LLM spend per skill optimisation run. A $2 budget typically allows ~10 mutation iterations after setup costs.",
+        action: {
+          type: "input",
+          value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.skillAutoresearchBudget, "2.00"),
+          placeholder: "2.00"
+        }
       }
     );
   }

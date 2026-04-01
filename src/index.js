@@ -21,7 +21,7 @@ import {
   promptIntentConfirmation, promptIntentClarification,
   promptWriteToDailyPage, detachAllToastKeyboards,
   refreshChatPanelElementRefs, addSaveToDailyPageButton, addModelIndicator,
-  getToastTheme
+  getToastTheme, showOptimizationResultToast
 } from "./chat-panel.js";
 import { initRoamNativeTools, resetRoamNativeToolsCache, getRoamNativeTools, buildRoamRouteTool, buildRoamExecuteTool, ROAM_CORE_TOOLS } from "./roam-native-tools.js";
 import { buildSupergatewayScript } from "./supergateway-script.js";
@@ -249,7 +249,14 @@ import {
 import {
   initEvalJudge,
   evaluateAgentRun,
+  scoreWithBinaryChecks,
 } from "./eval-judge.js";
+import {
+  initSkillAutoresearch,
+  runSkillOptimization,
+  parseSkillOptimizeIntent,
+  isOptimizationRunning,
+} from "./skill-autoresearch.js";
 import {
   initInbox,
   resetInboxStaticUIDs,
@@ -265,6 +272,7 @@ import {
   initDeterministicRouter,
   tryRunDeterministicAskIntent,
   parseSkillSources,
+  parseSkillTools,
   buildHelpSummary,
 } from "./deterministic-router.js";
 import {
@@ -319,7 +327,9 @@ const SETTINGS_KEYS = {
   evalReviewThreshold: "eval-review-threshold",
   cosLinkedRefsFilter: "cos-linked-refs-filter",
   intentGateEnabled: "intent-gate-enabled",
-  correctionCaptureEnabled: "correction-capture-enabled"
+  correctionCaptureEnabled: "correction-capture-enabled",
+  skillAutoresearchEnabled: "skill-autoresearch-enabled",
+  skillAutoresearchBudget: "skill-autoresearch-budget"
 };
 const TOOLS_SCHEMA_VERSION = 3;
 const AUTH_POLL_INTERVAL_MS = 9000;
@@ -379,6 +389,19 @@ const SOURCE_TOOL_NAME_MAP = {
   "bt_get_analytics": "bt_get_analytics",
   "bt_get_analytics_detailed": "roam_bt_get_analytics_detailed",
   "bt_get_task_by_uid": "bt_get_task_by_uid",
+  // Canonical BT names (identity mappings so parseSkillTools always resolves them)
+  "roam_bt_search_tasks": "roam_bt_search_tasks",
+  "roam_bt_get_projects": "roam_bt_get_projects",
+  "roam_bt_get_attributes": "roam_bt_get_attributes",
+  "roam_bt_get_waiting_for": "roam_bt_get_waiting_for",
+  "roam_bt_get_context": "roam_bt_get_context",
+  "roam_bt_get_analytics": "roam_bt_get_analytics",
+  "roam_bt_get_analytics_detailed": "roam_bt_get_analytics_detailed",
+  "roam_bt_get_task_by_uid": "roam_bt_get_task_by_uid",
+  "roam_bt_create_task": "roam_bt_create_task",
+  "roam_bt_modify_task": "roam_bt_modify_task",
+  "roam_bt_bulk_modify": "roam_bt_bulk_modify",
+  "roam_bt_bulk_snooze": "roam_bt_bulk_snooze",
   "roam_get_block_children": "roam_get_block_children",
   "roam_get_page": "roam_get_page",
   "roam_search": "roam_search",
@@ -390,6 +413,13 @@ const SOURCE_TOOL_NAME_MAP = {
   "get-event": "get-event",
   "create-event": "create-event",
   "get-freebusy": "get-freebusy",
+  // Underscore variants — autoresearch mutator and LLMs often generate these
+  "list_events": "list-events",
+  "search_events": "search-events",
+  "list_calendars": "list-calendars",
+  "get_event": "get-event",
+  "create_event": "create-event",
+  "get_freebusy": "get-freebusy",
   // Legacy COS tool aliases → new MCP tool names
   "cos_calendar_read": "list-events",
   "cos_calendar_search": "search-events",
@@ -401,7 +431,11 @@ const SOURCE_TOOL_NAME_MAP = {
   "gmail_fetch": "GMAIL_FETCH_EMAILS",
   "gmail_fetch_emails": "GMAIL_FETCH_EMAILS",
   "gmail_send": "GMAIL_SEND_EMAIL",
-  "gmail_send_email": "GMAIL_SEND_EMAIL"
+  "gmail_send_email": "GMAIL_SEND_EMAIL",
+  "search_email": "GMAIL_FETCH_EMAILS",
+  "search_emails": "GMAIL_FETCH_EMAILS",
+  "get_calendar_events": "list-events",
+  "get-calendar-events": "list-events"
 };
 // Write tools that trigger the gathering completeness guard
 const WRITE_TOOL_NAMES = new Set([
@@ -1303,6 +1337,30 @@ function getSettingObject(extensionAPI, key, fallbackValue = {}) {
 function getSettingArray(extensionAPI, key, fallbackValue = []) {
   const value = extensionAPI?.settings?.get?.(key);
   return Array.isArray(value) ? value : fallbackValue;
+}
+
+/**
+ * Picks a judge provider for autoresearch scoring.
+ * Prefers a different provider from the primary for independence.
+ * Same pattern as selectJudgeProvider in eval-judge.js.
+ */
+function getAutoresearchJudgeConfig() {
+  const ext = extensionAPIRef;
+  if (!ext) return null;
+  const runProvider = getLlmProvider(ext);
+  const candidates = [
+    ...VALID_LLM_PROVIDERS.filter(p => p !== runProvider),
+    runProvider
+  ];
+  for (const provider of candidates) {
+    if (isProviderCoolingDown(provider)) continue;
+    const apiKey = getApiKeyForProvider(ext, provider);
+    if (!apiKey) continue;
+    const model = getLlmModel(ext, provider);
+    if (!model) continue;
+    return { provider, model, apiKey };
+  }
+  return null;
 }
 
 function getResponseVerbosity(extensionAPI = extensionAPIRef) {
@@ -3193,6 +3251,55 @@ function getCosIntegrationTools() {
           }
         };
       }
+    },
+    {
+      name: "cos_skill_optimize",
+      isMutating: false,
+      description: "Run the Karpathy Loop on a skill to automatically improve it. Generates test cases, scores the current version, then iteratively mutates and evaluates. Presents results with accept/revert option. Runs in the background.",
+      input_schema: {
+        type: "object",
+        properties: {
+          skill_name: { type: "string", description: "Name of the skill to optimize" },
+          budget_usd: { type: "number", description: "Maximum spend in USD (default from settings)" }
+        },
+        required: ["skill_name"]
+      },
+      execute: async ({ skill_name, budget_usd } = {}) => {
+        const name = String(skill_name || "").trim();
+        if (!name) return JSON.stringify({ error: "skill_name is required" });
+
+        // Check if feature is enabled
+        const enabled = getSettingBool(extensionAPIRef, SETTINGS_KEYS.skillAutoresearchEnabled, false);
+        if (!enabled) return JSON.stringify({ error: "Skill auto-optimization is not enabled. Enable it in Settings > Automatic Actions." });
+
+        if (isOptimizationRunning()) {
+          return JSON.stringify({ error: "An optimization is already running. Wait for it to complete." });
+        }
+
+        // Validate skill exists before starting
+        const entry = await findSkillEntryByName(name, { force: true });
+        if (!entry) {
+          const entries = await getSkillEntries({ force: false });
+          const available = entries.map(e => e.title).join(", ");
+          return JSON.stringify({ error: `Skill "${name}" not found. Available: ${available}` });
+        }
+
+        // Fire-and-forget — return immediately, optimization runs in background
+        const budgetStr = getSettingString(extensionAPIRef, SETTINGS_KEYS.skillAutoresearchBudget, "2.00");
+        const budget = budget_usd || parseFloat(budgetStr) || 2.0;
+
+        runSkillOptimization(entry.title, { budgetUsd: budget }).catch(err => {
+          debugLog("[Autoresearch] Background optimization failed:", err?.message);
+          showErrorToast("Optimization Failed", err?.message || "Unknown error");
+        });
+
+        return JSON.stringify({
+          status: "started",
+          skill_name: entry.title,
+          budget_usd: budget,
+          message: `Optimization started for "${entry.title}" (budget: $${budget.toFixed(2)}). Results will appear in a toast when complete.`
+        });
+      }
     }
   ];
 }
@@ -3360,6 +3467,11 @@ function checkGatheringCompleteness(expectedSources, actualCallNames) {
   const actualCounts = {};
   for (const name of actualCallNames) {
     actualCounts[name] = (actualCounts[name] || 0) + 1;
+    // Also count under hyphen ↔ underscore variant so "list-calendars" counts for "list_calendars" and vice-versa
+    const hyphenVariant = name.replace(/_/g, "-");
+    const underscoreVariant = name.replace(/-/g, "_");
+    if (hyphenVariant !== name) actualCounts[hyphenVariant] = (actualCounts[hyphenVariant] || 0) + 1;
+    if (underscoreVariant !== name) actualCounts[underscoreVariant] = (actualCounts[underscoreVariant] || 0) + 1;
     // Also count under resolved aliases
     const aliases = reverseToolMap[name];
     if (aliases) {
@@ -3371,7 +3483,13 @@ function checkGatheringCompleteness(expectedSources, actualCallNames) {
 
   const missed = [];
   for (const [tool, sources] of Object.entries(expectedByTool)) {
-    const actual = actualCounts[tool] || 0;
+    let actual = actualCounts[tool] || 0;
+    // Cross-source deduped names: also check the original name
+    // (e.g. sentry__search_issues → check "search_issues" too)
+    if (actual === 0) {
+      const dIdx = tool.indexOf("__");
+      if (dIdx > 0) actual = actualCounts[tool.slice(dIdx + 2)] || 0;
+    }
 
     if (tool === "roam_bt_search_tasks") {
       // Count-based: expect ≥N calls
@@ -5001,6 +5119,97 @@ function onload({ extensionAPI }) {
     recordEvalRun,
     extractBalancedJsonObjects,
   });
+  initSkillAutoresearch({
+    callLlmMini: async (system, messages, options) => {
+      const provider = getLlmProvider(extensionAPIRef);
+      const apiKey = getApiKeyForProvider(extensionAPIRef, provider);
+      const model = getLlmModel(extensionAPIRef, provider);
+      if (!apiKey) throw new Error("No API key configured for " + provider);
+      return callLlm(provider, apiKey, model, system, messages, [], options);
+    },
+    callLlmJudge: async (system, messages, options) => {
+      const config = getAutoresearchJudgeConfig();
+      if (!config) throw new Error("No LLM provider available for judge");
+      return callLlm(config.provider, config.apiKey, config.model, system, messages, [], options);
+    },
+    findSkillEntryByName,
+    updateChiefMemory: async (args) => {
+      const allTools = getRoamNativeTools() || [];
+      const updateTool = allTools.find(t => t.name === "cos_update_memory");
+      if (!updateTool) throw new Error("cos_update_memory tool not found");
+      const result = await updateTool.execute(args);
+      return typeof result === "string" ? JSON.parse(result) : result;
+    },
+    getModelCostRates,
+    recordCostEntry,
+    accumulateSessionTokens,
+    isDailyCapExceeded,
+    scoreWithBinaryChecks: async (responseText, checks, judgeConfig) => {
+      return scoreWithBinaryChecks(responseText, checks, judgeConfig);
+    },
+    ensurePageUidByTitle,
+    createRoamBlock,
+    formatRoamDate,
+    showOptimizationResultToast,
+    showProgressToast: (title, message) => showInfoToast(title, message),
+    appendChatPanelMessage,
+    getChatPanelIsOpen,
+    debugLog,
+    getExtensionAPIRef: () => extensionAPIRef,
+    getSettingString,
+    SETTINGS_KEYS,
+    WRITE_TOOL_NAMES,
+    extractBalancedJsonObjects,
+    isOpenAICompatible,
+    getMiniProvider: () => getLlmProvider(extensionAPIRef),
+    getMiniModel: () => getLlmModel(extensionAPIRef, getLlmProvider(extensionAPIRef)),
+    getJudgeConfig: () => getAutoresearchJudgeConfig(),
+    parseSkillSources,
+    parseSkillTools,
+    getKnownToolNames: async () => {
+      // Need ALL tool names: raw sources, routed sub-tools, Composio slugs,
+      // cross-source namespaced tools, and alias map.
+      const names = new Set();
+
+      // Roam native (all 48, both direct and routed)
+      for (const t of (getRoamNativeTools() || [])) names.add(t.name);
+      // Better Tasks
+      for (const t of (getBetterTasksTools() || [])) names.add(t.name);
+      // COS tools
+      for (const t of getCosIntegrationTools()) names.add(t.name);
+      // Cron tools
+      for (const t of getCronTools()) names.add(t.name);
+      // Extension tools (all, not just direct)
+      for (const t of (getExternalExtensionTools() || [])) names.add(t.name);
+      // Local MCP (all, not just direct)
+      for (const t of (getLocalMcpTools() || [])) names.add(t.name);
+      // Remote MCP (all, not just direct)
+      for (const t of (getRemoteMcpTools() || [])) names.add(t.name);
+      // SOURCE_TOOL_NAME_MAP aliases AND canonical names
+      for (const [key, value] of Object.entries(SOURCE_TOOL_NAME_MAP)) {
+        names.add(key);    // alias (bt_search)
+        names.add(value);  // canonical (roam_bt_search_tasks)
+      }
+      // Composio toolkit registry slugs (WEATHERMAP_WEATHER, GMAIL_FETCH_EMAILS, etc.)
+      try {
+        const registry = getToolkitSchemaRegistry();
+        for (const tk of Object.values(registry.toolkits || {})) {
+          for (const slug of Object.keys(tk.tools || {})) names.add(slug);
+        }
+      } catch (_) { /* non-critical */ }
+      // Cross-source namespaced tools (sentry_mcp__search_issues, etc.)
+      // These are created at dedup time — include them via getAvailableToolSchemas
+      try {
+        const schemas = await getAvailableToolSchemas();
+        for (const t of schemas) names.add(t.name);
+      } catch (_) { /* non-critical */ }
+
+      return names;
+    },
+    runAgentLoop: runAgentLoopWithFailover,
+    buildSystemPrompt: buildDefaultSystemPrompt,
+    getLastAgentRunTrace: () => getLastAgentRunTrace(),
+  });
   initIntentClassifier({
     callLlm,
     getApiKeyForProvider,
@@ -5344,6 +5553,16 @@ function onload({ extensionAPI }) {
     getLocalMcpClients,
     getRoamNativeTools,
     getBetterTasksTools,
+    getBetterTasksNameMap: () => ({
+      "bt_search": "roam_bt_search_tasks",
+      "bt_get_projects": "roam_bt_get_projects",
+      "bt_get_attributes": "roam_bt_get_attributes",
+      "bt_get_waiting_for": "roam_bt_get_waiting_for",
+      "bt_get_context": "roam_bt_get_context",
+      "bt_get_analytics": "roam_bt_get_analytics",
+      "bt_get_analytics_detailed": "roam_bt_get_analytics_detailed",
+      "bt_get_task_by_uid": "roam_bt_get_task_by_uid",
+    }),
     getCosIntegrationTools,
     getCronTools,
     getExternalExtensionTools,
@@ -5429,6 +5648,10 @@ function onload({ extensionAPI }) {
     SETTINGS_KEYS, MAX_AGENT_ITERATIONS_SKILL,
     MEMORY_PAGE_TITLES_BASE, SOURCE_TOOL_NAME_MAP,
     evaluateAgentRun,
+    runSkillOptimization,
+    parseSkillOptimizeIntent,
+    isOptimizationRunning,
+    showOptimizationResultToast,
   });
   initAgentLoop({
     debugLog,

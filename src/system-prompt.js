@@ -286,7 +286,8 @@ When the user asks to improve, edit, or optimise a skill (e.g. "that briefing wa
 - Output: produce W
 - Keep responses concise.
 4. Confirm the change and briefly summarise what was updated.
-5. Do NOT re-run the skill after updating it. Just confirm the update and stop.`
+5. Do NOT re-run the skill after updating it. Just confirm the update and stop.
+When the user asks to automatically optimise a skill (e.g. "optimize my Daily Briefing skill"), call cos_skill_optimize. This runs the Karpathy Loop: generates test cases, scores the baseline, iteratively mutates and evaluates, then presents results with an accept/revert option. It runs in the background and toasts when done.`
     : `## Available Skills
 
 No skills page found yet. Create [[Chief of Staff/Skills]] with one top-level block per skill.`;

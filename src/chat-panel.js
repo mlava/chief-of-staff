@@ -2688,3 +2688,65 @@ export function detachAllToastKeyboards() {
   }
   activeToastKeyboards.clear();
 }
+
+/**
+ * Shows a persistent toast with Accept/Revert buttons for skill optimization results.
+ * Safe default: closing the toast (X button) counts as revert.
+ * @param {{ title: string, message: string, onAccept: () => void|Promise, onRevert: () => void }} options
+ * @returns {Promise<"accepted"|"reverted">}
+ */
+export function showOptimizationResultToast({ title, message, onAccept, onRevert }) {
+  return new Promise((resolve) => {
+    if (!iziToast?.show) {
+      if (typeof onRevert === "function") onRevert();
+      resolve("reverted");
+      return;
+    }
+    let resolved = false;
+
+    const safeTitle = deps.escapeHtml(String(title || ""));
+    const safeMessage = deps.escapeHtml(String(message || ""));
+
+    iziToast.show({
+      class: "cos-toast",
+      theme: getToastTheme(),
+      title: safeTitle,
+      message: safeMessage,
+      position: "topRight",
+      timeout: false,
+      close: true,
+      buttons: [
+        [
+          "<button><b>Accept</b></button>",
+          async (firstArg, secondArg) => {
+            const { instance, toast } = normaliseToastContext(firstArg, secondArg);
+            // Mark resolved BEFORE hiding — hideToastSafely triggers onClosing synchronously
+            resolved = true;
+            hideToastSafely(instance, toast);
+            try { if (typeof onAccept === "function") await onAccept(); } catch (_) { /* non-fatal */ }
+            resolve("accepted");
+          },
+          true
+        ],
+        [
+          "<button>Revert</button>",
+          (firstArg, secondArg) => {
+            const { instance, toast } = normaliseToastContext(firstArg, secondArg);
+            resolved = true;
+            hideToastSafely(instance, toast);
+            if (typeof onRevert === "function") onRevert();
+            resolve("reverted");
+          }
+        ]
+      ],
+      onClosing: () => {
+        // Closing via X = revert (safe default). Skip if a button already handled it.
+        if (!resolved) {
+          resolved = true;
+          if (typeof onRevert === "function") onRevert();
+          resolve("reverted");
+        }
+      }
+    });
+  });
+}
