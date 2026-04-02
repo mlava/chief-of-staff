@@ -148,6 +148,40 @@ function pruneAgentMessagesInPlace(
       prunablePrefixCount -= 1;
     }
   }
+  // Post-prune validation: ensure every assistant with tool_calls has all
+  // tool results present. Pruning can leave orphaned pairs that cause
+  // OpenAI 400 errors ("tool_call_ids did not have response messages").
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== "assistant") continue;
+    // Collect expected tool_call IDs (OpenAI + Anthropic formats)
+    const expectedIds = [];
+    if (Array.isArray(msg.tool_calls)) {
+      for (const tc of msg.tool_calls) { if (tc.id) expectedIds.push(tc.id); }
+    }
+    if (Array.isArray(msg.content)) {
+      for (const b of msg.content) { if (b.type === "tool_use" && b.id) expectedIds.push(b.id); }
+    }
+    if (expectedIds.length === 0) continue;
+    // Collect actual result IDs in following messages (up to next assistant)
+    const resultIds = new Set();
+    for (let j = i + 1; j < messages.length; j++) {
+      const r = messages[j];
+      if (r.role === "tool" && r.tool_call_id) resultIds.add(r.tool_call_id);
+      if (r.role === "user" && Array.isArray(r.content)) {
+        for (const b of r.content) {
+          if (b.type === "tool_result" && b.tool_use_id) resultIds.add(b.tool_use_id);
+        }
+      }
+      if (r.role === "assistant") break;
+    }
+    if (expectedIds.every(id => resultIds.has(id))) continue;
+    // Orphaned — remove assistant + its partial results
+    let end = i + 1;
+    while (end < messages.length && messages[end].role !== "assistant") end++;
+    messages.splice(i, end - i);
+    prunablePrefixCount = Math.max(0, prunablePrefixCount - (end - i));
+  }
   return prunablePrefixCount;
 }
 

@@ -914,6 +914,7 @@ async function handleChatPanelSend() {
 
   let streamingEl = null;
   let streamText = "";
+  let streamHadToolCalls = false; // tracks if tool calls occurred since last text chunk
   let streamRenderPending = false;
   let lastStreamRenderAt = 0;
   let streamRenderTimerId = null;
@@ -966,6 +967,7 @@ async function handleChatPanelSend() {
 
   function onChatToolCall(toolName) {
     toolCallReceived = true;
+    streamHadToolCalls = true;
     // Clear the fallback timer — we have real progress now
     clearTimeout(chatThinkingTimerId);
     clearTimeout(chatWorkingTimerId);
@@ -1001,6 +1003,12 @@ async function handleChatPanelSend() {
           chatPanelSendButton.textContent = "Generating response...";
         }
         ensureStreamingEl();
+        // Insert separator when new text arrives after tool calls executed
+        // (prevents "sentence one.sentence two" without spacing between iterations)
+        if (streamHadToolCalls && streamText.length > 0) {
+          streamText += "\n\n";
+          streamHadToolCalls = false;
+        }
         streamText += chunk;
         if (!streamRenderPending) {
           const elapsed = Date.now() - lastStreamRenderAt;

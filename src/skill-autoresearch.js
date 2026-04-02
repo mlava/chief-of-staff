@@ -210,7 +210,7 @@ async function simulateSkillRun(state, skillContent, testPrompt, miniModel) {
  * Read tools execute normally; write tools are excluded from the whitelist.
  * Returns the final response text.
  */
-async function simulateSkillRunWithTools(state, skillContent, testPrompt, toolResultCache, timeoutMs) {
+async function simulateSkillRunWithTools(state, skillContent, testPrompt, toolResultCache, timeoutMs, allowFailover) {
   const knownNames = typeof deps.getKnownToolNames === "function"
     ? await deps.getKnownToolNames()
     : new Set();
@@ -255,10 +255,13 @@ async function simulateSkillRunWithTools(state, skillContent, testPrompt, toolRe
         toolWhitelist: simulationTools,
         gatheringGuard,
         skipApproval: true,
-        maxIterations: 8,
+        maxIterations: 12,
         skillBudgetUsd: 0.15,
-        tier: "power",
+        tier: "mini",
+        preferProvider: "openai",
+        disableFailover: !allowFailover,
         toolResultCache: toolResultCache || undefined,
+        excludeProviders: new Set(["groq", "gemini", "mistral"]),
       }),
       new Promise((_, reject) =>
         setTimeout(() => reject(new Error("SIMULATION_TIMEOUT")), effectiveTimeout)
@@ -290,7 +293,7 @@ async function simulateSkillRunWithTools(state, skillContent, testPrompt, toolRe
  * inconclusive=true when first tool-calling test case times out or wall-clock
  * deadline exceeded — caller should skip scoring and not count toward plateau.
  */
-async function simulateAllTestCases(state, skillContent, testCases, miniModel, wallClockDeadline, toolResultCache, timeoutMs) {
+async function simulateAllTestCases(state, skillContent, testCases, miniModel, wallClockDeadline, toolResultCache, timeoutMs, allowFailover) {
   const budgetStop = shouldStopForBudget(state, state.budgetUsd);
   if (budgetStop) return { responses: [], inconclusive: false };
 
@@ -305,7 +308,7 @@ async function simulateAllTestCases(state, skillContent, testCases, miniModel, w
         deps.debugLog("[Autoresearch] Iteration wall-clock exceeded before test case", responses.length + 1);
         break;
       }
-      const result = await simulateSkillRunWithTools(state, skillContent, tc.prompt, toolResultCache, timeoutMs);
+      const result = await simulateSkillRunWithTools(state, skillContent, tc.prompt, toolResultCache, timeoutMs, allowFailover);
       if (result.timedOut && responses.length === 0) {
         inconclusive = true;
         deps.debugLog("[Autoresearch] First test case timed out — skipping remaining, marking inconclusive");
@@ -947,7 +950,7 @@ export async function runSkillOptimization(skillName, options = {}) {
 
     const baselineSimResult = await simulateAllTestCases(
       state, state.originalContent, state.testCases, miniModel, undefined, toolResultCache,
-      OPTIMIZATION_DEFAULTS.baselineToolCallingTimeoutMs
+      OPTIMIZATION_DEFAULTS.baselineToolCallingTimeoutMs, false  // no failover for baseline
     );
     if (baselineSimResult.inconclusive) {
       deps.debugLog("[Autoresearch] Baseline simulation timed out — falling back to LLM-only mode");
@@ -1051,7 +1054,8 @@ export async function runSkillOptimization(skillName, options = {}) {
       const iterationStart = Date.now();
       const wallClockDeadline = iterationStart + OPTIMIZATION_DEFAULTS.iterationWallClockMs;
       const simResult = await simulateAllTestCases(
-        state, validatedContent, state.testCases, miniModel, wallClockDeadline, toolResultCache
+        state, validatedContent, state.testCases, miniModel, wallClockDeadline, toolResultCache,
+        undefined, true  // allow failover for mutations (cache-assisted, cheaper)
       );
       if (simResult.inconclusive) {
         deps.debugLog("[Autoresearch] Iteration", state.iteration, "inconclusive (timeout/overtime) — not counting toward plateau");

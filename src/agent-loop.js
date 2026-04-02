@@ -1127,6 +1127,64 @@ export async function runAgentLoop(userMessage, options = {}) {
         && first.content.every(b => b.type === "tool_result")) { trimmedCarry.shift(); continue; }
       break;
     }
+    // Strip orphaned assistant tool_calls from the end — if the loop failed mid-execution,
+    // the last message may be an assistant with tool_calls but no corresponding tool results.
+    // OpenAI rejects with "An assistant message with 'tool_calls' must be followed by tool
+    // messages responding to each 'tool_call_id'".
+    while (trimmedCarry.length > 0) {
+      const last = trimmedCarry[trimmedCarry.length - 1];
+      // OpenAI format: assistant with tool_calls array
+      if (last.role === "assistant" && Array.isArray(last.tool_calls) && last.tool_calls.length > 0) {
+        trimmedCarry.pop(); continue;
+      }
+      // Anthropic format: assistant with content blocks of type tool_use
+      if (last.role === "assistant" && Array.isArray(last.content)
+        && last.content.some(b => b.type === "tool_use")) {
+        trimmedCarry.pop(); continue;
+      }
+      break;
+    }
+    // Deep scan: find assistant messages with tool_calls whose IDs don't have
+    // matching tool result messages. This catches mid-conversation orphans where
+    // the loop failed partway through executing a batch of tool calls.
+    for (let i = trimmedCarry.length - 1; i >= 0; i--) {
+      const msg = trimmedCarry[i];
+      if (msg.role !== "assistant") continue;
+      // OpenAI format
+      const tcIds = Array.isArray(msg.tool_calls)
+        ? msg.tool_calls.map(tc => tc.id).filter(Boolean)
+        : [];
+      // Anthropic format
+      const tuIds = Array.isArray(msg.content)
+        ? msg.content.filter(b => b.type === "tool_use").map(b => b.id).filter(Boolean)
+        : [];
+      const allIds = [...tcIds, ...tuIds];
+      if (allIds.length === 0) continue;
+      // Collect tool result IDs from messages following this assistant message
+      const resultIds = new Set();
+      for (let j = i + 1; j < trimmedCarry.length; j++) {
+        const r = trimmedCarry[j];
+        if (r.role === "tool" && r.tool_call_id) resultIds.add(r.tool_call_id);
+        if (r.role === "user" && Array.isArray(r.content)) {
+          for (const b of r.content) {
+            if (b.type === "tool_result" && b.tool_use_id) resultIds.add(b.tool_use_id);
+          }
+        }
+        // Stop at the next assistant message
+        if (r.role === "assistant") break;
+      }
+      const orphaned = allIds.filter(id => !resultIds.has(id));
+      if (orphaned.length > 0) {
+        // Remove this assistant message and all following tool results up to the next assistant
+        let removeEnd = i + 1;
+        while (removeEnd < trimmedCarry.length && trimmedCarry[removeEnd].role !== "assistant") {
+          removeEnd++;
+        }
+        deps.debugLog("[Chief flow] Stripping orphaned tool_calls from carryover at index", i,
+          "(" + orphaned.length + " orphaned IDs, removing", removeEnd - i, "messages)");
+        trimmedCarry.splice(i, removeEnd - i);
+      }
+    }
     error.agentContext = {
       accumulatedMessages: trimmedCarry,
       iteration: trace.iterations,
