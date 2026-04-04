@@ -522,6 +522,7 @@ let commandPaletteRegistered = false;
 let unloadInProgress = false;
 // activeAgentAbortController — moved to agent-loop.js
 let askChiefInFlight = false; // Concurrency guard for askChiefOfStaff
+let activeCouncilQuestion = null; // Concurrency guard for cos_llm_council
 const authPollStateBySlug = new Map();
 let extensionAPIRef = null;
 // lastAgentRunTrace — moved to agent-loop.js
@@ -3069,6 +3070,182 @@ function getBetterTasksTools() {
 }
 
 
+// ── LLM Council ────────────────────────────────────────────────────────────
+// Karpathy's LLM Council pattern: Conjecture → Criticism → Synthesis
+
+const COUNCIL_CONJECTURE_SYSTEM = "You are an expert analyst participating in a multi-model review panel. Answer the following question thoroughly and independently. Focus on practical implications, trade-offs, and specific recommendations. Be concise but comprehensive.";
+
+const COUNCIL_CRITICISM_SYSTEM = "You are a rigorous peer reviewer on an expert review panel. Evaluate the following analysis for logical consistency, unexamined assumptions, missing perspectives, and robustness of argument. Provide specific, actionable critiques. End with a Robustness Score (1-10) where 1 is fundamentally flawed and 10 is airtight.";
+
+const COUNCIL_SYNTHESIS_SYSTEM = "You are the Chair of an expert review panel. You have received multiple independent analyses and peer critiques of each. Your job is to: 1) Evaluate whether the robustness scores assigned by reviewers were fair, 2) Identify the weakest and strongest arguments across all analyses, 3) Synthesize a single, defensible answer that incorporates the strongest elements and addresses the most serious critiques. Be decisive — state a clear recommendation, not just a summary of views.";
+
+function extractCouncilText(provider, response) {
+  if (isOpenAICompatible(provider)) {
+    return response?.choices?.[0]?.message?.content || "";
+  }
+  return (response?.content || []).filter(b => b.type === "text").map(b => b.text).join("") || "";
+}
+
+function extractRobustnessScore(text) {
+  const match = String(text || "").match(/(?:robustness\s*score|score)\s*[:\-—]\s*(\d+)\s*\/?\s*10/i);
+  return match ? parseInt(match[1], 10) : null;
+}
+
+async function runLlmCouncil(question, models, chair, context, budgetUsd) {
+  const state = {
+    question, context: context || "", models, chair,
+    budgetUsd, totalCostUsd: 0,
+    phaseCosts: { conjecture: 0, criticism: 0, synthesis: 0 },
+    responses: {}, critiques: {}, synthesis: "",
+    startTime: Date.now(),
+  };
+
+  function trackCost(response, model, provider, phase) {
+    const usage = response?.usage || {};
+    const input = usage.input_tokens || usage.prompt_tokens || 0;
+    const output = usage.output_tokens || usage.completion_tokens || 0;
+    const rates = getModelCostRates(model);
+    const cost = (input / 1_000_000 * rates.inputPerM) + (output / 1_000_000 * rates.outputPerM);
+    state.totalCostUsd += cost;
+    state.phaseCosts[phase] += cost;
+    recordCostEntry("council-" + model, input, output, cost);
+    accumulateSessionTokens(input, output, cost);
+  }
+
+  function overBudget() {
+    if (state.totalCostUsd >= state.budgetUsd) return true;
+    return isDailyCapExceeded().exceeded;
+  }
+
+  try {
+    // ── Phase 1: Conjecture (parallel) ─────────────────────────────
+    showInfoToast("LLM Council", `Phase 1: ${models.length} models analyzing...`);
+    const userMessage = state.context
+      ? `${state.context}\n\nQuestion: ${state.question}`
+      : state.question;
+
+    const results = await Promise.all(models.map(async (provider) => {
+      const apiKey = getApiKeyForProvider(extensionAPIRef, provider);
+      const model = getPowerModel(provider);
+      try {
+        const resp = await callLlm(provider, apiKey, model, COUNCIL_CONJECTURE_SYSTEM,
+          [{ role: "user", content: userMessage }], [],
+          { maxOutputTokens: SKILL_MAX_OUTPUT_TOKENS });
+        trackCost(resp, model, provider, "conjecture");
+        return { provider, text: extractCouncilText(provider, resp), error: null };
+      } catch (err) {
+        debugLog("[Council] Phase 1 failed for", provider, err?.message);
+        return { provider, text: null, error: err?.message };
+      }
+    }));
+
+    const succeeded = results.filter(r => r.text);
+    if (succeeded.length < 2) {
+      const failed = results.filter(r => r.error).map(r => `${r.provider}: ${r.error}`).join("; ");
+      throw new Error(`Need at least 2 model responses but only ${succeeded.length} succeeded. Failures: ${failed}`);
+    }
+    for (const r of succeeded) state.responses[r.provider] = r.text;
+    const activeModels = Object.keys(state.responses);
+    if (!activeModels.includes(state.chair)) state.chair = activeModels[0];
+
+    // ── Phase 2: Criticism (round-robin, sequential) ───────────────
+    showInfoToast("LLM Council", "Phase 2: Peer review in progress...");
+    for (let i = 0; i < activeModels.length; i++) {
+      if (overBudget()) { debugLog("[Council] Budget exceeded in Phase 2"); break; }
+      const reviewer = activeModels[i];
+      const target = activeModels[(i + 1) % activeModels.length];
+      const apiKey = getApiKeyForProvider(extensionAPIRef, reviewer);
+      const model = getPowerModel(reviewer);
+      try {
+        const resp = await callLlm(reviewer, apiKey, model, COUNCIL_CRITICISM_SYSTEM,
+          [{ role: "user", content: `## Analysis to Review\n\n${state.responses[target]}\n\nProvide your critique with a Robustness Score (1-10).` }],
+          [], { maxOutputTokens: SKILL_MAX_OUTPUT_TOKENS });
+        trackCost(resp, model, reviewer, "criticism");
+        const text = extractCouncilText(reviewer, resp);
+        state.critiques[target] = { by: reviewer, text, score: extractRobustnessScore(text) };
+      } catch (err) {
+        debugLog("[Council] Phase 2 failed for reviewer", reviewer, err?.message);
+        state.critiques[target] = { by: reviewer, text: `[Review failed: ${err?.message}]`, score: null };
+      }
+    }
+
+    // ── Phase 3: Synthesis (chair) ─────────────────────────────────
+    if (!overBudget()) {
+      showInfoToast("LLM Council", "Phase 3: Chair synthesizing...");
+      let input = `# Question\n${state.question}\n\n`;
+      activeModels.forEach((p, i) => {
+        const label = `Analyst ${String.fromCharCode(65 + i)}`;
+        input += `## ${label}'s Analysis\n${state.responses[p]}\n\n`;
+        if (state.critiques[p]) {
+          input += `### Peer Critique of ${label}\n${state.critiques[p].text}\n\n`;
+        }
+      });
+      const chairKey = getApiKeyForProvider(extensionAPIRef, state.chair);
+      const chairModel = getPowerModel(state.chair);
+      try {
+        const resp = await callLlm(state.chair, chairKey, chairModel, COUNCIL_SYNTHESIS_SYSTEM,
+          [{ role: "user", content: input }], [],
+          { maxOutputTokens: LUDICROUS_MAX_OUTPUT_TOKENS });
+        trackCost(resp, chairModel, state.chair, "synthesis");
+        state.synthesis = extractCouncilText(state.chair, resp);
+      } catch (err) {
+        debugLog("[Council] Phase 3 failed:", err?.message);
+        state.synthesis = `[Synthesis failed: ${err?.message}]`;
+      }
+    }
+
+    // ── Write to Roam ──────────────────────────────────────────────
+    const duration = ((Date.now() - state.startTime) / 1000).toFixed(1);
+    const modelLabels = {};
+    activeModels.forEach((p, i) => { modelLabels[p] = `Model ${String.fromCharCode(65 + i)}`; });
+
+    let md = `**Models**: ${activeModels.map(p => `${modelLabels[p]} (${p})`).join(" | ")}\n`;
+    md += `**Chair**: ${modelLabels[state.chair]} (${state.chair}) | **Cost**: $${state.totalCostUsd.toFixed(2)}\n\n`;
+
+    md += `## Phase 1: Independent Analyses\n`;
+    for (const p of activeModels) {
+      md += `### ${modelLabels[p]} (${p})\n${state.responses[p]}\n\n`;
+    }
+
+    md += `## Phase 2: Peer Review\n`;
+    for (const target of activeModels) {
+      const c = state.critiques[target];
+      if (!c) continue;
+      md += `### Critique of ${modelLabels[target]} (by ${modelLabels[c.by] || c.by})\n`;
+      md += `${c.text}\n`;
+      if (c.score !== null) md += `**Robustness Score**: ${c.score}/10\n`;
+      md += `\n`;
+    }
+
+    if (state.synthesis) {
+      md += `## Phase 3: Chair's Synthesis\n${state.synthesis}\n\n`;
+    }
+
+    md += `---\n*Council completed in ${duration}s | Cost: $${state.totalCostUsd.toFixed(2)} (Conjecture: $${state.phaseCosts.conjecture.toFixed(2)}, Criticism: $${state.phaseCosts.criticism.toFixed(2)}, Synthesis: $${state.phaseCosts.synthesis.toFixed(2)})*`;
+
+    const pageUid = await ensurePageUidByTitle("LLM Council");
+    const heading = `LLM Council: ${state.question.slice(0, 80)}${state.question.length > 80 ? "..." : ""}`;
+    const headingUid = await createRoamBlock(pageUid, heading, "first");
+    const api = getRoamAlphaApi();
+    if (api?.data?.block?.fromMarkdown) {
+      try {
+        await api.data.block.fromMarkdown({
+          location: { "parent-uid": headingUid, order: "last" },
+          "markdown-string": md
+        });
+      } catch (_) {
+        await createRoamBlock(headingUid, md, "last");
+      }
+    } else {
+      await createRoamBlock(headingUid, md, "last");
+    }
+
+    showInfoToast("LLM Council", `Complete! Results on [[LLM Council]] page ($${state.totalCostUsd.toFixed(2)})`);
+  } finally {
+    activeCouncilQuestion = null;
+  }
+}
+
 function getCosIntegrationTools() {
   return [
     {
@@ -3300,6 +3477,66 @@ function getCosIntegrationTools() {
           skill_name: entry.title,
           budget_usd: budget,
           message: `Optimization started for "${entry.title}" (budget: $${budget.toFixed(2)}). Results will appear in a toast when complete.`
+        });
+      }
+    },
+    {
+      name: "cos_llm_council",
+      isMutating: false,
+      description: "Run an LLM Council — a multi-model review panel that stress-tests a question through independent analysis (Phase 1), anonymous peer critique with robustness scores (Phase 2), and a Chair's decisive synthesis (Phase 3). Results are written to the [[LLM Council]] page. Runs in the background.",
+      input_schema: {
+        type: "object",
+        properties: {
+          question: { type: "string", description: "The question or idea to evaluate" },
+          models: {
+            type: "array",
+            items: { type: "string" },
+            description: "2-4 LLM providers (anthropic, openai, gemini, mistral, groq). Default: auto-selects best 3 with API keys configured."
+          },
+          chair: { type: "string", description: "Provider for the synthesis phase. Default: first model in the list." },
+          context: { type: "string", description: "Additional context to include with the question." },
+          budget_usd: { type: "number", description: "Maximum spend in USD. Default: 1.00." }
+        },
+        required: ["question"]
+      },
+      execute: async ({ question, models, chair, context, budget_usd } = {}) => {
+        const q = String(question || "").trim();
+        if (!q) return JSON.stringify({ error: "question is required" });
+
+        if (activeCouncilQuestion) {
+          return JSON.stringify({ error: `A council is already running for "${activeCouncilQuestion}". Wait for it to complete.` });
+        }
+
+        // Resolve models — auto-select if not provided
+        const validProviders = ["anthropic", "openai", "gemini", "mistral", "groq"];
+        let resolved;
+        if (Array.isArray(models) && models.length >= 2) {
+          resolved = models.filter(m => validProviders.includes(m) && getApiKeyForProvider(extensionAPIRef, m));
+        } else {
+          resolved = validProviders.filter(p => getApiKeyForProvider(extensionAPIRef, p)).slice(0, 3);
+        }
+        if (resolved.length < 2) {
+          return JSON.stringify({ error: `Need at least 2 providers with API keys. Available: ${resolved.join(", ") || "(none)"}` });
+        }
+        if (resolved.length > 4) resolved = resolved.slice(0, 4);
+
+        const resolvedChair = (chair && resolved.includes(chair)) ? chair : resolved[0];
+        const budget = budget_usd || 1.0;
+
+        activeCouncilQuestion = q;
+        runLlmCouncil(q, resolved, resolvedChair, context, budget).catch(err => {
+          debugLog("[Council] Background council failed:", err?.message);
+          showErrorToast("LLM Council Failed", err?.message || "Unknown error");
+          activeCouncilQuestion = null;
+        });
+
+        return JSON.stringify({
+          status: "started",
+          question: q,
+          models: resolved,
+          chair: resolvedChair,
+          budget_usd: budget,
+          message: `Council started with ${resolved.length} models (chair: ${resolvedChair}). Results will appear on [[LLM Council]] page.`
         });
       }
     }
