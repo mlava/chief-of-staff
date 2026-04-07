@@ -19,6 +19,7 @@ import { showInfoToastIfAllowed, promptWriteToDailyPage, promptToolExecutionAppr
 import { loadCronJobs } from "./cron-scheduler.js";
 import { buildDefaultSystemPrompt } from "./system-prompt.js";
 import { wrapUntrustedWithInjectionScan } from "./security.js";
+import { persistAuditLogEntry, recordUsageStat } from "./usage-tracking.js";
 
 // ── Dependency injection ───────────────────────────────────────────────────────
 
@@ -117,10 +118,13 @@ export function parseSkillInvocationIntent(userMessage) {
   const text = String(userMessage || "").trim();
   if (!text) return null;
 
+  // Strip leading articles/possessives that aren't part of skill names
+  const stripLeadingNoise = (s) => String(s || "").replace(/^(?:my|the|a)\s+/i, "").trim();
+
   const explicitMatch = text.match(/^(?:please\s+)?(?:use|apply|run)\s+(?:the\s+)?skill\s+["\u201C\u201D\u2018\u2019']?([^"\u201C\u201D\u2018\u2019']+?)["\u201C\u201D\u2018\u2019']?(?:\s+(?:on|for)\s+(.+))?$/i);
   if (explicitMatch) {
     return {
-      skillName: String(explicitMatch[1] || "").trim(),
+      skillName: stripLeadingNoise(explicitMatch[1]),
       targetText: String(explicitMatch[2] || "").trim(),
       originalPrompt: text
     };
@@ -129,7 +133,7 @@ export function parseSkillInvocationIntent(userMessage) {
   const inverseMatch = text.match(/^(?:please\s+)?(?:use|apply|run)\s+(.+?)\s+skill(?:\s+(?:on|for)\s+(.+))?$/i);
   if (inverseMatch) {
     return {
-      skillName: String(inverseMatch[1] || "").trim(),
+      skillName: stripLeadingNoise(inverseMatch[1]),
       targetText: String(inverseMatch[2] || "").trim(),
       originalPrompt: text
     };
@@ -1071,6 +1075,16 @@ ${systemPromptSuffix}${mcpToolHintsSection}`;
       }
     } else {
       deps.debugLog("[Chief flow] Skill response doesn't look like briefing content, skipping DNP write:", responseText.slice(0, 200));
+    }
+  }
+
+  // Persist audit log entry for skill runs (non-blocking, non-fatal)
+  // Skill runs go through runAgentLoopWithFailover so a trace exists.
+  if (typeof deps.getLastAgentRunTrace === "function") {
+    const auditTrace = deps.getLastAgentRunTrace();
+    if (auditTrace) {
+      persistAuditLogEntry(auditTrace, skillPrompt, { skillName: skill.title });
+      recordUsageStat("agentRuns");
     }
   }
 

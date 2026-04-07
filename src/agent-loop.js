@@ -43,7 +43,8 @@ import {
 
 import {
   isDailyCapExceeded, accumulateSessionTokens, recordCostEntry,
-  getSessionTokenUsage, recordUsageStat
+  getSessionTokenUsage, recordUsageStat, recordToolTokenSnapshot,
+  checkBudgetThresholds
 } from "./usage-tracking.js";
 
 import { buildDefaultSystemPrompt } from "./system-prompt.js";
@@ -70,6 +71,28 @@ let activeAgentAbortController = null;
 export function getLastAgentRunTrace() { return lastAgentRunTrace; }
 export function setLastAgentRunTrace(t) { lastAgentRunTrace = t; }
 export function getActiveAgentAbortController() { return activeAgentAbortController; }
+
+// ── Budget warning toast helper ────────────────────────────────────────────
+
+function emitBudgetWarningToast(warning) {
+  if (!deps.showRawToast) return;
+  const { pct, spent, cap } = warning;
+  const isExceeded = pct >= 100;
+  const title = isExceeded ? "Daily budget reached" : `Budget ${pct}% used`;
+  const message = `$${spent.toFixed(2)} of $${cap.toFixed(2)} daily cap`;
+  deps.showRawToast({
+    class: "cos-toast",
+    theme: deps.getToastTheme(),
+    title,
+    message,
+    position: "topRight",
+    timeout: isExceeded ? 8000 : 5000,
+    close: true,
+    color: isExceeded ? "red" : "yellow",
+    icon: isExceeded ? "icon-ban" : "icon-bell"
+  });
+  deps.debugLog(`[Chief flow] Budget warning toast: ${pct}% ($${spent.toFixed(2)}/$${cap.toFixed(2)})`);
+}
 
 // ── Error classes ───────────────────────────────────────────────────────────
 
@@ -213,7 +236,7 @@ export async function runAgentLoop(userMessage, options = {}) {
     throw new Error("No LLM API key configured. Set it in Chief of Staff settings.");
   }
 
-  const allTools = await deps.getAvailableToolSchemas();
+  const allTools = await deps.getAvailableToolSchemas(userMessage);
   let tools;
   if (readOnlyTools) {
     tools = allTools.filter(t => deps.INBOX_READ_ONLY_TOOL_ALLOWLIST.has(t.name) || t.isMutating === false);
@@ -289,13 +312,40 @@ export async function runAgentLoop(userMessage, options = {}) {
   const messagesChars = JSON.stringify(messages).length;
   const totalInputChars = systemChars + toolsChars + messagesChars;
   const estInputTokens = Math.round(totalInputChars / 4); // rough 4 chars/token
+
+  // ── Tool token instrumentation (#63) ──────────────────────────────────
+  // Break down tool schema cost by source so we can identify the biggest offenders.
+  const toolTokenBreakdown = { roamCore: 0, roamRouted: 0, bt: 0, cos: 0, composio: 0, localMcp: 0, remoteMcp: 0, ext: 0, other: 0, total: toolsChars };
+  for (const t of tools) {
+    const chars = JSON.stringify(t).length;
+    const name = t.name || "";
+    if (name.startsWith("ROAM_ROUTE") || name === "ROAM_EXECUTE") toolTokenBreakdown.roamRouted += chars;
+    else if (name.startsWith("roam_bt_")) toolTokenBreakdown.bt += chars;
+    else if (name.startsWith("roam_")) toolTokenBreakdown.roamCore += chars;
+    else if (name.startsWith("cos_")) toolTokenBreakdown.cos += chars;
+    else if (name.startsWith("COMPOSIO_") || t._source === "composio-direct") toolTokenBreakdown.composio += chars;
+    else if (name.startsWith("LOCAL_MCP_") || (t._serverName && !t._isRemote)) toolTokenBreakdown.localMcp += chars;
+    else if (name.startsWith("REMOTE_MCP_") || t._isRemote) toolTokenBreakdown.remoteMcp += chars;
+    else if (name.startsWith("EXT_") || t._source === "extension") toolTokenBreakdown.ext += chars;
+    else toolTokenBreakdown.other += chars;
+  }
+  const toolPct = totalInputChars > 0 ? Math.round(toolsChars / totalInputChars * 100) : 0;
   deps.debugLog("[Chief flow] Token estimate (input):", {
     systemChars,
     toolsChars,
     messagesChars,
     totalInputChars,
     estInputTokens,
+    toolPct: toolPct + "%",
     estCostCents: (estInputTokens / 1000 * getModelCostRates(model).inputPerM / 1000).toFixed(3)
+  });
+  deps.debugLog("[Chief flow] Tool token breakdown (chars):", toolTokenBreakdown);
+  // Record to daily usage stats for aggregate tracking
+  recordToolTokenSnapshot({
+    toolsChars,
+    toolPct,
+    toolCount: tools.length,
+    breakdown: toolTokenBreakdown
   });
   const trace = {
     startedAt: Date.now(),
@@ -308,7 +358,8 @@ export async function runAgentLoop(userMessage, options = {}) {
     toolCalls: [],
     resultTextPreview: "",
     error: null,
-    guardsFired: []
+    guardsFired: [],
+    inputBreakdown: { systemChars, toolsChars, messagesChars, totalInputChars, estInputTokens, toolPct, toolCount: tools.length, toolTokenBreakdown }
   };
   lastAgentRunTrace = trace;
   let gatheringGuardFired = false;
@@ -449,6 +500,11 @@ export async function runAgentLoop(userMessage, options = {}) {
           if (postCapCheck.exceeded) {
             deps.debugLog("[Chief flow] Daily cap now exceeded after this call — next iteration will halt", postCapCheck);
           }
+          // Budget warning toast (fires once per threshold per session-day)
+          const budgetWarning = checkBudgetThresholds();
+          if (budgetWarning) {
+            emitBudgetWarningToast(budgetWarning);
+          }
         }
         response = {
           choices: [{
@@ -512,6 +568,11 @@ export async function runAgentLoop(userMessage, options = {}) {
           const postCapCheck = isDailyCapExceeded();
           if (postCapCheck.exceeded) {
             deps.debugLog("[Chief flow] Daily cap now exceeded after this call — next iteration will halt", postCapCheck);
+          }
+          // Budget warning toast (fires once per threshold per session-day)
+          const budgetWarning = checkBudgetThresholds();
+          if (budgetWarning) {
+            emitBudgetWarningToast(budgetWarning);
           }
         }
         toolCalls = extractToolCalls(provider, response);

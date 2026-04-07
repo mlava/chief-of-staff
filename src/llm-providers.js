@@ -704,6 +704,105 @@ export async function callLlm(provider, apiKey, model, system, messages, tools, 
 // if a meta-tool exists for their category).
 const MAX_TOOL_COUNT = 128;
 
+// ── Tiered Disclosure (#63) ────────────────────────────────────────────────
+// By default, MCP and extension tool schemas are NOT included in the tools API
+// array (saving ~70-100k chars/call). They appear only as compact tier 2 lines
+// in the system prompt (name + intent). The model accesses them via ROUTE/EXECUTE.
+//
+// "Promotion" elevates a server's tools to tier 3 (full schemas in the API array)
+// when the user's intent matches that server's domain. This avoids extra round-trips
+// for the common case while keeping the tools budget lean for unrelated queries.
+
+// Common words that appear in many tool names/descriptions — too generic to trigger promotion.
+const PROMOTION_STOP_WORDS = new Set([
+  "search", "list", "find", "get", "create", "update", "delete", "remove", "query",
+  "fetch", "read", "write", "send", "check", "status", "info", "data", "items",
+  "result", "results", "text", "name", "type", "value", "content", "page", "note",
+  "notes", "server", "tool", "tools", "from", "with", "that", "this", "have",
+  "about", "using", "google", "your", "please", "help", "what", "show", "make"
+]);
+
+/**
+ * Determine which MCP/extension server names should have their tools promoted
+ * to tier 3 (full schemas in the tools API array) based on the user's message.
+ *
+ * Uses a two-tier keyword strategy:
+ * - **Strong keywords** (server name parts): a single match promotes the server.
+ *   E.g., "sentry" in the message promotes the Sentry MCP server.
+ * - **Weak keywords** (tool name/description fragments): require 2+ distinct
+ *   matches from the same server to promote. Prevents false positives from
+ *   generic words like "search" or "list" that appear in many servers.
+ *
+ * Returns a Set of lowercase server names that should be promoted.
+ * Non-promoted servers remain accessible via ROUTE/EXECUTE meta-tools.
+ */
+export function getPromotedServerNames(userMessage, localMcpTools, remoteMcpTools, extTools) {
+  const promoted = new Set();
+  const text = String(userMessage || "").toLowerCase();
+
+  // Build server name → { strong: Set, weak: Set } keyword map.
+  const serverKeywords = new Map(); // serverName (lowercase) → { strong, weak }
+
+  const allSourceTools = [
+    ...(localMcpTools || []),
+    ...(remoteMcpTools || []),
+    ...(extTools || [])
+  ];
+
+  for (const t of allSourceTools) {
+    const serverName = (t._serverName || t._extensionName || "").toLowerCase();
+    if (!serverName) continue;
+    if (!serverKeywords.has(serverName)) {
+      const strong = new Set();
+      const weak = new Set();
+      // Server name parts are strong keywords (e.g., "sentry", "zotero", "notebooklm")
+      for (const word of serverName.split(/[\s_-]+/).filter(w => w.length > 2)) {
+        if (!PROMOTION_STOP_WORDS.has(word)) strong.add(word);
+      }
+      // Multi-word server name as a phrase (e.g., "open brain", "scholar sidekick")
+      if (serverName.includes(" ") && serverName.length > 5) {
+        strong.add(serverName);
+      }
+      serverKeywords.set(serverName, { strong, weak });
+    }
+    const entry = serverKeywords.get(serverName);
+    // Tool name domain-specific parts are weak keywords (need 2+ to promote)
+    const toolName = (t._originalName || t.name || "").toLowerCase();
+    for (const word of toolName.split(/[_-]+/).filter(w => w.length > 4)) {
+      if (!PROMOTION_STOP_WORDS.has(word)) entry.weak.add(word);
+    }
+  }
+
+  // Check user message against each server's keyword sets
+  for (const [serverName, { strong, weak }] of serverKeywords) {
+    // Strong match: any single server name keyword triggers promotion
+    let strongHit = false;
+    for (const kw of strong) {
+      if (text.includes(kw)) {
+        strongHit = true;
+        break;
+      }
+    }
+    if (strongHit) {
+      promoted.add(serverName);
+      continue;
+    }
+    // Weak match: need 2+ distinct keyword hits from tool names
+    let weakHits = 0;
+    for (const kw of weak) {
+      if (text.includes(kw)) {
+        weakHits++;
+        if (weakHits >= 2) {
+          promoted.add(serverName);
+          break;
+        }
+      }
+    }
+  }
+
+  return promoted;
+}
+
 export function filterToolsByRelevance(tools, userMessage) {
   const text = String(userMessage || "").toLowerCase();
 

@@ -1445,12 +1445,14 @@ function parseAuditLogEntry(text) {
   );
   if (!m) return null;
 
-  // Extract Prompt/Tools from remaining lines in the same block text
+  // Extract Skill/Prompt/Tools from remaining lines in the same block text
   const lines = text.split("\n");
   let prompt = "";
   let tools = "";
+  let skillName = "";
   for (let i = 1; i < lines.length; i++) {
-    if (lines[i].startsWith("Prompt:")) prompt = lines[i];
+    if (lines[i].startsWith("Skill:")) skillName = lines[i].replace("Skill:", "").trim();
+    else if (lines[i].startsWith("Prompt:")) prompt = lines[i];
     else if (lines[i].startsWith("Tools:")) tools = lines[i];
   }
 
@@ -1458,7 +1460,7 @@ function parseAuditLogEntry(text) {
     date: m[1], model: m[2], iterations: parseInt(m[3], 10),
     duration: m[4], tokens: parseInt(m[5], 10),
     cost: m[6] || "", outcome: m[7].trim(),
-    prompt, tools
+    prompt, tools, skillName
   };
 }
 
@@ -1474,8 +1476,17 @@ function renderActivityCard(block) {
 
   const card = document.createElement("div");
   card.classList.add("chief-activity-card");
+  if (parsed.skillName) card.classList.add("chief-activity-card--skill");
   if (parsed.outcome.startsWith("error")) card.classList.add("chief-activity-card--error");
   if (parsed.outcome === "cap-exceeded") card.classList.add("chief-activity-card--cap");
+
+  // Skill badge (above header for skill runs)
+  if (parsed.skillName) {
+    const skillBadge = document.createElement("div");
+    skillBadge.classList.add("chief-activity-skill-badge");
+    skillBadge.textContent = "\u2728 " + parsed.skillName;
+    card.appendChild(skillBadge);
+  }
 
   // Header: model + outcome badge
   const headerLine = document.createElement("div");

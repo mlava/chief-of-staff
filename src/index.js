@@ -135,6 +135,7 @@ import {
   callOpenAIStreaming,
   callLlm,
   filterToolsByRelevance,
+  getPromotedServerNames,
   VALID_LLM_PROVIDERS
 } from "./llm-providers.js";
 import {
@@ -672,6 +673,9 @@ function isExtensionEnabled(extensionAPI, extKey) {
 // extensions with ≤EXT_TOOLS_DIRECT_THRESHOLD tools per extension are direct,
 // the rest go through EXT_ROUTE/EXT_EXECUTE meta-tools.
 const EXT_TOOLS_DIRECT_THRESHOLD = 15;
+// Cap external tool descriptions to reduce tool token overhead (#63).
+// COS's own tool descriptions are 100-200 chars; external tools can be 500-2000+.
+const EXTERNAL_TOOL_DESCRIPTION_MAX_CHARS = 300;
 
 function getExternalExtensionTools() {
   if (externalExtensionToolsCache) return externalExtensionToolsCache;
@@ -692,7 +696,10 @@ function getExternalExtensionTools() {
         continue;
       }
       const rawDesc = t.description || "";
-      const desc = extLabel ? `[${extLabel}] ${rawDesc}` : rawDesc;
+      const prefixedDesc = extLabel ? `[${extLabel}] ${rawDesc}` : rawDesc;
+      const desc = prefixedDesc.length > EXTERNAL_TOOL_DESCRIPTION_MAX_CHARS
+        ? prefixedDesc.slice(0, EXTERNAL_TOOL_DESCRIPTION_MAX_CHARS - 1) + "…"
+        : prefixedDesc;
       const derivedMutating = typeof t.readOnly === "boolean" ? !t.readOnly
         : typeof t.isMutating === "boolean" ? t.isMutating
         : true;
@@ -2361,7 +2368,10 @@ async function findSkillEntryByName(skillName, options = {}) {
   if (!entries.length) return null;
   const exact = entries.find((entry) => entry.title.toLowerCase() === target);
   if (exact) return exact;
-  return entries.find((entry) => entry.title.toLowerCase().includes(target)) || null;
+  // Check both directions: skill title contains target, or target contains skill title
+  const partial = entries.find((entry) => entry.title.toLowerCase().includes(target));
+  if (partial) return partial;
+  return entries.find((entry) => target.includes(entry.title.toLowerCase())) || null;
 }
 
 function resolveMemoryPageTitle(page) {
@@ -3543,7 +3553,7 @@ function getCosIntegrationTools() {
   ];
 }
 
-async function getAvailableToolSchemas() {
+async function getAvailableToolSchemas(userMessage) {
   const metaTools = getComposioMetaToolsForLlm();
   const registry = getToolkitSchemaRegistry();
 
@@ -3614,21 +3624,55 @@ async function getAvailableToolSchemas() {
   const hasRoamMetaTargets = allRoamTools.some(t => !t._isDirect);
   const roamMetaTools = hasRoamMetaTargets ? [buildRoamRouteTool(), buildRoamExecuteTool()] : [];
 
+  // ── Tiered Disclosure (#63) ────────────────────────────────────────────────
+  // MCP and extension tools use a tiered disclosure model to reduce tool token
+  // overhead. By default, only ROUTE/EXECUTE meta-tools are in the tools array.
+  // Direct tool schemas are only promoted to the array when the user's intent
+  // matches the server's domain (detected by getPromotedServerNames).
+  // Non-promoted tools appear as compact tier 2 lines in the system prompt
+  // (name + description) and are accessible via ROUTE → EXECUTE.
   const allLocalMcpTools = getLocalMcpTools();
-  const directMcpTools = allLocalMcpTools.filter(t => t._isDirect);
-  const hasMetaTargets = allLocalMcpTools.some(t => !t._isDirect);
-  const localMcpMetaTool = hasMetaTargets ? [buildLocalMcpRouteTool(), buildLocalMcpMetaTool()] : [];
-
   const allRemoteMcpTools = getRemoteMcpTools();
-  const directRemoteTools = allRemoteMcpTools.filter(t => t._isDirect);
-  const hasRemoteMetaTargets = allRemoteMcpTools.some(t => !t._isDirect);
-  const remoteMcpMetaTool = hasRemoteMetaTargets ? [buildRemoteMcpRouteTool(), buildRemoteMcpMetaTool()] : [];
-
-  // Extension Tools API: split into direct vs routed (same pattern as Roam/MCP tools)
   const allExtTools = getExternalExtensionTools();
-  const directExtTools = allExtTools.filter(t => t._isDirect);
-  const hasExtMetaTargets = allExtTools.some(t => !t._isDirect);
-  const extMetaTools = hasExtMetaTargets ? [buildExtRouteTool(), buildExtExecuteTool()] : [];
+
+  // Determine which servers to promote based on user intent
+  const promotedServers = userMessage
+    ? getPromotedServerNames(userMessage, allLocalMcpTools, allRemoteMcpTools, allExtTools)
+    : new Set(); // No message = no promotion (e.g. deterministic router calls)
+
+  // Local MCP: promote direct tools only for matched servers
+  const directMcpTools = allLocalMcpTools.filter(t =>
+    t._isDirect && promotedServers.has((t._serverName || "").toLowerCase())
+  );
+  // Always include meta-tools if there are ANY local MCP tools (promoted or not),
+  // so non-promoted tools remain accessible via ROUTE/EXECUTE.
+  const hasAnyLocalMcpTools = allLocalMcpTools.length > 0;
+  const localMcpMetaTool = hasAnyLocalMcpTools ? [buildLocalMcpRouteTool(), buildLocalMcpMetaTool()] : [];
+
+  // Remote MCP: same pattern
+  const directRemoteTools = allRemoteMcpTools.filter(t =>
+    t._isDirect && promotedServers.has((t._serverName || "").toLowerCase())
+  );
+  const hasAnyRemoteMcpTools = allRemoteMcpTools.length > 0;
+  const remoteMcpMetaTool = hasAnyRemoteMcpTools ? [buildRemoteMcpRouteTool(), buildRemoteMcpMetaTool()] : [];
+
+  // Extension Tools API: same pattern
+  const directExtTools = allExtTools.filter(t =>
+    t._isDirect && promotedServers.has((t._extensionName || "").toLowerCase())
+  );
+  const hasAnyExtTools = allExtTools.length > 0;
+  const extMetaTools = hasAnyExtTools ? [buildExtRouteTool(), buildExtExecuteTool()] : [];
+
+  // Log promotion results for debugging
+  const demotedLocalCount = allLocalMcpTools.filter(t => t._isDirect).length - directMcpTools.length;
+  const demotedRemoteCount = allRemoteMcpTools.filter(t => t._isDirect).length - directRemoteTools.length;
+  const demotedExtCount = allExtTools.filter(t => t._isDirect).length - directExtTools.length;
+  if (demotedLocalCount > 0 || demotedRemoteCount > 0 || demotedExtCount > 0) {
+    debugLog("[Chief flow] Tiered disclosure: demoted", {
+      localMcp: demotedLocalCount, remoteMcp: demotedRemoteCount, ext: demotedExtCount,
+      promoted: [...promotedServers].join(", ") || "(none)"
+    });
+  }
 
   const rawTools = [...adjustedMetaTools, ...composioDirectTools, ...directRoamTools, ...roamMetaTools, ...getBetterTasksTools(), ...getCosIntegrationTools(), ...getCronTools(), ...directExtTools, ...extMetaTools, ...directMcpTools, ...localMcpMetaTool, ...directRemoteTools, ...remoteMcpMetaTool];
 
