@@ -671,10 +671,13 @@ export async function connectLocalMcp(port) {
           } else {
             isMutating = undefined;
           }
+          // Cap external tool descriptions to reduce tool token overhead (#63)
+          const rawDesc = t.description || "";
+          const trimmedDesc = rawDesc.length > 300 ? rawDesc.slice(0, 299) + "…" : rawDesc;
           tools.push({
             name: toolName,
             isMutating,
-            description: t.description || "",
+            description: trimmedDesc,
             input_schema: t.inputSchema || { type: "object", properties: {} },
             _annotations: annotations,
             _serverName: serverName,

@@ -301,6 +301,18 @@
     text-overflow: ellipsis;
 }
 
+.chief-activity-card--skill {
+    border-color: rgba(139, 92, 246, 0.3);
+    background: rgba(139, 92, 246, 0.04);
+}
+
+.chief-activity-skill-badge {
+    font-size: 11px;
+    font-weight: 600;
+    color: #8b5cf6;
+    margin-bottom: 4px;
+}
+
 /* --- Messages Area --- */
 [data-chief-chat-messages] {
     flex: 1;

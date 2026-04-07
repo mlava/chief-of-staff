@@ -29,6 +29,11 @@ const USAGE_STATS_MAX_DAYS = 90;
 
 let auditTrimInFlight = false;
 
+// Budget warning thresholds — tracks which thresholds have been shown this session
+// to avoid repeat toasts. Resets when the day changes.
+const BUDGET_WARNING_THRESHOLDS = [0.5, 0.8, 1.0]; // 50%, 80%, 100%
+let budgetWarningsFiredToday = { dateKey: "", firedThresholds: new Set() };
+
 // Firebase/Roam Depot keys cannot contain . # $ / [ ]
 function sanitiseKey(k) {
   return typeof k === "string" ? k.replace(/[.#$/[\]]/g, "_") : k;
@@ -131,6 +136,36 @@ export function isDailyCapExceeded() {
   return { exceeded: spent >= cap, cap, spent };
 }
 
+/**
+ * Checks if any budget warning thresholds (50%, 80%, 100%) have been newly
+ * crossed since the last check. Returns the highest newly-crossed threshold
+ * as a fraction (0.5, 0.8, 1.0) or null if no new threshold was crossed.
+ * Each threshold fires at most once per session-day.
+ */
+export function checkBudgetThresholds() {
+  const capStr = deps.getSettingString(deps.getExtensionAPIRef(), deps.SETTINGS_KEYS.dailySpendingCap, "");
+  if (!capStr) return null;
+  const cap = parseFloat(capStr);
+  if (isNaN(cap) || cap <= 0) return null;
+  const today = todayDateKey();
+  const spent = costHistory.days[today]?.cost || 0;
+  const ratio = spent / cap;
+
+  // Reset tracking if the day changed
+  if (budgetWarningsFiredToday.dateKey !== today) {
+    budgetWarningsFiredToday = { dateKey: today, firedThresholds: new Set() };
+  }
+
+  let highestNew = null;
+  for (const threshold of BUDGET_WARNING_THRESHOLDS) {
+    if (ratio >= threshold && !budgetWarningsFiredToday.firedThresholds.has(threshold)) {
+      budgetWarningsFiredToday.firedThresholds.add(threshold);
+      highestNew = threshold;
+    }
+  }
+  return highestNew ? { threshold: highestNew, spent, cap, pct: Math.round(highestNew * 100) } : null;
+}
+
 export function getCostHistorySummary() {
   const today = todayDateKey();
   const todayData = costHistory.days[today] || { cost: 0, input: 0, output: 0, requests: 0, models: {} };
@@ -176,12 +211,14 @@ export function getCostHistorySummary() {
  * Writes to "Chief of Staff/Audit Log" with newest entries first.
  * Non-fatal — errors are swallowed so audit logging never breaks the agent flow.
  */
-export async function persistAuditLogEntry(trace, userPrompt) {
+export async function persistAuditLogEntry(trace, userPrompt, options = {}) {
   try {
     if (!trace || !trace.startedAt) return;
     const pageTitle = "Chief of Staff/Audit Log";
     const pageUid = await deps.ensurePageUidByTitle(pageTitle);
     if (!pageUid) return;
+
+    const { skillName = null } = options;
 
     const dateStr = deps.formatRoamDate(new Date(trace.startedAt));
     const durationSec = trace.finishedAt
@@ -205,9 +242,11 @@ export async function persistAuditLogEntry(trace, userPrompt) {
       .replace(/\{\{/g, "⦃⦃").replace(/\}\}/g, "⦄⦄")
       .replace(/\(\(/g, "⦅⦅").replace(/\)\)/g, "⦆⦆");
 
+    const skillLine = skillName ? `\nSkill: ${String(skillName).slice(0, 60)}` : "";
     const block = `[[${dateStr}]] **${trace.model || "unknown"}** `
       + `(${trace.iterations || 0} iter, ${durationSec}s, ${tokens} tok${cost ? ", " + cost : ""}) `
       + `— ${outcome}`
+      + skillLine
       + `\nPrompt: ${prompt}`
       + `\nTools: ${toolSummary}`;
 
@@ -383,6 +422,37 @@ export function recordEvalRun(avgScore) {
   persistUsageStatsSettings();
 }
 
+/**
+ * Records tool token usage snapshot for a single agent run.
+ * Accumulates daily averages and per-source breakdown so we can track
+ * whether optimizations (description trimming, mini-tier filtering) are
+ * actually reducing tool token overhead over time.
+ * @param {{ toolsChars: number, toolPct: number, toolCount: number, breakdown: object }} snapshot
+ */
+export function recordToolTokenSnapshot(snapshot) {
+  const day = ensureTodayUsageStats();
+  if (!day.toolTokens) {
+    day.toolTokens = { runs: 0, avgChars: 0, avgPct: 0, avgToolCount: 0, breakdown: {} };
+  }
+  const tt = day.toolTokens;
+  const prevCharsTotal = tt.runs * tt.avgChars;
+  const prevPctTotal = tt.runs * tt.avgPct;
+  const prevCountTotal = tt.runs * tt.avgToolCount;
+  tt.runs += 1;
+  tt.avgChars = Math.round((prevCharsTotal + snapshot.toolsChars) / tt.runs);
+  tt.avgPct = Math.round((prevPctTotal + snapshot.toolPct) / tt.runs);
+  tt.avgToolCount = Math.round((prevCountTotal + snapshot.toolCount) / tt.runs);
+  // Accumulate per-source breakdown (running averages)
+  if (snapshot.breakdown) {
+    for (const [source, chars] of Object.entries(snapshot.breakdown)) {
+      if (source === "total") continue;
+      const prev = tt.breakdown[source] || 0;
+      tt.breakdown[source] = Math.round((prev * (tt.runs - 1) + chars) / tt.runs);
+    }
+  }
+  persistUsageStatsSettings();
+}
+
 function formatGuardOutcomeSummary(guardOutcomes) {
   if (!guardOutcomes) return "";
   const parts = [];
@@ -426,13 +496,18 @@ export async function persistUsageStatsPage() {
     // Guard accuracy summary
     const guardStr = formatGuardOutcomeSummary(day.guardOutcomes);
 
+    // Tool token overhead summary
+    const toolTokenStr = day.toolTokens && day.toolTokens.runs > 0
+      ? ` | tools: avg ${Math.round(day.toolTokens.avgChars / 1000)}k chars (${day.toolTokens.avgPct}% of input), ${day.toolTokens.avgToolCount} tools`
+      : "";
+
     const block = `[[${dateStr}]] — ${day.agentRuns} runs | ${totalToolCalls} tool calls`
       + ` | approvals ${approvalStr}`
       + ` | ${day.injectionWarnings} injection warn`
       + ` | ${day.claimedActionFires} claimed-action`
       + ` | ${day.tierEscalations} escalations`
       + ` | ${day.memoryWriteBlocks} mem blocks`
-      + evalStr + guardStr
+      + evalStr + guardStr + toolTokenStr
       + (topTools ? ` | Top: ${topTools}` : "");
 
     // Find existing block for today — update in place to avoid duplicates

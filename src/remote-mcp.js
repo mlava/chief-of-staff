@@ -550,13 +550,23 @@ export function buildRemoteMcpRouteTool() {
 
       if (serverTools.length === 0) {
         const lowerName2 = (serverName || "").toLowerCase();
-        const directMatch = cache.find(t => t._isDirect && t._isRemote && (
-          t.name.toLowerCase() === lowerName2 ||
+        // Find ALL direct tools from this server, not just the first match
+        const directTools = cache.filter(t => t._isDirect && t._isRemote && (
           (t._serverName || "").toLowerCase() === lowerName2 ||
           (t._serverName || "").toLowerCase().includes(lowerName2)
         ));
-        if (directMatch) {
-          return { error: `"${serverName}" is a DIRECT tool, not a routed server. Do NOT use REMOTE_MCP_ROUTE for it. Instead, call the tool "${directMatch.name}" directly with its arguments.` };
+        if (directTools.length > 0) {
+          // Show all tool names. Note: cross-source dedup may have renamed these
+          // (e.g. search_issues → sentry__search_issues). The actual names in the
+          // cache may already reflect within-remote-MCP renames; cross-source renames
+          // are applied at schema assembly time. Hint the namespaced form so the model
+          // can find the right tool even if it was cross-source renamed.
+          const prefix = serverNameToPrefix(directTools[0]._serverName || serverName);
+          const toolList = directTools.map(t => {
+            const namespacedHint = `${prefix}__${t._originalName || t.name}`;
+            return namespacedHint !== t.name ? `${t.name} (or ${namespacedHint} if renamed)` : t.name;
+          });
+          return { error: `"${serverName}" is a DIRECT server — its tools are in your tool list. Do NOT use REMOTE_MCP_ROUTE. Call these tools directly: ${toolList.join(", ")}` };
         }
         const available = [...new Set(cache.filter(t => !t._isDirect && t._isRemote).map(t => t._serverName))];
         return { error: `Remote server "${serverName}" not found. Available routed servers: ${available.join(", ") || "(none)"}` };
@@ -877,10 +887,13 @@ export async function connectRemoteMcp(serverConfig) {
           else if (annotations?.destructiveHint === true || annotations?.readOnlyHint === false) isMutating = true;
           else isMutating = undefined;
 
+          // Cap external tool descriptions to reduce tool token overhead (#63)
+          const rawDesc = t.description || "";
+          const trimmedDesc = rawDesc.length > 300 ? rawDesc.slice(0, 299) + "…" : rawDesc;
           tools.push({
             name: toolName,
             isMutating,
-            description: t.description || "",
+            description: trimmedDesc,
             input_schema: t.inputSchema || { type: "object", properties: {} },
             _annotations: annotations,
             _serverName: serverName,

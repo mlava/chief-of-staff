@@ -19,6 +19,7 @@ import { showInfoToastIfAllowed, promptWriteToDailyPage, promptToolExecutionAppr
 import { loadCronJobs } from "./cron-scheduler.js";
 import { buildDefaultSystemPrompt } from "./system-prompt.js";
 import { wrapUntrustedWithInjectionScan } from "./security.js";
+import { persistAuditLogEntry, recordUsageStat } from "./usage-tracking.js";
 
 // ── Dependency injection ───────────────────────────────────────────────────────
 
@@ -117,10 +118,13 @@ export function parseSkillInvocationIntent(userMessage) {
   const text = String(userMessage || "").trim();
   if (!text) return null;
 
+  // Strip leading articles/possessives that aren't part of skill names
+  const stripLeadingNoise = (s) => String(s || "").replace(/^(?:my|the|a)\s+/i, "").trim();
+
   const explicitMatch = text.match(/^(?:please\s+)?(?:use|apply|run)\s+(?:the\s+)?skill\s+["\u201C\u201D\u2018\u2019']?([^"\u201C\u201D\u2018\u2019']+?)["\u201C\u201D\u2018\u2019']?(?:\s+(?:on|for)\s+(.+))?$/i);
   if (explicitMatch) {
     return {
-      skillName: String(explicitMatch[1] || "").trim(),
+      skillName: stripLeadingNoise(explicitMatch[1]),
       targetText: String(explicitMatch[2] || "").trim(),
       originalPrompt: text
     };
@@ -129,7 +133,7 @@ export function parseSkillInvocationIntent(userMessage) {
   const inverseMatch = text.match(/^(?:please\s+)?(?:use|apply|run)\s+(.+?)\s+skill(?:\s+(?:on|for)\s+(.+))?$/i);
   if (inverseMatch) {
     return {
-      skillName: String(inverseMatch[1] || "").trim(),
+      skillName: stripLeadingNoise(inverseMatch[1]),
       targetText: String(inverseMatch[2] || "").trim(),
       originalPrompt: text
     };
@@ -285,9 +289,12 @@ async function runDeterministicMemorySave(intent) {
 export function parseSkillSources(skillContent, knownToolNames = null) {
   const lines = String(skillContent || "").split("\n");
 
-  // Phase 1: find the "Sources" header and collect its child lines
+  // Phase 1: find the "Sources" header and collect its direct child lines.
+  // Sub-indented lines (deeper than the first child level) are continuations
+  // of the previous source entry, not separate sources — skip them.
   let inSources = false;
   let sourceIndent = -1;
+  let childIndent = -1; // indent of first direct child (set on first child line)
   const sourceLines = [];
 
   for (const line of lines) {
@@ -299,11 +306,17 @@ export function parseSkillSources(skillContent, knownToolNames = null) {
       continue;
     }
     const indent = (line.match(/^(\s*)/)?.[1] || "").length;
-    if (indent > sourceIndent && line.trim()) {
-      sourceLines.push(line.trim().replace(/^-\s*/, ""));
-    } else if (line.trim()) {
+    if (indent <= sourceIndent && line.trim()) {
       break; // back to same or lower indent = end of sources
     }
+    if (!line.trim()) continue;
+    // First child sets the reference indent for direct children
+    if (childIndent < 0) childIndent = indent;
+    // Only collect direct children (at childIndent); skip deeper sub-children
+    if (indent <= childIndent) {
+      sourceLines.push(line.trim().replace(/^-\s*/, ""));
+    }
+    // else: sub-indented continuation line — skip (part of previous source)
   }
 
   if (!sourceLines.length) return [];
@@ -329,9 +342,13 @@ export function parseSkillSources(skillContent, knownToolNames = null) {
     const toolTwoWord = cleanSeg.match(/^([\w]+[-_][\w]+)/)?.[1] || "";
     const toolOneWord = cleanSeg.match(/^([\w]+)/)?.[1] || "";
     const SOURCE_TOOL_NAME_MAP = deps.SOURCE_TOOL_NAME_MAP;
-    const resolvedTool = SOURCE_TOOL_NAME_MAP[toolThreeWord]
-      || SOURCE_TOOL_NAME_MAP[toolTwoWord]
-      || SOURCE_TOOL_NAME_MAP[toolOneWord];
+    // Normalise hyphens ↔ underscores so "list_calendars" matches "list-calendars" and vice-versa
+    const lookupVariants = (key) => SOURCE_TOOL_NAME_MAP[key]
+      || SOURCE_TOOL_NAME_MAP[key.replace(/_/g, "-")]
+      || SOURCE_TOOL_NAME_MAP[key.replace(/-/g, "_")];
+    const resolvedTool = lookupVariants(toolThreeWord)
+      || lookupVariants(toolTwoWord)
+      || lookupVariants(toolOneWord);
 
     if (resolvedTool) {
       sources.push({ tool: resolvedTool, description: seg });
@@ -339,15 +356,37 @@ export function parseSkillSources(skillContent, knownToolNames = null) {
     }
 
     // Fallback: check live tool registry for extension tools not in the static map
+    // Also try hyphen ↔ underscore variants against the live registry
     if (knownToolNames) {
-      const directMatch = knownToolNames.has(toolThreeWord) ? toolThreeWord
-        : knownToolNames.has(toolTwoWord) ? toolTwoWord
-          : knownToolNames.has(toolOneWord) ? toolOneWord
+      const tryLive = (key) => knownToolNames.has(key) ? key
+        : knownToolNames.has(key.replace(/_/g, "-")) ? key.replace(/_/g, "-")
+          : knownToolNames.has(key.replace(/-/g, "_")) ? key.replace(/-/g, "_")
             : null;
+      const directMatch = tryLive(toolThreeWord)
+        || tryLive(toolTwoWord)
+        || tryLive(toolOneWord);
       if (directMatch) {
         sources.push({ tool: directMatch, description: seg });
         continue;
       }
+      // Cross-source deduped names (e.g. sentry__search_issues): the deduped name
+      // may not exist yet if servers were down at startup, but the original name
+      // (search_issues) might. Accept the deduped name as-is so the gathering guard
+      // recognises the intent even if the exact name isn't in the registry right now.
+      const bestToken = toolThreeWord || toolTwoWord || toolOneWord;
+      const dIdx = bestToken.indexOf("__");
+      if (dIdx > 0) {
+        sources.push({ tool: bestToken, description: seg });
+        continue;
+      }
+    }
+
+    // Inline meta-tool references (e.g. "GitHub Issues: Use Route: LOCAL_MCP_ROUTE(...)")
+    // The source line describes a multi-step flow — register the meta-tool as the source.
+    const metaToolMatch = cleanSeg.match(/\b(LOCAL_MCP_ROUTE|LOCAL_MCP_EXECUTE|REMOTE_MCP_ROUTE|REMOTE_MCP_EXECUTE)\b/);
+    if (metaToolMatch) {
+      sources.push({ tool: metaToolMatch[1], description: seg });
+      continue;
     }
 
     // Pure page references (no tool prefix)
@@ -416,21 +455,28 @@ export function parseSkillTools(skillContent, knownToolNames = null) {
       const twoWord = token.match(/^([\w]+[-_][\w]+)/)?.[1] || "";
       const oneWord = token.match(/^([\w]+)/)?.[1] || "";
 
-      const mapped = SOURCE_TOOL_NAME_MAP[threeWord]
-        || SOURCE_TOOL_NAME_MAP[twoWord]
-        || SOURCE_TOOL_NAME_MAP[oneWord];
+      // Normalise hyphens ↔ underscores so "list_calendars" matches "list-calendars" and vice-versa
+      const lookupVariants = (key) => SOURCE_TOOL_NAME_MAP[key]
+        || SOURCE_TOOL_NAME_MAP[key.replace(/_/g, "-")]
+        || SOURCE_TOOL_NAME_MAP[key.replace(/-/g, "_")];
+      const mapped = lookupVariants(threeWord)
+        || lookupVariants(twoWord)
+        || lookupVariants(oneWord);
       if (mapped && !seen.has(mapped)) {
         seen.add(mapped);
         resolved.push(mapped);
         continue;
       }
 
-      // Fallback: check live tool registry
+      // Fallback: check live tool registry (with hyphen ↔ underscore normalisation)
       if (knownToolNames) {
-        const direct = knownToolNames.has(threeWord) ? threeWord
-          : knownToolNames.has(twoWord) ? twoWord
-            : knownToolNames.has(oneWord) ? oneWord
+        const tryLive = (key) => knownToolNames.has(key) ? key
+          : knownToolNames.has(key.replace(/_/g, "-")) ? key.replace(/_/g, "-")
+            : knownToolNames.has(key.replace(/-/g, "_")) ? key.replace(/-/g, "_")
               : null;
+        const direct = tryLive(threeWord)
+          || tryLive(twoWord)
+          || tryLive(oneWord);
         if (direct && !seen.has(direct)) {
           seen.add(direct);
           resolved.push(direct);
@@ -745,6 +791,39 @@ function resolveToolWhitelist(parsedToolNames, allToolSchemas, localMcpTools, re
       continue;
     }
 
+    // Cross-source deduped names (e.g. sentry__search_issues, github_mcp_server__search_issues).
+    // These are created at schema assembly time. Resolve the original tool name from the
+    // server prefix and look up in MCP caches to determine the right meta-tools.
+    const dedupIdx = name.indexOf("__");
+    if (dedupIdx > 0) {
+      const origName = name.slice(dedupIdx + 2);
+      const serverPrefix = name.slice(0, dedupIdx);
+      // Check remote MCP first
+      const rTool = remoteMcpTools.find(t =>
+        (t.name === origName || t._originalName === origName) &&
+        (t._serverName || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") === serverPrefix
+      );
+      if (rTool) {
+        whitelist.add(name);
+        // Also add the original name — the schema may use it when no cross-source
+        // collision occurred (e.g. Sentry direct tool stays as "search_issues")
+        whitelist.add(rTool.name);
+        if (!rTool._isDirect) { whitelist.add("REMOTE_MCP_ROUTE"); whitelist.add("REMOTE_MCP_EXECUTE"); }
+        continue;
+      }
+      // Check local MCP
+      const lTool = localMcpTools.find(t =>
+        (t.name === origName || t._originalName === origName) &&
+        (t._serverName || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") === serverPrefix
+      );
+      if (lTool) {
+        whitelist.add(name);
+        whitelist.add(lTool.name);
+        if (!lTool._isDirect) { whitelist.add("LOCAL_MCP_ROUTE"); whitelist.add("LOCAL_MCP_EXECUTE"); }
+        continue;
+      }
+    }
+
     // Not found anywhere — graceful degradation
     warnings.push(`tool "${name}" not currently available (MCP server down or tool not installed)`);
   }
@@ -787,6 +866,9 @@ async function runDeterministicSkillInvocation(intent, options = {}) {
   // tools like "sentry_mcp__search_issues" from routed servers are recognised.
   const toolSchemas = await deps.getAvailableToolSchemas();
   const knownToolNames = new Set(toolSchemas.map(t => t.name));
+  // getAvailableToolSchemas only returns direct roam tools — add ALL roam native
+  // tools (including routed ones like roam_get_backlinks) so gathering guard recognises them
+  for (const t of (deps.getRoamNativeTools() || [])) knownToolNames.add(t.name);
   for (const t of getLocalMcpTools()) knownToolNames.add(t.name);
   for (const t of getRemoteMcpTools()) knownToolNames.add(t.name);
   // Include Composio installed tool slugs so gathering guard recognises them
@@ -993,6 +1075,16 @@ ${systemPromptSuffix}${mcpToolHintsSection}`;
       }
     } else {
       deps.debugLog("[Chief flow] Skill response doesn't look like briefing content, skipping DNP write:", responseText.slice(0, 200));
+    }
+  }
+
+  // Persist audit log entry for skill runs (non-blocking, non-fatal)
+  // Skill runs go through runAgentLoopWithFailover so a trace exists.
+  if (typeof deps.getLastAgentRunTrace === "function") {
+    const auditTrace = deps.getLastAgentRunTrace();
+    if (auditTrace) {
+      persistAuditLogEntry(auditTrace, skillPrompt, { skillName: skill.title });
+      recordUsageStat("agentRuns");
     }
   }
 
@@ -2048,6 +2140,48 @@ export async function tryRunDeterministicAskIntent(prompt, context = {}) {
     deps.debugLog("[Chief flow] Deterministic route matched: memory_save");
     const responseText = await runDeterministicMemorySave(memorySaveIntent);
     return deps.publishAskResponse(prompt, responseText, assistantName, suppressToasts);
+  }
+
+  // ── Skill optimization intent (must be checked BEFORE skill invocation) ──
+  if (typeof deps.parseSkillOptimizeIntent === "function") {
+    const optimizeIntent = deps.parseSkillOptimizeIntent(prompt);
+    if (optimizeIntent) {
+      const enabled = extensionAPIRef?.settings?.get?.(deps.SETTINGS_KEYS?.skillAutoresearchEnabled);
+      if (!enabled) {
+        return deps.publishAskResponse(prompt,
+          "Skill auto-optimisation is not enabled. Enable it in Settings \u2192 Automatic Actions.",
+          assistantName, suppressToasts);
+      }
+      deps.debugLog("[Chief flow] Deterministic route matched: skill_optimize", optimizeIntent.skillName);
+      const entry = await deps.findSkillEntryByName(optimizeIntent.skillName, { force: true });
+      if (!entry) {
+        const entries = await deps.getSkillEntries({ force: false });
+        const available = entries.map(e => e.title).slice(0, 12).join(", ");
+        return deps.publishAskResponse(prompt,
+          `Skill "${optimizeIntent.skillName}" not found. Available: ${available}`,
+          assistantName, suppressToasts);
+      }
+      if (deps.isOptimizationRunning?.()) {
+        return deps.publishAskResponse(prompt,
+          "An optimization is already running. Wait for it to complete.",
+          assistantName, suppressToasts);
+      }
+      const budgetStr = deps.getSettingString(extensionAPIRef, deps.SETTINGS_KEYS?.skillAutoresearchBudget, "2.00");
+      const budget = parseFloat(budgetStr) || 2.0;
+      // Fire-and-forget — do NOT await
+      deps.runSkillOptimization(entry.title, { budgetUsd: budget, withTools: !!optimizeIntent.withTools }).catch(err => {
+        deps.debugLog("[Autoresearch] Background optimization failed:", err?.message);
+        deps.showErrorToast("Optimisation Failed", err?.message || "Unknown error");
+      });
+      // Check both the flag and the settings toggle to determine the actual mode
+      const toolCallingSetting = extensionAPIRef?.settings?.get?.(deps.SETTINGS_KEYS?.skillAutoresearchToolCalling);
+      const willUseTools = optimizeIntent.withTools || toolCallingSetting;
+      const modeLabel = willUseTools ? "tool-calling" : "LLM-only";
+      return deps.publishAskResponse(prompt,
+        `Starting optimisation of "${entry.title}" (${modeLabel}, budget: $${budget.toFixed(2)}). `
+        + `This runs in the background \u2014 I'll show a toast when it's done with results to accept or revert.`,
+        assistantName, suppressToasts);
+    }
   }
 
   const skillIntent = parseSkillInvocationIntent(prompt);

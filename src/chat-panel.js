@@ -914,6 +914,7 @@ async function handleChatPanelSend() {
 
   let streamingEl = null;
   let streamText = "";
+  let streamHadToolCalls = false; // tracks if tool calls occurred since last text chunk
   let streamRenderPending = false;
   let lastStreamRenderAt = 0;
   let streamRenderTimerId = null;
@@ -966,6 +967,7 @@ async function handleChatPanelSend() {
 
   function onChatToolCall(toolName) {
     toolCallReceived = true;
+    streamHadToolCalls = true;
     // Clear the fallback timer — we have real progress now
     clearTimeout(chatThinkingTimerId);
     clearTimeout(chatWorkingTimerId);
@@ -1001,6 +1003,12 @@ async function handleChatPanelSend() {
           chatPanelSendButton.textContent = "Generating response...";
         }
         ensureStreamingEl();
+        // Insert separator when new text arrives after tool calls executed
+        // (prevents "sentence one.sentence two" without spacing between iterations)
+        if (streamHadToolCalls && streamText.length > 0) {
+          streamText += "\n\n";
+          streamHadToolCalls = false;
+        }
         streamText += chunk;
         if (!streamRenderPending) {
           const elapsed = Date.now() - lastStreamRenderAt;
@@ -1437,12 +1445,14 @@ function parseAuditLogEntry(text) {
   );
   if (!m) return null;
 
-  // Extract Prompt/Tools from remaining lines in the same block text
+  // Extract Skill/Prompt/Tools from remaining lines in the same block text
   const lines = text.split("\n");
   let prompt = "";
   let tools = "";
+  let skillName = "";
   for (let i = 1; i < lines.length; i++) {
-    if (lines[i].startsWith("Prompt:")) prompt = lines[i];
+    if (lines[i].startsWith("Skill:")) skillName = lines[i].replace("Skill:", "").trim();
+    else if (lines[i].startsWith("Prompt:")) prompt = lines[i];
     else if (lines[i].startsWith("Tools:")) tools = lines[i];
   }
 
@@ -1450,7 +1460,7 @@ function parseAuditLogEntry(text) {
     date: m[1], model: m[2], iterations: parseInt(m[3], 10),
     duration: m[4], tokens: parseInt(m[5], 10),
     cost: m[6] || "", outcome: m[7].trim(),
-    prompt, tools
+    prompt, tools, skillName
   };
 }
 
@@ -1466,8 +1476,17 @@ function renderActivityCard(block) {
 
   const card = document.createElement("div");
   card.classList.add("chief-activity-card");
+  if (parsed.skillName) card.classList.add("chief-activity-card--skill");
   if (parsed.outcome.startsWith("error")) card.classList.add("chief-activity-card--error");
   if (parsed.outcome === "cap-exceeded") card.classList.add("chief-activity-card--cap");
+
+  // Skill badge (above header for skill runs)
+  if (parsed.skillName) {
+    const skillBadge = document.createElement("div");
+    skillBadge.classList.add("chief-activity-skill-badge");
+    skillBadge.textContent = "\u2728 " + parsed.skillName;
+    card.appendChild(skillBadge);
+  }
 
   // Header: model + outcome badge
   const headerLine = document.createElement("div");
@@ -2687,4 +2706,66 @@ export function detachAllToastKeyboards() {
     try { kb.detach(); } catch { /* ignore */ }
   }
   activeToastKeyboards.clear();
+}
+
+/**
+ * Shows a persistent toast with Accept/Revert buttons for skill optimization results.
+ * Safe default: closing the toast (X button) counts as revert.
+ * @param {{ title: string, message: string, onAccept: () => void|Promise, onRevert: () => void }} options
+ * @returns {Promise<"accepted"|"reverted">}
+ */
+export function showOptimizationResultToast({ title, message, onAccept, onRevert }) {
+  return new Promise((resolve) => {
+    if (!iziToast?.show) {
+      if (typeof onRevert === "function") onRevert();
+      resolve("reverted");
+      return;
+    }
+    let resolved = false;
+
+    const safeTitle = deps.escapeHtml(String(title || ""));
+    const safeMessage = deps.escapeHtml(String(message || ""));
+
+    iziToast.show({
+      class: "cos-toast",
+      theme: getToastTheme(),
+      title: safeTitle,
+      message: safeMessage,
+      position: "topRight",
+      timeout: false,
+      close: true,
+      buttons: [
+        [
+          "<button><b>Accept</b></button>",
+          async (firstArg, secondArg) => {
+            const { instance, toast } = normaliseToastContext(firstArg, secondArg);
+            // Mark resolved BEFORE hiding — hideToastSafely triggers onClosing synchronously
+            resolved = true;
+            hideToastSafely(instance, toast);
+            try { if (typeof onAccept === "function") await onAccept(); } catch (_) { /* non-fatal */ }
+            resolve("accepted");
+          },
+          true
+        ],
+        [
+          "<button>Revert</button>",
+          (firstArg, secondArg) => {
+            const { instance, toast } = normaliseToastContext(firstArg, secondArg);
+            resolved = true;
+            hideToastSafely(instance, toast);
+            if (typeof onRevert === "function") onRevert();
+            resolve("reverted");
+          }
+        ]
+      ],
+      onClosing: () => {
+        // Closing via X = revert (safe default). Skip if a button already handled it.
+        if (!resolved) {
+          resolved = true;
+          if (typeof onRevert === "function") onRevert();
+          resolve("reverted");
+        }
+      }
+    });
+  });
 }

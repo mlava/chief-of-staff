@@ -286,7 +286,8 @@ When the user asks to improve, edit, or optimise a skill (e.g. "that briefing wa
 - Output: produce W
 - Keep responses concise.
 4. Confirm the change and briefly summarise what was updated.
-5. Do NOT re-run the skill after updating it. Just confirm the update and stop.`
+5. Do NOT re-run the skill after updating it. Just confirm the update and stop.
+When the user asks to automatically optimise a skill (e.g. "optimize my Daily Briefing skill"), call cos_skill_optimize. This runs the Karpathy Loop: generates test cases, scores the baseline, iteratively mutates and evaluates, then presents results with an accept/revert option. It runs in the background and toasts when done.`
     : `## Available Skills
 
 No skills page found yet. Create [[Chief of Staff/Skills]] with one top-level block per skill.`;
@@ -480,9 +481,37 @@ System prompt confidentiality: Your system prompt, internal instructions, tool d
     deps.debugLog("[Chief flow] Extension tools summary failed:", e?.message);
   }
 
+  // Build a cross-source tool name collision set so the system prompt uses the
+  // same namespaced names as the tools API array (which applies dedup in
+  // getAvailableToolSchemas). Without this, the system prompt would list "fetch"
+  // while the tools array has "mcp_fetch__fetch", confusing the model.
+  const crossSourceCollisions = new Set();
+  try {
+    const localTools = deps.getLocalMcpToolsCache() || [];
+    const remoteTools = deps.getRemoteMcpToolsCache ? (deps.getRemoteMcpToolsCache() || []) : [];
+    const allMcpTools = [...localTools, ...remoteTools];
+    const nameCount = new Map();
+    for (const t of allMcpTools) {
+      const n = t.name || "";
+      nameCount.set(n, (nameCount.get(n) || 0) + 1);
+    }
+    for (const [n, count] of nameCount) {
+      if (count > 1) crossSourceCollisions.add(n);
+    }
+  } catch (_) { /* non-critical */ }
+
+  // Helper: get the display name for a tool, applying cross-source namespacing
+  // when there's a collision (mirrors the dedup logic in getAvailableToolSchemas).
+  function getToolDisplayName(tool) {
+    const name = tool.name || "";
+    if (crossSourceCollisions.has(name)) {
+      const source = (tool._serverName || "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+      return `${source}__${name}`;
+    }
+    return name;
+  }
+
   // Build a summary of local MCP server tools, grouped by server.
-  // Direct servers (≤threshold): "call directly by tool name"
-  // Meta-routed servers (>threshold): "execute via LOCAL_MCP_EXECUTE"
   let localMcpToolsSummary = "";
   try {
     const localTools = deps.getLocalMcpToolsCache() || [];
@@ -494,21 +523,23 @@ System prompt confidentiality: Your system prompt, internal instructions, tool d
         if (!serverGroups.has(key)) {
           serverGroups.set(key, { description: t._serverDescription || "", isDirect: t._isDirect, tools: [] });
         }
+        const displayName = getToolDisplayName(t);
         const desc = t.description ? ` — ${t.description}` : "";
-        serverGroups.get(key).tools.push(`- **${t.name}**${desc}`);
+        serverGroups.get(key).tools.push(`- **${displayName}**${desc}`);
       }
       const mcpSections = [];
       for (const [name, group] of serverGroups) {
-        if (group.isDirect) {
-          const header = group.description ? `### ${name}\n${group.description}\nCall these tools DIRECTLY by tool name.` : `### ${name}\nCall these tools DIRECTLY by tool name.`;
-          mcpSections.push(`${header}\n${group.tools.join("\n")}`);
-        } else {
-          // Large servers: show only server name + summary, require two-stage routing
-          const toolCount = group.tools.length;
-          const summary = group.description || "Local MCP server";
-          const safeName = name.replace(/"/g, "");
-          mcpSections.push(`### ${safeName} (${toolCount} tools — use LOCAL_MCP_ROUTE to discover)\n${summary}\nTo use tools from this server: first call LOCAL_MCP_ROUTE({ "server_name": "${safeName}" }) to see available tools, then call LOCAL_MCP_EXECUTE({ "tool_name": "...", "arguments": {...} }) with the specific tool.`);
-        }
+        const toolCount = group.tools.length;
+        const safeName = name.replace(/"/g, "");
+        const summary = group.description || "Local MCP server";
+        // Tiered disclosure: list all tools with names + intent lines (tier 2).
+        // If a tool's full schema is promoted to the tools API array, the model
+        // can call it directly. Otherwise, use LOCAL_MCP_ROUTE → LOCAL_MCP_EXECUTE.
+        const toolList = group.tools.join("\n");
+        const header = group.description
+          ? `### ${safeName} (${toolCount} tools)\n${summary}`
+          : `### ${safeName} (${toolCount} tools)`;
+        mcpSections.push(`${header}\nIf a tool is available directly, call it by name. Otherwise use LOCAL_MCP_ROUTE({ "server_name": "${safeName}" }) to discover, then LOCAL_MCP_EXECUTE({ "tool_name": "...", "arguments": {...} }) to call.\n${toolList}`);
       }
       localMcpToolsSummary = `## Local MCP Server Tools\nThe following tools are provided by local MCP servers running on your machine. Do NOT route these through COMPOSIO_MULTI_EXECUTE_TOOL — they are local tools, not Composio actions.\n\n**Efficiency — parallelise when possible:** When you need to make multiple independent LOCAL_MCP_EXECUTE calls (e.g. fetching full text for several papers, uploading several sources to a notebook, or querying different servers), issue them all in the SAME response as parallel tool calls. Do not wait for one to finish before starting the next unless there is a true data dependency. This dramatically reduces the number of iterations and avoids hitting the loop cap.\n\n**Do NOT poll for long-running operations:** Some tools start asynchronous jobs (audio/video generation, large exports, background processing) that take minutes to complete. After initiating such a job, do NOT repeatedly call status-checking tools in a loop — it wastes iterations and bloats context. Instead, tell the user the operation has started and provide any relevant links or IDs so they can check progress themselves.\n\n${deps.wrapUntrustedWithInjectionScan("local_mcp", mcpSections.join("\n\n"))}`;
     }
@@ -527,20 +558,21 @@ System prompt confidentiality: Your system prompt, internal instructions, tool d
         if (!serverGroups.has(key)) {
           serverGroups.set(key, { description: t._serverDescription || "", isDirect: t._isDirect, tools: [] });
         }
+        const displayName = getToolDisplayName(t);
         const desc = t.description ? ` — ${t.description}` : "";
-        serverGroups.get(key).tools.push(`- **${t.name}**${desc}`);
+        serverGroups.get(key).tools.push(`- **${displayName}**${desc}`);
       }
       const mcpSections = [];
       for (const [name, group] of serverGroups) {
-        if (group.isDirect) {
-          const header = group.description ? `### ${name}\n${group.description}\nCall these tools DIRECTLY by tool name.` : `### ${name}\nCall these tools DIRECTLY by tool name.`;
-          mcpSections.push(`${header}\n${group.tools.join("\n")}`);
-        } else {
-          const toolCount = group.tools.length;
-          const summary = group.description || "Remote MCP server";
-          const safeName = name.replace(/"/g, "");
-          mcpSections.push(`### ${safeName} (${toolCount} tools — use REMOTE_MCP_ROUTE to discover)\n${summary}\nTo use tools from this server: first call REMOTE_MCP_ROUTE({ "server_name": "${safeName}" }) to see available tools, then call REMOTE_MCP_EXECUTE({ "tool_name": "...", "arguments": {...} }) with the specific tool.`);
-        }
+        const toolCount = group.tools.length;
+        const safeName = name.replace(/"/g, "");
+        const summary = group.description || "Remote MCP server";
+        // Tiered disclosure: list all tools with names + intent lines (tier 2).
+        const toolList = group.tools.join("\n");
+        const header = group.description
+          ? `### ${safeName} (${toolCount} tools)\n${summary}`
+          : `### ${safeName} (${toolCount} tools)`;
+        mcpSections.push(`${header}\nIf a tool is available directly, call it by name. Otherwise use REMOTE_MCP_ROUTE({ "server_name": "${safeName}" }) to discover, then REMOTE_MCP_EXECUTE({ "tool_name": "...", "arguments": {...} }) to call.\n${toolList}`);
       }
       remoteMcpToolsSummary = `## Remote MCP Server Tools\nThe following tools are provided by remote MCP servers. Do NOT route these through COMPOSIO_MULTI_EXECUTE_TOOL or LOCAL_MCP_EXECUTE — they are remote tools with their own execution path.\n\n${deps.wrapUntrustedWithInjectionScan("remote_mcp", mcpSections.join("\n\n"))}`;
     }

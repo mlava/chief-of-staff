@@ -93,6 +93,19 @@ export function detectMemoryInjection(text) {
   };
 }
 
+// Skills are authored instruction content loaded on-demand, not persistent memory
+// injected into every prompt. Directive language ("always", "never") is expected
+// in skill definitions. Only flag skills for high-severity patterns.
+const SKILLS_PAGE_ALLOWLISTED_PATTERNS = new Set([
+  "always_directive",
+  "never_directive",
+  "when_you_see",
+  "include_in_response",
+  "default_behaviour",
+  "begin_response",
+  "explicit_tool_invocation",
+]);
+
 export function guardMemoryWriteCore(content, page, action, deps = {}) {
   const {
     detectMemoryInjectionFn = detectMemoryInjection,
@@ -103,20 +116,33 @@ export function guardMemoryWriteCore(content, page, action, deps = {}) {
   const result = detectMemoryInjectionFn(content);
   if (!result.flagged) return { allowed: true };
 
+  // Skills page: filter out expected directive patterns, only block truly dangerous ones
+  const isSkills = /skills/i.test(String(page || ""));
+  const effectivePatterns = isSkills
+    ? result.allPatterns.filter(p => !SKILLS_PAGE_ALLOWLISTED_PATTERNS.has(p))
+    : result.allPatterns;
+
+  if (effectivePatterns.length === 0) {
+    debugLog(
+      `[Chief security] DD-1 memory injection guard — skills page allowlist applied, allowing write. Matched (allowed): ${result.allPatterns.join(", ")}`
+    );
+    return { allowed: true };
+  }
+
   debugLog(
     `[Chief security] DD-1 memory injection guard blocked write to "${page}" (${action}):`,
-    result.allPatterns.join(", "),
+    effectivePatterns.join(", "),
     "| content preview:", String(content).slice(0, 200)
   );
   recordUsageStat("memoryWriteBlocks");
 
   return {
     allowed: false,
-    reason: `Memory write blocked — content contains patterns that resemble prompt injection or persistent behaviour manipulation (${result.allPatterns.join(", ")}). ` +
+    reason: `Memory write blocked — content contains patterns that resemble prompt injection or persistent behaviour manipulation (${effectivePatterns.join(", ")}). ` +
       `Memory content is loaded into every system prompt, so malicious content here would permanently alter agent behaviour. ` +
       `Please reformulate the content as plain factual information without directive language (avoid "always", "never", "skip approval", "when you see X do Y", etc.). ` +
       `If the user explicitly asked for this exact wording, explain why it was flagged and ask them to rephrase.`,
-    matchedPatterns: result.allPatterns
+    matchedPatterns: effectivePatterns
   };
 }
 

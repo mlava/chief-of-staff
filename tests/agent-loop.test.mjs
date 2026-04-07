@@ -19,6 +19,7 @@ import {
   cleanupAgentLoop,
   runAgentLoop,
   runAgentLoopWithFailover,
+  buildToolCacheKey,
 } from "../src/agent-loop.js";
 
 // ── Test helpers ────────────────────────────────────────────────────────────
@@ -262,5 +263,88 @@ describe("Module exports", () => {
 
   it("exports runAgentLoopWithFailover", () => {
     assert.equal(typeof runAgentLoopWithFailover, "function");
+  });
+});
+
+// ── buildToolCacheKey ─────────────────────────────────────────────────────
+
+describe("buildToolCacheKey", () => {
+  it("returns null for LOCAL_MCP_ROUTE", () => {
+    assert.strictEqual(buildToolCacheKey("LOCAL_MCP_ROUTE", { server_name: "test" }), null);
+  });
+
+  it("returns null for REMOTE_MCP_ROUTE", () => {
+    assert.strictEqual(buildToolCacheKey("REMOTE_MCP_ROUTE", {}), null);
+  });
+
+  it("returns null for ROAM_ROUTE", () => {
+    assert.strictEqual(buildToolCacheKey("ROAM_ROUTE", {}), null);
+  });
+
+  it("returns a string key for regular tools", () => {
+    const key = buildToolCacheKey("roam_search", { query: "test" });
+    assert.strictEqual(typeof key, "string");
+    assert.ok(key.startsWith("roam_search::"));
+  });
+
+  it("produces identical keys for identical tool+args", () => {
+    const key1 = buildToolCacheKey("list_calendars", {});
+    const key2 = buildToolCacheKey("list_calendars", {});
+    assert.strictEqual(key1, key2);
+  });
+
+  it("produces different keys for different args", () => {
+    const key1 = buildToolCacheKey("roam_search", { query: "test" });
+    const key2 = buildToolCacheKey("roam_search", { query: "other" });
+    assert.notStrictEqual(key1, key2);
+  });
+
+  it("strips session_id from Composio args", () => {
+    const key = buildToolCacheKey("COMPOSIO_MULTI_EXECUTE_TOOL", {
+      tools: [{ tool_slug: "WEATHERMAP_WEATHER", arguments: { location: "Melbourne" } }],
+      session_id: "abc123",
+      session: { id: "abc123" },
+    });
+    assert.ok(!key.includes("abc123"));
+    assert.ok(key.includes("WEATHERMAP_WEATHER"));
+    assert.ok(key.includes("Melbourne"));
+  });
+
+  it("strips session fields from inner tool arguments", () => {
+    const key = buildToolCacheKey("COMPOSIO_MULTI_EXECUTE_TOOL", {
+      tools: [{ tool_slug: "GMAIL_FETCH_EMAILS", arguments: { query: "test", session_id: "xyz" } }],
+    });
+    assert.ok(!key.includes("xyz"));
+    assert.ok(key.includes("test"));
+  });
+
+  it("handles null args gracefully", () => {
+    const key = buildToolCacheKey("roam_search", null);
+    assert.strictEqual(typeof key, "string");
+  });
+
+  it("returns key for LOCAL_MCP_EXECUTE (cacheable)", () => {
+    const key = buildToolCacheKey("LOCAL_MCP_EXECUTE", {
+      tool_name: "search_issues",
+      arguments: { q: "is:open" }
+    });
+    assert.strictEqual(typeof key, "string");
+    assert.ok(key.includes("search_issues"));
+  });
+
+  it("produces identical keys regardless of arg property order", () => {
+    const key1 = buildToolCacheKey("get_calendar_events", {
+      calendarId: "abc@group.calendar.google.com",
+      dateMin: "2026-04-01",
+      timeMin: "00:00:00",
+      timeZone: "Australia/Melbourne"
+    });
+    const key2 = buildToolCacheKey("get_calendar_events", {
+      timeZone: "Australia/Melbourne",
+      dateMin: "2026-04-01",
+      calendarId: "abc@group.calendar.google.com",
+      timeMin: "00:00:00"
+    });
+    assert.strictEqual(key1, key2);
   });
 });

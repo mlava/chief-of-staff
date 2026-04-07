@@ -147,15 +147,68 @@ async function confirmUnknownMultiExecuteToolSlugs(args) {
 // ── Tool resolution ─────────────────────────────────────────────────────────
 
 export function resolveToolByName(toolName) {
-  return deps.getRoamNativeTools().find(t => t.name === toolName)
+  const direct = deps.getRoamNativeTools().find(t => t.name === toolName)
     || deps.getBetterTasksTools().find(t => t.name === toolName)
     || deps.getCosIntegrationTools().find(t => t.name === toolName)
     || deps.getCronTools().find(t => t.name === toolName)
     || deps.getExternalExtensionTools().find(t => t.name === toolName)
-    || (deps.getLocalMcpToolsCache() || []).find(t => t.name === toolName)
-    || (deps.getRemoteMcpToolsCache?.() || []).find(t => t.name === toolName)
-    || deps.getComposioMetaToolsForLlm().find(t => t.name === toolName)
-    || null;
+    || (deps.getLocalMcpToolsCache() || []).find(t => t.name === toolName && t._isDirect)
+    || (deps.getRemoteMcpToolsCache?.() || []).find(t => t.name === toolName && t._isDirect)
+    || deps.getComposioMetaToolsForLlm().find(t => t.name === toolName);
+  if (direct) return direct;
+
+  // Fallback: cross-source deduped names (e.g. sentry__search_issues).
+  // The dedup layer in getAvailableToolSchemas() renames tools from different sources
+  // that collide. The MCP caches store the original (pre-dedup) name. Resolve by
+  // splitting on __ and matching the original name + server prefix.
+  const dedupIdx = toolName.indexOf("__");
+  if (dedupIdx > 0) {
+    const origName = toolName.slice(dedupIdx + 2);
+    const serverPrefix = toolName.slice(0, dedupIdx);
+    const prefixMatch = (t) => {
+      const tPrefix = (t._serverName || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+      return tPrefix === serverPrefix;
+    };
+    // Check remote MCP first (more common for cross-source dedup)
+    const remoteTool = (deps.getRemoteMcpToolsCache?.() || []).find(t =>
+      (t.name === origName || t._originalName === origName) && prefixMatch(t)
+    );
+    if (remoteTool) return { ...remoteTool, name: toolName, execute: remoteTool.execute };
+    // Check local MCP
+    const localTool = (deps.getLocalMcpToolsCache() || []).find(t =>
+      (t.name === origName || t._originalName === origName) && prefixMatch(t)
+    );
+    if (localTool) return { ...localTool, name: toolName, execute: localTool.execute };
+  }
+
+  // Fallback: BT tools are renamed (bt_search → roam_bt_search_tasks) in getBetterTasksTools().
+  // If getBetterTasksTools() returns empty (race condition with Extension Tools registry
+  // during autoresearch simulations), find the tool directly from the registry.
+  if (toolName.startsWith("roam_bt_")) {
+    const btNameMap = deps.getBetterTasksNameMap?.();
+    if (btNameMap) {
+      for (const [origName, mappedName] of Object.entries(btNameMap)) {
+        if (mappedName === toolName) {
+          // Try external extension tools first
+          const extTool = deps.getExternalExtensionTools().find(t => t.name === origName);
+          if (extTool) {
+            return { ...extTool, name: toolName, execute: extTool.execute };
+          }
+          // Direct registry access as last resort
+          const registry = deps.getExtensionToolsRegistry?.();
+          const btExt = registry?.["better-tasks"];
+          if (btExt?.tools) {
+            const regTool = btExt.tools.find(t => t?.name === origName);
+            if (regTool && typeof regTool.execute === "function") {
+              return { ...regTool, name: toolName, execute: regTool.execute, isMutating: false };
+            }
+          }
+          break;
+        }
+      }
+    }
+  }
+  return null;
 }
 
 // ── Mutation classification ─────────────────────────────────────────────────
@@ -295,7 +348,7 @@ function extractTargetPageUids(toolName, args) {
 
 // ── Main tool execution dispatcher ──────────────────────────────────────────
 
-export async function executeToolCall(toolName, args, { readOnly = false } = {}) {
+export async function executeToolCall(toolName, args, { readOnly = false, skipApproval = false } = {}) {
   // Tool name normalisation: LLMs (especially gemini flash-lite) sometimes hallucinate
   // hyphens in tool names (e.g. "cos_get-current-time" instead of "cos_get_current_time").
   // Try the original name first — MCP tools use hyphens natively (e.g. "list-events").
@@ -381,10 +434,13 @@ export async function executeToolCall(toolName, args, { readOnly = false } = {})
       }
     }
 
-    const unknownApproved = await confirmUnknownMultiExecuteToolSlugs(effectiveArgs);
-    if (!unknownApproved) {
-      if (deps.recordUsageStat) deps.recordUsageStat("approvalsDenied");
-      throw new Error("User denied unknown tool slugs in COMPOSIO_MULTI_EXECUTE_TOOL");
+    // Skip slug approval in read-only mode or simulation mode (skipApproval)
+    if (!readOnly && !skipApproval) {
+      const unknownApproved = await confirmUnknownMultiExecuteToolSlugs(effectiveArgs);
+      if (!unknownApproved) {
+        if (deps.recordUsageStat) deps.recordUsageStat("approvalsDenied");
+        throw new Error("User denied unknown tool slugs in COMPOSIO_MULTI_EXECUTE_TOOL");
+      }
     }
   }
 
@@ -427,7 +483,7 @@ export async function executeToolCall(toolName, args, { readOnly = false } = {})
       const wrappedArgs = {
         tools: [{ tool_slug: upperToolName, arguments: effectiveArgs }]
       };
-      return executeToolCall("COMPOSIO_MULTI_EXECUTE_TOOL", wrappedArgs, { readOnly });
+      return executeToolCall("COMPOSIO_MULTI_EXECUTE_TOOL", wrappedArgs, { readOnly, skipApproval });
     }
   }
 
@@ -481,7 +537,7 @@ export async function executeToolCall(toolName, args, { readOnly = false } = {})
       ? `LOCAL_MCP_EXECUTE::${effectiveArgs?.tool_name || ""}`
       : toolName;
   const now = Date.now();
-  if (isMutating) {
+  if (isMutating && !skipApproval) {
     // Scoped page approval for block-creation tools: approve once per page,
     // then subsequent writes to that same page are auto-approved within TTL.
     if (SCOPED_PAGE_APPROVAL_TOOLS.has(toolName)) {
@@ -529,17 +585,17 @@ export async function executeToolCall(toolName, args, { readOnly = false } = {})
     const upperInner = innerName.toUpperCase();
     if (upperInner === "COMPOSIO_MULTI_EXECUTE_TOOL") {
       deps.debugLog(`[Chief flow] LOCAL_MCP_EXECUTE → Composio redirect: unwrapping ${innerName}`);
-      return executeToolCall("COMPOSIO_MULTI_EXECUTE_TOOL", effectiveArgs.arguments || {}, { readOnly });
+      return executeToolCall("COMPOSIO_MULTI_EXECUTE_TOOL", effectiveArgs.arguments || {}, { readOnly, skipApproval });
     }
     // Normalise: collapse double underscores (LLMs invent "openweathermap__weather" for "WEATHERMAP_WEATHER")
     const normInner = upperInner.replace(/__+/g, "_");
     if (deps.getToolSchema(normInner)) {
       deps.debugLog(`[Chief flow] LOCAL_MCP_EXECUTE → Composio slug redirect: "${innerName}" → "${normInner}"`);
-      return executeToolCall(normInner, effectiveArgs.arguments || {}, { readOnly });
+      return executeToolCall(normInner, effectiveArgs.arguments || {}, { readOnly, skipApproval });
     }
     if (normInner !== upperInner && deps.getToolSchema(upperInner)) {
       deps.debugLog(`[Chief flow] LOCAL_MCP_EXECUTE → Composio slug redirect: ${innerName}`);
-      return executeToolCall(upperInner, effectiveArgs.arguments || {}, { readOnly });
+      return executeToolCall(upperInner, effectiveArgs.arguments || {}, { readOnly, skipApproval });
     }
     const cache = deps.getLocalMcpToolsCache() || [];
     // Exact match first, then try stripping server-name prefix (LLMs sometimes send "server.tool_name")
@@ -570,7 +626,7 @@ export async function executeToolCall(toolName, args, { readOnly = false } = {})
           const suffixMatches = suffix ? allSlugs.filter(s => s.endsWith("_" + suffix)) : [];
           if (suffixMatches.length === 1) {
             deps.debugLog(`[Chief flow] LOCAL_MCP_EXECUTE → Composio fuzzy (suffix "${suffix}"): "${innerName}" → "${suffixMatches[0]}"`);
-            return executeToolCall(suffixMatches[0], effectiveArgs.arguments || {}, { readOnly });
+            return executeToolCall(suffixMatches[0], effectiveArgs.arguments || {}, { readOnly, skipApproval });
           }
           // Prefix match: e.g. "GMAIL" from "GMAIL_LIST_MESSAGES" → suggest actual GMAIL_* tools
           const prefixMatches = allSlugs.filter(s => s.startsWith(prefix + "_"));
@@ -579,6 +635,18 @@ export async function executeToolCall(toolName, args, { readOnly = false } = {})
             deps.debugLog(`[Chief flow] LOCAL_MCP_EXECUTE → Composio fuzzy (prefix "${prefix}"): "${innerName}" → suggestions: ${available}`);
             return { error: `Tool "${innerName}" not found in local MCP servers. This looks like a Composio tool — available tools with prefix "${prefix}": ${available}. Call the correct slug directly or via COMPOSIO_MULTI_EXECUTE_TOOL.` };
           }
+        }
+      }
+
+      // Cross-source dedup redirect: LLM may send a deduped remote MCP tool name
+      // (e.g. sentry__search_issues) to LOCAL_MCP_EXECUTE. Redirect to the actual
+      // remote MCP tool via resolveToolByName which handles the prefix__name pattern.
+      const dIdx = innerName.indexOf("__");
+      if (dIdx > 0) {
+        const resolved = resolveToolByName(innerName);
+        if (resolved?.execute) {
+          deps.debugLog(`[Chief flow] LOCAL_MCP_EXECUTE → remote MCP redirect: "${innerName}" (resolved to ${resolved._serverName || "remote"})`);
+          return resolved.execute(effectiveArgs.arguments || {});
         }
       }
 
