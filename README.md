@@ -569,6 +569,20 @@ Skills support several optional fields that control tool access and cost. All ar
 
 For a comprehensive guide to writing reliable, cost-efficient skills — including patterns, anti-patterns, the constraint architecture, per-skill eval rubrics, and a tuning workflow — see [`public/skills-best-practices.md`](public/skills-best-practices.md).
 
+### Skill optimisation
+
+Say `optimise [skill name]` (or `optimize`) to run the automatic optimisation loop on any skill. The assistant generates synthetic test cases from the skill definition, scores the current skill against evaluation criteria to establish a baseline, then iteratively mutates individual sections — accepting only changes that improve the score — and presents you with the result before writing anything to Roam.
+
+**Accept / revert.** When the loop finds an improvement, a toast shows the before/after pass rate. If the chat panel is open, the full per-criterion breakdown and optimised skill content appear there too. You must explicitly accept — the skill is never modified until you do. Hitting revert leaves the original untouched.
+
+**Budget.** Each run has a configurable cost cap (set in extension settings under *Skill optimisation budget*, default $2.00). Most runs cost $0.10–$0.40. The run stops cleanly when the budget is reached and presents whatever improvement was found.
+
+**What gets optimised.** The loop targets structural sections: it may add a Rubric (binary quality criteria), add or tighten Constraints (Must Do / Must Not Do / Prefer / Escalate), improve Approach step specificity, clarify Output format, or clean up the Sources list. The Trigger, Tools, Models, Tier, and Budget fields are never modified.
+
+**Stuck criteria.** If an evaluation criterion fails consistently regardless of mutations — typically because it tests runtime behaviour that text-only simulation cannot reproduce — it is automatically excluded from scoring and the loop continues optimising the remaining criteria. These are reported as *wall criteria* in the debrief.
+
+**Power mutations.** Add `--power` to use the power-tier model for mutations rather than mini: `optimise Daily Briefing --power`. Slower and more expensive, but produces better results for complex skills with dense instructions.
+
 ---
 
 ## Scheduled jobs

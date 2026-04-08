@@ -351,6 +351,7 @@ const MAX_CONTEXT_USER_CHARS = 500;       // User prompts are short — 500 is f
 const MAX_CONTEXT_ASSISTANT_CHARS = 2000; // Assistant responses carry MCP/tool data — need more room
 const MAX_AGENT_MESSAGES_CHAR_BUDGET = 70000; // Budget for multi-service workflows (20% safety margin for token estimation)
 const MIN_AGENT_MESSAGES_TO_KEEP = 6;
+const PAGE_DESCRIPTION_PREFIX = "ℹ️ ";
 const STANDARD_MAX_OUTPUT_TOKENS = 2500;   // Regular chat
 const CONCISE_MAX_OUTPUT_TOKENS = 1200;    // Concise verbosity
 const DETAILED_MAX_OUTPUT_TOKENS = 4096;   // Detailed verbosity
@@ -1935,6 +1936,29 @@ async function createRoamBlock(parentUid, text, order = "last") {
   });
 }
 
+/**
+ * Returns the correct order value for inserting a new block at the top of a page
+ * while preserving the pinned description block (prefixed with PAGE_DESCRIPTION_PREFIX).
+ * If the first child is a description block, returns 1 (insert after it).
+ * Otherwise returns 0 (normal "first" behaviour).
+ */
+function getFirstContentOrder(pageUid) {
+  try {
+    const api = getRoamAlphaApi();
+    const firstChild = api.q(`
+      [:find ?str .
+       :where [?p :block/uid "${escapeForDatalog(pageUid)}"]
+              [?p :block/children ?b]
+              [?b :block/string ?str]
+              [?b :block/order 0]]
+    `);
+    if (firstChild && String(firstChild).startsWith(PAGE_DESCRIPTION_PREFIX)) {
+      return 1;
+    }
+  } catch (_) { /* non-critical — fall back to 0 */ }
+  return 0;
+}
+
 function countBlockTreeNodes(blockDefs, depth = 0) {
   if (!Array.isArray(blockDefs) || depth >= 30) return 0;
   let count = 0;
@@ -2824,7 +2848,8 @@ async function updateRuntimeAibomSnapshot() {
       await api.updateBlock({ block: { uid: existing[0][0], string: blockText } });
       debugLog("[AIBOM] Updated runtime snapshot.");
     } else {
-      await createRoamBlock(pageUid, blockText, 0);
+      const aibomOrder = getFirstContentOrder(pageUid);
+      await createRoamBlock(pageUid, blockText, aibomOrder);
       debugLog("[AIBOM] Created runtime snapshot.");
     }
   } catch (e) {
@@ -2897,19 +2922,39 @@ async function updateMcpBom(serverKey, serverName, serverDescription, tools, pin
   }
 }
 
+/**
+ * Description blocks for all Chief of Staff/* pages.
+ * Keyed by page title; value is the pinned description text.
+ * All are prefixed with PAGE_DESCRIPTION_PREFIX so write functions can detect and skip them.
+ */
+const PAGE_DESCRIPTIONS = {
+  "Chief of Staff/Memory": `${PAGE_DESCRIPTION_PREFIX}Preferences and working context loaded into every conversation.`,
+  "Chief of Staff/Inbox": `${PAGE_DESCRIPTION_PREFIX}Input queue — drop items here for automatic processing. Blocks are read-only and moved to the daily page after handling.`,
+  "Chief of Staff/Decisions": `${PAGE_DESCRIPTION_PREFIX}Decision log — durable entries loaded into system prompt. Written by you or COS via cos_update_memory.`,
+  "Chief of Staff/Lessons Learned": `${PAGE_DESCRIPTION_PREFIX}Operational lessons loaded into system prompt. Written via /lesson or cos_update_memory.`,
+  "Chief of Staff/Improvement Requests": `${PAGE_DESCRIPTION_PREFIX}Capability gaps logged by COS during real tasks. Loaded into system prompt.`,
+  "Chief of Staff/MCP Servers": `${PAGE_DESCRIPTION_PREFIX}Integration inventory — connected servers, tool counts, trust status. Updated on each MCP connection.`,
+  "Chief of Staff/AIBOM": `${PAGE_DESCRIPTION_PREFIX}Runtime snapshot — active providers, models, installed tools. Updated on config changes.`,
+  "Chief of Staff/Audit Log": `${PAGE_DESCRIPTION_PREFIX}Activity feed — one entry per agent run with model, duration, cost, and tools used. Powers the Activity tab.`,
+  "Chief of Staff/Usage Stats": `${PAGE_DESCRIPTION_PREFIX}Daily aggregates — run count, tool calls, approvals, warnings, eval scores. One block per day, updated in place.`,
+  "Chief of Staff/Eval Log": `${PAGE_DESCRIPTION_PREFIX}Quality scores for sampled runs — task completion, factual grounding, safety, binary checks, rubric results.`,
+  "Chief of Staff/Review Queue": `${PAGE_DESCRIPTION_PREFIX}Action backlog — runs that scored low or triggered safety concerns. Review and mark status.`,
+  "Chief of Staff/Corrections": `${PAGE_DESCRIPTION_PREFIX}User feedback — blocks you edited or deleted after COS wrote them. Detected automatically via idle-time diff scans.`,
+  "Chief of Staff/Skills": `${PAGE_DESCRIPTION_PREFIX}Skill definitions loaded on demand. Each top-level block is a skill with triggers, sources, output format, and constraints.`,
+};
+
 async function bootstrapMemoryPages() {
   const starterPages = [
     {
       title: "Chief of Staff/Memory",
       lines: [
-        "Preferences and context for Chief of Staff AI assistant.",
+        PAGE_DESCRIPTIONS["Chief of Staff/Memory"],
       ]
     },
     {
       title: "Chief of Staff/Inbox",
       lines: [
-        "Drop items here for Chief of Staff to process automatically.",
-        "Works with Make, MCP, manual entry, or any external service."
+        PAGE_DESCRIPTIONS["Chief of Staff/Inbox"],
       ]
     },
     ...(!hasBetterTasksAPI() ? [{
@@ -2922,34 +2967,31 @@ async function bootstrapMemoryPages() {
     {
       title: "Chief of Staff/Decisions",
       lines: [
-        "Decision log — Chief of Staff appends entries with dates.",
+        PAGE_DESCRIPTIONS["Chief of Staff/Decisions"],
       ]
     },
     {
       title: "Chief of Staff/Lessons Learned",
       lines: [
-        "Operational lessons, pitfalls, and fixes discovered while working.",
+        PAGE_DESCRIPTIONS["Chief of Staff/Lessons Learned"],
       ]
     },
     {
       title: "Chief of Staff/Improvement Requests",
       lines: [
-        "Capability gaps and friction logged by Chief of Staff during real tasks.",
-        "Format: what was attempted → what was missing → workaround used."
+        PAGE_DESCRIPTIONS["Chief of Staff/Improvement Requests"],
       ]
     },
     {
       title: "Chief of Staff/MCP Servers",
       lines: [
-        "Connected MCP servers and their tool inventories are logged here automatically.",
-        "Each entry shows server name, tool count, trust status, and last connection date."
+        PAGE_DESCRIPTIONS["Chief of Staff/MCP Servers"],
       ]
     },
     {
       title: "Chief of Staff/AIBOM",
       lines: [
-        "Runtime AI Bill of Materials snapshot (user-specific connected components).",
-        "Generated automatically and includes providers, models, MCP servers, Composio, and extension tool registrations."
+        PAGE_DESCRIPTIONS["Chief of Staff/AIBOM"],
       ]
     }
   ];
@@ -2965,8 +3007,43 @@ async function bootstrapMemoryPages() {
     createdCount += 1;
   }
 
+  // Ensure description blocks exist on pages that were created before this feature
+  await ensureDescriptionBlocks();
+
   invalidateMemoryPromptCache();
   return { createdCount };
+}
+
+/**
+ * For pages that already exist but lack a description block, insert one at order 0.
+ * Idempotent — skips if the first child already starts with PAGE_DESCRIPTION_PREFIX.
+ * Runs on every extension load to cover pages created before this feature shipped.
+ */
+async function ensureDescriptionBlocks() {
+  const api = getRoamAlphaApi();
+  for (const [pageTitle, description] of Object.entries(PAGE_DESCRIPTIONS)) {
+    try {
+      const pageUid = getPageUidByTitle(pageTitle);
+      if (!pageUid) continue; // Page doesn't exist yet — bootstrapMemoryPages will handle it
+
+      const firstChild = api.q(`
+        [:find ?str .
+         :where [?p :node/title "${escapeForDatalog(pageTitle)}"]
+                [?p :block/children ?b]
+                [?b :block/string ?str]
+                [?b :block/order 0]]
+      `);
+
+      // Already has a description block — skip
+      if (firstChild && String(firstChild).startsWith(PAGE_DESCRIPTION_PREFIX)) continue;
+
+      // No description block — insert one at order 0 (pushes existing content down)
+      await createRoamBlock(pageUid, description, 0);
+      debugLog(`[Bootstrap] Added description block to ${pageTitle}`);
+    } catch (err) {
+      debugLog(`[Bootstrap] Failed to ensure description on ${pageTitle}:`, err?.message);
+    }
+  }
 }
 
 
@@ -3982,11 +4059,10 @@ async function bootstrapSkillsPage({ silent = false } = {}) {
       steps: [
         "Trigger: user provides messy, unstructured input (brain dump, meeting notes, voice memo transcript, random thoughts) and wants it organised and actioned.",
         "If you don't have enough information to generate useful outputs, ask questions until you do.",
-        "Phase 1 — Organise: extract core ideas (3–5 main concepts), group key points by topic, identify undeveloped threads, surface questions and gaps. Preserve the user's original voice and wording. Mark interpretations with [INFERRED]. Flag contradictions with [TENSION: X vs Y].",
-        "Phase 2 — Extract & Route: for each task found, capture: task description (verb-first), owner (me / someone else / unclear), effort estimate (15 min / 1 hour / half day / multiple days), urgency (today / this week / soon / whenever), dependencies.",
+        "Approach — 1. Organise: extract core ideas (3–5 main concepts), group key points by topic, identify undeveloped threads, surface questions and gaps. Preserve the user's original voice and wording. Mark interpretations with [INFERRED]. Flag contradictions with [TENSION: X vs Y]. 2. Extract & Route: for each task found, capture: task description (verb-first), owner (me / someone else / unclear), effort estimate (15 min / 1 hour / half day / multiple days), urgency (today / this week / soon / whenever), dependencies.",
         "Routing: my tasks → create via bt_create (or roam_create_todo if BT unavailable) with project/due/effort attributes where known. Others' tasks → bt_create with assignee (or roam_create_todo with \"Delegated to [person]:\" prefix). Ideas/parking lot → [[Chief of Staff/Inbox]] via roam_create_block. Decisions → [[Chief of Staff/Decisions]] via roam_create_block. If input looks like a project, suggest creating a project page.",
         "End with a summary of what was routed where and how many items were created.",
-        "Tool availability: works best with Better Tasks for rich task creation. If BT unavailable, use roam_create_todo / roam_search_todos. Never fabricate data from unavailable tools.",
+        "Tools: works best with Better Tasks for rich task creation. If BT unavailable, use roam_create_todo / roam_search_todos. Never fabricate data from unavailable tools.",
         "Rules: don't invent tasks not implied by input. Don't list already-done items as tasks. Distinguish 'I need to do X' from 'someone needs to do X' from 'X should happen but no one owns it'. Every output point must trace to original content."
       ]
     },
@@ -3997,7 +4073,7 @@ async function bootstrapSkillsPage({ silent = false } = {}) {
         "Approach: gather calendar events via list-events (Local MCP), email signals via GMAIL_FETCH_EMAILS (Composio), urgent tasks via bt_search (due: today, status: TODO/DOING), overdue tasks via bt_search (due: overdue), project health via bt_get_projects (status: active, include_tasks: true), and weather via WEATHERMAP_WEATHER (Composio). Do NOT call get-current-time — the current date is already in the system prompt. Batch Composio calls (WEATHERMAP_WEATHER + GMAIL_FETCH_EMAILS) into a single COMPOSIO_MULTI_EXECUTE_TOOL call when possible.",
         "Output: produce a structured briefing with sections: 'Calendar', 'Email', 'Tasks', 'Projects', 'Weather', and 'Top Priorities'. Write to today's daily page automatically. Update chat panel to confirm it has been written.",
         "Fallback: if any tool call fails, include section header with '⚠️ Could not retrieve [source] — [error reason]' rather than skipping silently.",
-        "Tool availability: works best with Better Tasks + Google Calendar + Gmail. If BT unavailable, use roam_search_todos (status: TODO) for task context. If calendar/email unavailable, skip those sections and note what's missing. Never fabricate data from unavailable tools.",
+        "Tools: works best with Better Tasks + Google Calendar + Gmail. If BT unavailable, use roam_search_todos (status: TODO) for task context. If calendar/email unavailable, skip those sections and note what's missing. Never fabricate data from unavailable tools.",
         "Keep each section concise and actionable. Prefer tool calls over guessing."
       ]
     },
@@ -4008,7 +4084,7 @@ async function bootstrapSkillsPage({ silent = false } = {}) {
         "MODE: PRE-MEETING PREP — gather context: the available calendar tools (Local MCP or Composio) for meeting details, bt_search for tasks related to attendees/topics, bt_get_projects for project status, roam_search for past interactions with attendees. Output: context refresh (last interaction, history, their priorities), my goals for this meeting, questions to ask, potential landmines, preparation tasks.",
         "MODE: POST-MEETING PROCESSING — extract and file outcomes from user's raw notes/transcript. Output: key decisions made (with context, rationale, revisit-if). Action items — mine (task, context, deadline, effort). Action items — others (task, owner, deadline). Follow-ups needed. Key information learned. Open questions. Relationship notes. Next meeting prep suggestions.",
         "Routing (post-meeting): my actions → bt_create with project/due/assignee. Others' actions → bt_create with their name as assignee (waiting-for). Decisions → [[Chief of Staff/Decisions]]. Relationship notes → [[Chief of Staff/Memory]].",
-        "Tool availability: works best with Better Tasks + Google Calendar. If BT unavailable, use roam_create_todo for action items. If calendar unavailable in prep mode, ask user for meeting details manually. Never fabricate data from unavailable tools.",
+        "Tools: works best with Better Tasks + Google Calendar. If BT unavailable, use roam_create_todo for action items. If calendar unavailable in prep mode, ask user for meeting details manually. Never fabricate data from unavailable tools.",
         "Rules: only extract action items actually assigned — don't invent tasks from general discussion. Use exact names for ownership. Mark uncertain commitments with [?]. Use 'TBD' for unspecified deadlines. Flag ambiguities rather than guessing."
       ]
     },
@@ -4019,7 +4095,7 @@ async function bootstrapSkillsPage({ silent = false } = {}) {
         "Sources — gather in parallel, skip any that fail: roam_get_recent_changes (hours: 4) for recently touched pages. roam_get_right_sidebar_windows for open working context. roam_get_focused_block for current cursor position. bt_search (status: DOING) for in-progress tasks. bt_search (status: DONE, max_results: 5) for recently completed. bt_search (status: TODO, due: today) for tasks due today still open. Today's daily page top-level blocks.",
         "Output — chat panel only (do NOT write to DNP, this is ephemeral): Where You Were (recently edited pages, open sidebar, focused block). What's In Flight (DOING tasks, tasks due today). What You Just Finished (recent completions). Suggested Next Action ('You were working on [X] and have [Y] due today. Pick up [most likely next step]?').",
         "Fallback: if any tool fails, skip that section with '⚠️ Could not retrieve [section]' — never block on a single failure.",
-        "Tool availability: works with Roam-native tools (recent changes, sidebar, focused block) as baseline. Better Tasks adds in-progress/completed task context. If BT unavailable, use roam_search_todos (status: TODO) for open tasks. Never fabricate data from unavailable tools.",
+        "Tools: works with Roam-native tools (recent changes, sidebar, focused block) as baseline. Better Tasks adds in-progress/completed task context. If BT unavailable, use roam_search_todos (status: TODO) for open tasks. Never fabricate data from unavailable tools.",
         "Rules: keep it short — scannable in 10 seconds. Don't repeat what's already visible on screen. Bias toward last 2–4 hours. If very little activity, suggest running Daily Briefing instead. Chat panel only — no DNP write."
       ]
     },
@@ -4039,7 +4115,7 @@ async function bootstrapSkillsPage({ silent = false } = {}) {
         "Guide the user through designing and writing a new COS skill from scratch. Produces a well-structured, production-ready skill definition — not a rough draft. Covers intent clarification, tool selection, source mapping, output specification, error handling, and trigger design. Complements Skill Auditor (which improves existing skills) and Suggest Workflows (which proposes skill ideas).",
         "Triggers: \"design a skill\", \"create a skill\", \"write a skill\", \"new skill\", \"help me build a skill\", \"skill from scratch\", \"I want a skill that…\"",
         "Sources: cos_get_tool_ecosystem — full inventory of available tools, grouped by source (Roam native, Extension Tools, Local MCP, Remote MCP, Composio). Essential for recommending which tools the skill should use. cos_get_skill(\"Skill Auditor\") — load the 10 structural principles so the new skill can be written to pass an audit from day one. [[Chief of Staff/Skills]] — scan existing skills for naming conventions, structural patterns, and the current skill index. [[Chief of Staff/Memory]] — user context, preferences, and working patterns to inform skill design.",
-        "Process — Progressive Disclosure Interview: Phase 1 — Intent. Ask: \"What should this skill reliably produce? Describe the outcome, not the steps.\" Wait for response. If the answer describes steps instead of an outcome, ask: \"If this skill ran perfectly, what would you have afterward that you don't have now?\" Phase 2 — Data. Based on the stated intent, call cos_get_tool_ecosystem to see what's available. Propose which tools and data sources the skill needs. Present as a checklist: \"I recommend these sources — add, remove, or confirm.\" Also recommend a Tools: whitelist — list only the tools the skill actually needs, since fewer tools means lower token cost and a tighter security surface. Wait for confirmation. Phase 3 — Shape. Ask about output preferences and operational parameters: Where should the output go? (chat panel, DNP, specific page) What format? (brief vs. detailed, bullet vs. prose, sections) Which Tier? (mini for structured/clear-instructions tasks, power for multi-step reasoning, ludicrous for complex analysis or long-form output) What Budget feels right? (suggest ~1.5–2× the expected cost of a test run) How many Iterations to allow? (minimum 2; default is source count + 2) Any Constraints? Walk through the four quadrants: Must Do (non-negotiable requirements), Must Not Do (absolute prohibitions), Prefer (soft stylistic preferences), Escalate (conditions that should pause and ask the user). Keep total constraints to 3–8, each specific and observable. What Rubric criteria define a good run? Suggest 3–5 binary pass/fail checks — positive assertions, independently verifiable from the output. Wait for response. Phase 4 — Draft. Write the full skill definition following the Style Guide below. Present it to the user in chat for review before writing to the Skills page. Phase 5 — Refine. Ask: \"Want me to audit this against the 10 structural principles before we save it?\" If yes, run the Skill Auditor principles inline and revise. When the user confirms, write to [[Chief of Staff/Skills]] using cos_write_draft_skill (with \"(Draft)\" suffix) or cos_update_memory (without suffix, if they want it live immediately).",
+        "Approach — Progressive Disclosure Interview: Phase 1 — Intent. Ask: \"What should this skill reliably produce? Describe the outcome, not the steps.\" Wait for response. If the answer describes steps instead of an outcome, ask: \"If this skill ran perfectly, what would you have afterward that you don't have now?\" Phase 2 — Data. Based on the stated intent, call cos_get_tool_ecosystem to see what's available. Propose which tools and data sources the skill needs. Present as a checklist: \"I recommend these sources — add, remove, or confirm.\" Also recommend a Tools: whitelist — list only the tools the skill actually needs, since fewer tools means lower token cost and a tighter security surface. Wait for confirmation. Phase 3 — Shape. Ask about output preferences and operational parameters: Where should the output go? (chat panel, DNP, specific page) What format? (brief vs. detailed, bullet vs. prose, sections) Which Tier? (mini for structured/clear-instructions tasks, power for multi-step reasoning, ludicrous for complex analysis or long-form output) What Budget feels right? (suggest ~1.5–2× the expected cost of a test run) How many Iterations to allow? (minimum 2; default is source count + 2) Any Constraints? Walk through the four quadrants: Must Do (non-negotiable requirements), Must Not Do (absolute prohibitions), Prefer (soft stylistic preferences), Escalate (conditions that should pause and ask the user). Keep total constraints to 3–8, each specific and observable. What Rubric criteria define a good run? Suggest 3–5 binary pass/fail checks — positive assertions, independently verifiable from the output. Wait for response. Phase 4 — Draft. Write the full skill definition following the Style Guide below. Present it to the user in chat for review before writing to the Skills page. Phase 5 — Refine. Ask: \"Want me to audit this against the 10 structural principles before we save it?\" If yes, run the Skill Auditor principles inline and revise. When the user confirms, write to [[Chief of Staff/Skills]] using cos_write_draft_skill (with \"(Draft)\" suffix) or cos_update_memory (without suffix, if they want it live immediately).",
         "Skill Style Guide — Structure: every skill should have these sections in this order: Description (first child block) — one sentence: what the skill produces and when to use it. Triggers — at least 5 natural-language phrases covering variations. Include verb forms (\"run my…\", \"do a…\", \"show me…\") and noun forms (\"weekly review\", \"delegation check\"). Sources — explicit list of tool calls to make in the gathering phase. Use exact tool names from the ecosystem. For each source, note what data it provides and why the skill needs it. Tools — comma-separated list of tool names the skill actually calls. Restricts the agent's tool surface for this skill run — fewer tools means lower token cost per iteration and a smaller attack surface. Tier — mini, power, or ludicrous. Use mini for structured, clear-instructions tasks; power for multi-step reasoning or chained tool calls; ludicrous for complex analysis or long-form output. Budget — dollar amount hard cost cap per skill run. Set at ~1.5–2× the typical run cost observed in testing. Iterations — integer max LLM calls per run. Minimum 2; default is source count + 2. Constraints — structured guardrails in four quadrants: Must Do (non-negotiable requirements), Must Not Do (absolute prohibitions), Prefer (soft stylistic preferences), Escalate (conditions that should pause and ask the user). Keep total to 3–8, each specific and observable. Rubric — 3–5 binary pass/fail quality criteria. Positive assertions (\"output includes X\"), independently verifiable from the output alone. Instructions — step-by-step execution logic. Write for an LLM reader: be specific about what to do with the gathered data, not just \"analyse\" or \"synthesise\". Fallback — error handling: \"if [tool] fails or returns empty, [specific recovery action]\". Never silently skip — always surface a ⚠️ marker. Output specification — where it goes (chat/DNP/specific page), format (headings, sections), and what \"done\" looks like. Operating principles (optional) — skill-specific constraints: what NOT to do, tone, scope boundaries.",
         "Skill Style Guide — Tool Recommendations: Always specify a Tools: field — list only the tools the skill needs. Fewer tools means lower token cost per iteration and a smaller attack surface. Use discovery tools before action tools — e.g. bt_get_attributes before bt_create, list-events before creating events, ws_list before ws_open. Skills that assume structure break when structure changes. Prefer Roam-native tools for read/write operations on the graph. Use Extension Tools (BT, Deep Research) for domain-specific queries. Use Composio/MCP for external services. If the skill chains 3+ tool calls, note in its instructions that it may need power tier. If it chains 5+ or involves complex reasoning, note ludicrous tier. Never hardcode user-specific values (workspace names, project names, calendar IDs). Use discovery or ask the user. Batch Composio calls into COMPOSIO_MULTI_EXECUTE_TOOL where possible — reduces iteration count and cost.",
         "Skill Style Guide — Writing Style: Be imperative, not suggestive. \"Call bt_search with status: TODO\" not \"You might want to check tasks.\" Name failure modes explicitly. \"Do not fabricate activity. If tools return nothing, say 'Nothing found'.\" The model can't avoid what hasn't been specified. End cleanly. No meta-commentary (\"time to read\", \"need more detail?\", \"hope this helps\"). This causes markdown rendering issues in the chat panel. Distinguish facts from inferences. Instruct the skill to mark inferences with [INFERRED] and never present tool output and guesswork with equal confidence. Preserve the user's voice. If the skill processes user input (brain dump, notes), instruct it to keep original wording — don't rewrite their phrasing. Scope explicitly. Tell the skill what's out of bounds. Models expand scope by default — without boundaries, output bloats.",
@@ -4052,12 +4128,12 @@ async function bootstrapSkillsPage({ silent = false } = {}) {
         "Trigger: user asks for a weekly review or retrospective on the past week.",
         "Context: read [[Chief of Staff/Memory]] first for personal context and strategic direction.",
         "Sources: bt_get_projects (active, include_tasks: true). bt_search for completed tasks, overdue items, waiting-for items, upcoming deadlines. the available calendar tools (Local MCP or Composio) for meetings past 7 days and next 7 days. [[Chief of Staff/Decisions]], [[Chief of Staff/Inbox]], [[Chief of Staff/Memory]].",
-        "Execution: this is a long skill. Phase 1: make all tool calls and gather raw data. Phase 2: synthesise into output. Don't start writing until all data is gathered.",
+        "Approach: this is a long skill. Phase 1: make all tool calls and gather raw data. Phase 2: synthesise into output. Don't start writing until all data is gathered.",
         "Fallback: if any tool fails, include header with '⚠️ Could not retrieve [source]' — never skip silently.",
         "Write output to today's daily page using roam_batch_write with markdown under a 'Weekly Review — [Date Range]' heading. Use ## for section headers, ### for subsections, - for list items.",
         "Output sections: Week in Review (what got done, what didn't, pattern recognition — energy, avoidance, interruption patterns). Current State Audit (project health check, stale delegations, inbox backlog, decisions needing review). Tasks Completed (grouped by project). What's Still Open (with overdue flags). Upcoming Deadlines (next 14 days). Meetings This Week (outcomes, open items). Commitments Made. Open Questions. Coming Week (non-negotiables by day, top 3 priorities with 'why now', explicit NOT doing list, time blocks to protect). Strategic Questions (right things? avoiding? highest leverage?). Week Setup Complete (Monday first three actions, single most important outcome).",
         "Memory updates: propose updates for Memory, Decisions, Lessons Learned pages. Update project statuses via bt_modify. Create BT tasks for new follow-ups.",
-        "Tool availability: works best with Better Tasks + Google Calendar + Gmail. If BT unavailable, use roam_search_todos for task review and roam_search_text for project context. If calendar/email unavailable, skip those sections. Never fabricate data from unavailable tools.",
+        "Tools: works best with Better Tasks + Google Calendar + Gmail. If BT unavailable, use roam_search_todos for task review and roam_search_text for project context. If calendar/email unavailable, skip those sections. Never fabricate data from unavailable tools.",
         "Rules: only include items from past 7 days unless in 'Upcoming' sections. Link sources with dates. Mark ambiguous items with [CHECK]. De-duplicate across sections. Distinguish what I completed vs. what happened around me. If section is empty, write 'None found' — don't omit."
       ]
     }
@@ -5411,6 +5487,7 @@ function onload({ extensionAPI }) {
     getSettingString,
     ensurePageUidByTitle,
     createRoamBlock,
+    getFirstContentOrder,
     formatRoamDate,
     queryRoamDatalog,
     escapeForDatalog,
@@ -5427,6 +5504,7 @@ function onload({ extensionAPI }) {
     accumulateSessionTokens,
     ensurePageUidByTitle,
     createRoamBlock,
+    getFirstContentOrder,
     formatRoamDate,
     debugLog,
     getSettingString,
@@ -5479,6 +5557,7 @@ function onload({ extensionAPI }) {
     },
     ensurePageUidByTitle,
     createRoamBlock,
+    getFirstContentOrder,
     formatRoamDate,
     showOptimizationResultToast,
     showProgressToast: (title, message) => showInfoToast(title, message),
@@ -6120,6 +6199,7 @@ function onload({ extensionAPI }) {
     getSettingBool,
     ensurePageUidByTitle: (title) => ensurePageUidByTitle(title),
     createRoamBlock: (parentUid, text, order) => createRoamBlock(parentUid, text, order),
+    getFirstContentOrder,
     formatRoamDate,
     SETTINGS_KEYS,
   });

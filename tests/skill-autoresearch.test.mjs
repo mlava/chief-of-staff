@@ -18,10 +18,9 @@ import {
   hasSourcesWithParameterHints,
   validateAndFixToolReferences,
   shouldStop,
-  parseFirstLevelSections,
-  restoreDroppedSections,
-  repairTruncatedTail,
-  preserveSectionLines,
+  parseMutationDiff,
+  applyMutationDiff,
+  ASPECT_SECTION_MAP,
   OPTIMIZATION_DEFAULTS,
 } from "../src/skill-autoresearch.js";
 
@@ -53,6 +52,8 @@ function makeDeps(overrides = {}) {
     formatRoamDate: () => "March 31st, 2026",
     showOptimizationResultToast: async ({ onAccept }) => { onAccept(); return "accepted"; },
     debugLog: () => {},
+    appendChatPanelMessage: () => {},
+    getChatPanelIsOpen: () => false,
     getExtensionAPIRef: () => ({ settings: { get: () => null, set: () => {} } }),
     getSettingString: () => "2.00",
     SETTINGS_KEYS: { skillAutoresearchBudget: "skill-autoresearch-budget" },
@@ -86,6 +87,14 @@ function makeSetupResponse(testCaseCount = 3, criteriaCount = 2) {
     prompt: `Does the response satisfy criterion ${i + 1}?`,
   }));
   return JSON.stringify({ testCases, evalCriteria });
+}
+
+// Returns a valid structured mutation diff JSON (as LLM response text)
+function makeMutationResponseText(section = "Rubric") {
+  return JSON.stringify({
+    section,
+    content: `- ${section}:\n    - Does the response address the task directly?`,
+  });
 }
 
 // ── Intent Parsing ──────────────────────────────────────────────────────────
@@ -559,12 +568,11 @@ describe("runSkillOptimization", () => {
     const testDeps = makeDeps({
       callLlmMini: async () => {
         callIdx++;
-        if (callIdx === 1) {
-          // Setup: return test cases and criteria
-          return makeMockLlmResponse(makeSetupResponse(2, 2));
-        }
-        // All other calls: return some response text
-        return makeMockLlmResponse("Simulated response or mutation content with improvements");
+        if (callIdx === 1) return makeMockLlmResponse(makeSetupResponse(2, 2));
+        // Call 4 is the mutation (1 setup + 2 baseline sims + 1 mutation)
+        if (callIdx === 4) return makeMockLlmResponse(makeMutationResponseText());
+        // Other calls are simulations — plain text response is fine
+        return makeMockLlmResponse("Simulated skill response");
       },
       scoreWithBinaryChecks: async (_resp, checks) => {
         // Baseline: 50% pass rate. After mutation: 100%
@@ -595,7 +603,9 @@ describe("runSkillOptimization", () => {
       callLlmMini: async () => {
         callIdx++;
         if (callIdx === 1) return makeMockLlmResponse(makeSetupResponse(2, 2));
-        return makeMockLlmResponse("Mutation content");
+        // Call 4 is the mutation (1 setup + 2 baseline sims + 1 mutation)
+        if (callIdx === 4) return makeMockLlmResponse(makeMutationResponseText());
+        return makeMockLlmResponse("Simulated skill response");
       },
       scoreWithBinaryChecks: async (_resp, checks) => {
         const isPostMutation = callIdx > 5;
@@ -715,7 +725,9 @@ describe("runSkillOptimization", () => {
       callLlmMini: async () => {
         callIdx++;
         if (callIdx === 1) return makeMockLlmResponse(makeSetupResponse(1, 1));
-        return makeMockLlmResponse("Improved skill content");
+        // Call 3 is the mutation (1 setup + 1 baseline sim + 1 mutation)
+        if (callIdx === 3) return makeMockLlmResponse(makeMutationResponseText());
+        return makeMockLlmResponse("Simulated skill response");
       },
       scoreWithBinaryChecks: async (_resp, checks) => {
         const isPostMutation = callIdx > 3;
@@ -1061,387 +1073,198 @@ describe("detectUnprovableCriteria", () => {
   });
 });
 
-// ── parseFirstLevelSections ──────────────────────────────────────────────
-
-describe("parseFirstLevelSections", () => {
-  it("parses first-level sections from skill content", () => {
-    const content = [
-      "- Trigger: user provides messy input",
-      "- Approach:",
-      "  - Step 1",
-      "  - Step 2",
-      "- Constraints:",
-      "  - Must Do:",
-      "    - Extract tasks",
-      "- Tools: bt_create, roam_create_block",
-    ].join("\n");
-    const sections = parseFirstLevelSections(content);
-    assert.strictEqual(sections.length, 4);
-    assert.strictEqual(sections[0].key, "trigger");
-    assert.strictEqual(sections[1].key, "approach");
-    assert.strictEqual(sections[2].key, "constraints");
-    assert.strictEqual(sections[3].key, "tools");
-  });
-
-  it("includes children in section fullText", () => {
-    const content = "- Approach:\n  - Step 1\n  - Step 2\n- Rubric:\n  - Check A";
-    const sections = parseFirstLevelSections(content);
-    assert.strictEqual(sections.length, 2);
-    assert.ok(sections[0].fullText.includes("Step 1"));
-    assert.ok(sections[0].fullText.includes("Step 2"));
-  });
-
-  it("handles sections without colons", () => {
-    const content = "- OPERATING PRINCIPLES\n  - Be thorough\n- PHASE 1\n  - Do stuff";
-    const sections = parseFirstLevelSections(content);
-    assert.strictEqual(sections[0].key, "operating principles");
-    assert.strictEqual(sections[1].key, "phase 1");
-  });
-
-  it("returns empty array for empty content", () => {
-    assert.deepStrictEqual(parseFirstLevelSections(""), []);
-    assert.deepStrictEqual(parseFirstLevelSections(null), []);
-  });
-
-  it("ignores indented lines before first section", () => {
-    const content = "  - orphan child\n- Trigger: test\n  - detail";
-    const sections = parseFirstLevelSections(content);
-    assert.strictEqual(sections.length, 1);
-    assert.strictEqual(sections[0].key, "trigger");
-  });
-});
-
-// ── restoreDroppedSections ──────────────────────────────────────────────
-
-describe("restoreDroppedSections", () => {
-  const original = [
-    "- Trigger: user provides messy input",
-    "- Approach:",
-    "  - Step 1",
-    "  - Step 2",
-    "- OPERATING PRINCIPLES",
-    "  - Be thorough",
-    "- PHASE 1: ORGANISE",
-    "  - Core Ideas",
-    "- Constraints:",
-    "  - Must Do:",
-    "    - Extract tasks",
-    "- Rubric:",
-    "  - Check quality",
-    "- Tools: bt_create",
-  ].join("\n");
-
-  it("restores sections dropped by the LLM", () => {
-    const mutated = [
-      "- Constraints:",
-      "  - Must Do:",
-      "    - Extract tasks",
-      "    - New constraint added",
-      "- Rubric:",
-      "  - Check quality",
-      "  - New criterion added",
-      "- Tools: bt_create",
-    ].join("\n");
-
-    const result = restoreDroppedSections(original, mutated);
-    assert.ok(result.restored.includes("trigger"));
-    assert.ok(result.restored.includes("approach"));
-    assert.ok(result.restored.includes("operating principles"));
-    assert.ok(result.restored.includes("phase 1"));
-    assert.strictEqual(result.restored.length, 4);
-    // Restored content should include the original sections
-    assert.ok(result.content.includes("Trigger: user provides messy input"));
-    assert.ok(result.content.includes("Step 1"));
-    assert.ok(result.content.includes("OPERATING PRINCIPLES"));
-    assert.ok(result.content.includes("Core Ideas"));
-  });
-
-  it("does not duplicate sections already present", () => {
-    const mutated = original + "\n- Extra: new section";
-    const result = restoreDroppedSections(original, mutated);
-    assert.strictEqual(result.restored.length, 0);
-    assert.strictEqual(result.content, mutated);
-  });
-
-  it("matches case-insensitively", () => {
-    const mutated = "- trigger: user provides messy input\n- tools: bt_create";
-    const result = restoreDroppedSections(original, mutated);
-    // trigger and tools are present (case-insensitive), others should be restored
-    assert.ok(!result.restored.includes("trigger"));
-    assert.ok(!result.restored.includes("tools"));
-    assert.ok(result.restored.includes("approach"));
-  });
-
-  it("returns unchanged content when nothing is dropped", () => {
-    const result = restoreDroppedSections(original, original);
-    assert.strictEqual(result.restored.length, 0);
-    assert.strictEqual(result.content, original);
-  });
-
-  it("handles empty post-mutation content", () => {
-    const result = restoreDroppedSections(original, "");
-    // All sections should be restored
-    assert.ok(result.restored.length > 0);
-    assert.ok(result.content.includes("Trigger"));
-    assert.ok(result.content.includes("Approach"));
-  });
-
-  it("detects absorbed sections and skips restoration", () => {
-    const pre = [
-      "- ROUTING",
-      "  - After organising and extracting, route outputs to the correct destinations:",
-      "  - My tasks → create via bt_create with project, due date, and effort attributes where known",
-      "  - Others' tasks → create via bt_create with assignee set to owner (becomes waiting-for)",
-      "  - Ideas and parking lot items → add to [[Chief of Staff/Inbox]] via roam_create_block",
-      "  - Questions needing decisions → add to [[Chief of Staff/Decisions]] via roam_create_block",
-      "- Trigger: test input",
-    ].join("\n");
-
-    // LLM reorganised ROUTING content into a new Output section
-    const post = [
-      "- Output:",
-      "  - Where output goes:",
-      "    - My tasks → create via bt_create with project, due date, and effort attributes where known",
-      "    - Others' tasks → create via bt_create with assignee set to owner (becomes waiting-for)",
-      "    - Ideas and parking lot items → add to [[Chief of Staff/Inbox]] via roam_create_block",
-      "    - Questions needing decisions → add to [[Chief of Staff/Decisions]] via roam_create_block",
-      "- Trigger: test input",
-    ].join("\n");
-
-    const result = restoreDroppedSections(pre, post);
-    assert.ok(!result.restored.includes("routing"));
-    assert.ok(result.absorbed.includes("routing"));
-    assert.strictEqual(result.restored.length, 0);
-  });
-
-  it("restores sections with low absorption rate", () => {
-    const pre = [
-      "- OPERATING PRINCIPLES",
-      "  - **Extract aggressively.** Surface all potential tasks",
-      "  - **Preserve context.** Keep the why behind each item",
-      "  - **Flag ambiguity.** Mark unclear items with [UNCLEAR]",
-      "  - **Suggest ownership.** Note if task is mine or someone else's",
-      "  - **Identify dependencies.** Link related tasks",
-      "- Tools: bt_create",
-    ].join("\n");
-
-    // LLM output has only one overlapping line — not enough for absorption
-    const post = [
-      "- Constraints:",
-      "  - Must Do:",
-      "    - **Flag ambiguity.** Mark unclear items with [UNCLEAR]",
-      "- Tools: bt_create",
-    ].join("\n");
-
-    const result = restoreDroppedSections(pre, post);
-    assert.ok(result.restored.includes("operating principles"));
-    assert.strictEqual(result.absorbed.length, 0);
-  });
-
-  it("returns absorbed array even when empty", () => {
-    const result = restoreDroppedSections(original, original);
-    assert.deepStrictEqual(result.absorbed, []);
-  });
-});
-
-// ── repairTruncatedTail ─────────────────────────────────────────────────
-
-describe("repairTruncatedTail", () => {
-  it("repairs a truncated last section", () => {
-    const pre = [
-      "- Approach:",
-      "  - Step 1",
-      "- Rubric:",
-      "  - Check quality of output",
-      "  - Check ownership labels present",
-      "  - Check effort estimation included",
-    ].join("\n");
-
-    const post = [
-      "- Approach:",
-      "  - Step 1",
-      "- Rubric:",
-      "  - Check quality of output",
-      "  - Check ownership labels",
-    ].join("\n");
-
-    const result = repairTruncatedTail(pre, post);
-    assert.strictEqual(result.repaired, "rubric");
-    assert.ok(result.content.includes("Check effort estimation included"));
-    assert.ok(result.content.includes("Check ownership labels present"));
-  });
-
-  it("returns unchanged when last section is not truncated", () => {
-    const content = [
-      "- Trigger: test",
-      "- Rubric:",
-      "  - Check A",
-      "  - Check B",
-    ].join("\n");
-
-    const result = repairTruncatedTail(content, content);
-    assert.strictEqual(result.repaired, null);
-    assert.strictEqual(result.content, content);
-  });
-
-  it("returns unchanged when last section is longer in post", () => {
-    const pre = "- Rubric:\n  - Check A";
-    const post = "- Rubric:\n  - Check A\n  - Check B (new)";
-
-    const result = repairTruncatedTail(pre, post);
-    assert.strictEqual(result.repaired, null);
-    assert.strictEqual(result.content, post);
-  });
-
-  it("returns unchanged when last section has no pre match", () => {
-    const pre = "- Trigger: test";
-    const post = "- NewSection: added by mutation\n  - Detail";
-
-    const result = repairTruncatedTail(pre, post);
-    assert.strictEqual(result.repaired, null);
-  });
-
-  it("preserves content before the truncated section", () => {
-    const pre = [
-      "- Trigger: test input",
-      "- Approach:",
-      "  - Step 1",
-      "  - Step 2",
-      "- Constraints:",
-      "  - Must Do:",
-      "    - Extract tasks",
-      "    - Preserve voice",
-    ].join("\n");
-
-    const post = [
-      "- Trigger: test input",
-      "- Approach:",
-      "  - Step 1",
-      "  - Step 2",
-      "  - Step 3 (new)",
-      "- Constraints:",
-      "  - Must Do:",
-      "    - Extract tasks",
-    ].join("\n");
-
-    const result = repairTruncatedTail(pre, post);
-    assert.strictEqual(result.repaired, "constraints");
-    // Approach (with new Step 3) should be preserved
-    assert.ok(result.content.includes("Step 3 (new)"));
-    // Constraints should be restored from pre
-    assert.ok(result.content.includes("Preserve voice"));
-  });
-
-  it("handles empty inputs gracefully", () => {
-    assert.strictEqual(repairTruncatedTail("", "- X:\n  - Y").repaired, null);
-    assert.strictEqual(repairTruncatedTail("- X:\n  - Y", "").repaired, null);
-  });
-});
-
-// ── preserveSectionLines ────────────────────────────────────────────────
-
-describe("preserveSectionLines", () => {
-  it("restores lines removed from within a section", () => {
-    const pre = [
-      "- Output:",
-      "  - My tasks → create via bt_create with project and due date",
-      "  - Others' tasks → create via bt_create with assignee",
-      "  - If input looks like a project, group them and suggest creating a project page",
-      "- Trigger: test input",
-    ].join("\n");
-
-    const post = [
-      "- Output:",
-      "  - My tasks → create via bt_create with project and due date",
-      "  - Others' tasks → create via bt_create with assignee",
-      "  - New addition from the mutation",
-      "- Trigger: test input",
-    ].join("\n");
-
-    const result = preserveSectionLines(pre, post);
-    assert.strictEqual(result.restoredLines.length, 1);
-    assert.strictEqual(result.restoredLines[0].section, "output");
-    assert.ok(result.content.includes("If input looks like a project"));
-    // New addition should still be present
-    assert.ok(result.content.includes("New addition from the mutation"));
-  });
-
-  it("does not restore lines that were moved to another section", () => {
-    const pre = [
-      "- ROUTING",
-      "  - My tasks → create via bt_create with project and due date",
-      "- Output:",
-      "  - Summary of results",
-    ].join("\n");
-
-    const post = [
-      "- ROUTING",
-      "  - Routes are defined elsewhere",
-      "- Output:",
-      "  - Summary of results",
-      "  - My tasks → create via bt_create with project and due date",
-    ].join("\n");
-
-    const result = preserveSectionLines(pre, post);
-    // Line was moved to Output, not deleted — should not be restored into ROUTING
-    assert.strictEqual(result.restoredLines.length, 0);
-  });
-
-  it("does not restore short/header lines", () => {
-    const pre = "- Constraints:\n  - Must Do:\n  - Extract tasks aggressively but flag ambiguity";
-    const post = "- Constraints:\n  - Extract tasks aggressively but flag ambiguity";
-
-    const result = preserveSectionLines(pre, post);
-    // "Must Do:" is ≤10 chars normalised — should not be restored
-    assert.strictEqual(result.restoredLines.length, 0);
-  });
-
-  it("returns unchanged when no lines are missing", () => {
-    const content = "- Approach:\n  - Step 1 is to do something\n  - Step 2 is to do another thing";
-    const result = preserveSectionLines(content, content);
-    assert.strictEqual(result.restoredLines.length, 0);
-    assert.strictEqual(result.content, content);
-  });
-
-  it("skips sections only in pre (handled by restoreDroppedSections)", () => {
-    const pre = "- Approach:\n  - Step 1 is important\n- Rubric:\n  - Check quality of output";
-    const post = "- Approach:\n  - Step 1 is important";
-
-    const result = preserveSectionLines(pre, post);
-    // Rubric section is missing entirely — not this guard's job
-    assert.strictEqual(result.restoredLines.length, 0);
-  });
-
-  it("restores multiple lines from multiple sections", () => {
-    const pre = [
-      "- Output:",
-      "  - Route tasks to correct destinations for processing",
-      "  - If input looks like a project, group them and suggest creating a project page",
-      "- Constraints:",
-      "  - Must preserve original voice and context in all outputs",
-      "  - Must route items to correct destinations for processing",
-    ].join("\n");
-
-    const post = [
-      "- Output:",
-      "  - Route tasks to correct destinations for processing",
-      "  - New output line added by mutation here",
-      "- Constraints:",
-      "  - Must preserve original voice and context in all outputs",
-      "  - New constraint added by mutation here",
-    ].join("\n");
-
-    const result = preserveSectionLines(pre, post);
-    assert.strictEqual(result.restoredLines.length, 2);
-    assert.ok(result.content.includes("If input looks like a project"));
-    assert.ok(result.content.includes("Must route items to correct destinations"));
-  });
-});
-
 // ── OPTIMIZATION_DEFAULTS ─────────────────────────────────────────────────
 
 describe("OPTIMIZATION_DEFAULTS wall-clock", () => {
   it("has iterationWallClockMs set to 150000", () => {
     assert.strictEqual(OPTIMIZATION_DEFAULTS.iterationWallClockMs, 150_000);
+  });
+});
+
+// ── parseMutationDiff ─────────────────────────────────────────────────────
+
+describe("parseMutationDiff", () => {
+  beforeEach(() => { initSkillAutoresearch(makeDeps()); });
+
+  it("returns null for null input", () => {
+    assert.strictEqual(parseMutationDiff(null), null);
+  });
+
+  it("returns null for empty string", () => {
+    assert.strictEqual(parseMutationDiff(""), null);
+  });
+
+  it("returns null for non-JSON text", () => {
+    assert.strictEqual(parseMutationDiff("here is an improved skill body..."), null);
+  });
+
+  it("returns null when section field is missing", () => {
+    assert.strictEqual(parseMutationDiff(JSON.stringify({ content: "- Rubric:\n    - check" })), null);
+  });
+
+  it("returns null when content field is missing", () => {
+    assert.strictEqual(parseMutationDiff(JSON.stringify({ section: "Rubric" })), null);
+  });
+
+  it("returns null when section is empty", () => {
+    assert.strictEqual(parseMutationDiff(JSON.stringify({ section: "", content: "- Rubric:\n    - check" })), null);
+  });
+
+  it("returns null when content is empty", () => {
+    assert.strictEqual(parseMutationDiff(JSON.stringify({ section: "Rubric", content: "" })), null);
+  });
+
+  it("parses valid { section, content } JSON", () => {
+    const diff = parseMutationDiff(JSON.stringify({
+      section: "Rubric",
+      content: "- Rubric:\n    - Does the response address the task?",
+    }));
+    assert.deepStrictEqual(diff, {
+      section: "Rubric",
+      content: "- Rubric:\n    - Does the response address the task?",
+    });
+  });
+
+  it("strips JSON code fences", () => {
+    const raw = "```json\n" + JSON.stringify({ section: "Constraints", content: "- Constraints:\n    - Must Do: be concise" }) + "\n```";
+    const diff = parseMutationDiff(raw);
+    assert.strictEqual(diff.section, "Constraints");
+    assert.ok(diff.content.includes("Must Do"));
+  });
+
+  it("trims whitespace from section name", () => {
+    const diff = parseMutationDiff(JSON.stringify({ section: "  Approach  ", content: "- Approach:\n    - step" }));
+    assert.strictEqual(diff.section, "Approach");
+  });
+});
+
+// ── applyMutationDiff ─────────────────────────────────────────────────────
+
+describe("applyMutationDiff", () => {
+  it("returns currentContent when diff is null", () => {
+    const content = "- Trigger: test\n- Approach:\n    - step";
+    assert.strictEqual(applyMutationDiff(content, null), content);
+  });
+
+  it("returns currentContent when diff has no section", () => {
+    const content = "- Trigger: test";
+    assert.strictEqual(applyMutationDiff(content, { section: "", content: "..." }), content);
+  });
+
+  it("replaces an existing section", () => {
+    const before = "- Trigger: test\n- Approach:\n    - old step\n- Output: result";
+    const diff = { section: "Approach", content: "- Approach:\n    - new step 1\n    - new step 2" };
+    const result = applyMutationDiff(before, diff);
+    assert.ok(result.includes("new step 1"));
+    assert.ok(result.includes("new step 2"));
+    assert.ok(!result.includes("old step"));
+    // Other sections untouched
+    assert.ok(result.includes("- Trigger: test"));
+    assert.ok(result.includes("- Output: result"));
+  });
+
+  it("appends a new section when not present", () => {
+    const before = "- Trigger: test\n- Approach:\n    - step";
+    const diff = { section: "Rubric", content: "- Rubric:\n    - Does the response include required sections?" };
+    const result = applyMutationDiff(before, diff);
+    assert.ok(result.includes("- Rubric:"));
+    assert.ok(result.includes("- Trigger: test"));
+    assert.ok(result.includes("- Approach:"));
+  });
+
+  it("does not alter other sections when replacing", () => {
+    const before = [
+      "- Trigger: test",
+      "- Approach:",
+      "    - step 1",
+      "- Constraints:",
+      "    - Must Do: be concise",
+      "- Output: return result",
+    ].join("\n");
+    const diff = {
+      section: "Approach",
+      content: "- Approach:\n    - improved step 1\n    - added step 2",
+    };
+    const result = applyMutationDiff(before, diff);
+    assert.ok(result.includes("improved step 1"));
+    assert.ok(result.includes("Must Do: be concise"));
+    assert.ok(result.includes("- Trigger: test"));
+    assert.ok(result.includes("- Output: return result"));
+  });
+});
+
+// ── ASPECT_SECTION_MAP ────────────────────────────────────────────────────
+
+describe("ASPECT_SECTION_MAP", () => {
+  it("maps all structural aspects to their target sections", () => {
+    assert.strictEqual(ASPECT_SECTION_MAP.add_rubric, "Rubric");
+    assert.strictEqual(ASPECT_SECTION_MAP.add_constraints, "Constraints");
+    assert.strictEqual(ASPECT_SECTION_MAP.add_or_fix_sources, "Sources");
+  });
+
+  it("maps all refinement aspects to their target sections", () => {
+    assert.strictEqual(ASPECT_SECTION_MAP.approach_specificity, "Approach");
+    assert.strictEqual(ASPECT_SECTION_MAP.output_format, "Output");
+    assert.strictEqual(ASPECT_SECTION_MAP.constraint_tightening, "Constraints");
+    assert.strictEqual(ASPECT_SECTION_MAP.edge_case_handling, "Approach");
+    assert.strictEqual(ASPECT_SECTION_MAP.trigger_clarity, "Trigger");
+  });
+
+  it("covers all STRUCTURAL_ASPECTS and REFINEMENT_ASPECTS", () => {
+    const allAspects = [
+      "add_rubric", "add_constraints", "add_or_fix_sources",
+      "approach_specificity", "output_format", "constraint_tightening",
+      "edge_case_handling", "trigger_clarity",
+    ];
+    for (const a of allAspects) {
+      assert.ok(a in ASPECT_SECTION_MAP, `missing aspect: ${a}`);
+      assert.ok(ASPECT_SECTION_MAP[a], `empty section for aspect: ${a}`);
+    }
+  });
+});
+
+// ── computePassRate exclusion ─────────────────────────────────────────────
+
+describe("computePassRate with excluded criteria", () => {
+  function makeScores(passMap) {
+    // passMap: { criterionId: boolean }
+    return [{ results: Object.entries(passMap).map(([id, pass]) => ({ id, pass })) }];
+  }
+
+  it("includes all criteria when excludedIds is null", () => {
+    const scores = makeScores({ a: true, b: false, c: true });
+    assert.strictEqual(computePassRate(scores, 3, null), 2 / 3);
+  });
+
+  it("excludes specified criteria from numerator and denominator", () => {
+    const scores = makeScores({ a: true, b: false, c: true });
+    // Exclude b (which was failing) — effective rate should be 2/2
+    const excluded = new Set(["b"]);
+    assert.strictEqual(computePassRate(scores, 3, excluded), 1.0);
+  });
+
+  it("excluding a 0/5 wall criterion raises the reported rate", () => {
+    // Simulates: baseline 0/5 on 'extracts_core_ideas', 5/5 on 4 others → 80%
+    // After wallcriterialization of 'extracts_core_ideas': 5/5 on remaining 4 → 100%
+    const scores = [
+      { results: [
+        { id: "extracts_core_ideas", pass: false },
+        { id: "preserves_voice", pass: true },
+        { id: "routes_tasks", pass: true },
+        { id: "includes_summary", pass: true },
+        { id: "avoids_fabrication", pass: true },
+      ]},
+    ];
+    const rateWithWall = computePassRate(scores, 5, null);
+    assert.strictEqual(rateWithWall, 4 / 5);
+
+    const excluded = new Set(["extracts_core_ideas"]);
+    const rateWithoutWall = computePassRate(scores, 5, excluded);
+    assert.strictEqual(rateWithoutWall, 1.0);
+  });
+
+  it("returns 0 when all criteria are excluded", () => {
+    const scores = makeScores({ a: true });
+    assert.strictEqual(computePassRate(scores, 1, new Set(["a"])), 0);
   });
 });

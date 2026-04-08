@@ -18,14 +18,14 @@ export const OPTIMIZATION_DEFAULTS = {
   maxIterations: 20,
   consecutiveDiscardLimit: 3,
   regressionThreshold: 2,
-  wallCriterionFailLimit: 2,
+  wallCriterionFailLimit: 3,
   baselineToolCallingTimeoutMs: 120_000,  // generous for baseline (populates cache)
   toolCallingTimeoutMs: 90_000,           // shorter for mutations (cache-assisted)
   iterationWallClockMs: 150_000,
   defaultBudgetUsd: 2.0,
   simulationMaxTokens: 1200,
   mutationMaxTokens: 2000,
-  setupMaxTokens: 1500,
+  setupMaxTokens: 2500,
 };
 
 // Phase A: structural sub-aspects (guaranteed first, skipped if section exists)
@@ -184,6 +184,10 @@ async function generateTestCasesAndCriteria(state, skillContent, miniModel, maxT
         .filter(ec => ec?.id && ec?.prompt)
         .slice(0, OPTIMIZATION_DEFAULTS.maxEvalCriteria)
     : [];
+
+  if (testCases.length === 0) {
+    deps.debugLog("[Autoresearch] Setup parse failed — raw response:", String(text || "").slice(0, 500));
+  }
 
   return { testCases, evalCriteria };
 }
@@ -604,29 +608,50 @@ export function selectMutationAspect(failingSummary, triedAspects, skillContent,
   return REFINEMENT_ASPECTS[idx];
 }
 
-const MUTATION_SYSTEM_PROMPT = `You are improving a Roam Research AI skill definition.
-Make ONE small, targeted addition or modification to address the failing criteria.
+// ── Aspect → section routing ─────────────────────────────────────────────
 
-VALID SKILL SECTIONS (all optional except Trigger/Approach/Output):
+export const ASPECT_SECTION_MAP = {
+  add_rubric:            "Rubric",
+  add_constraints:       "Constraints",
+  add_or_fix_sources:    "Sources",
+  approach_specificity:  "Approach",
+  output_format:         "Output",
+  constraint_tightening: "Constraints",
+  edge_case_handling:    "Approach",
+  trigger_clarity:       "Trigger",
+};
+
+const MUTATION_SYSTEM_PROMPT = `You are improving ONE section of a Roam Research AI skill definition.
+Make one targeted addition or modification to address the failing criteria.
+
+VALID SKILL SECTIONS (for reference):
 - Trigger: when the skill should activate (natural language phrases)
 - Approach: step-by-step execution logic
 - Output: where output goes and what "done" looks like
-- Sources: tools the assistant MUST call (enforces gathering completeness)
-- Tools: restricts which tools are available (reduces cost/noise)
+- Sources: tools the assistant MUST call before producing output
+- Tools: restricts which tools are available
 - Constraints: four quadrants — Must Do, Must Not Do, Prefer, Escalate
 - Rubric: 3-5 binary pass/fail quality criteria for post-run evaluation
 - Models: provider preferences (+Mistral, -Gemini)
 - Tier: mini, power, or ludicrous
 - Budget: dollar cap per run (e.g. $0.05)
 
-CRITICAL RULES:
-- Keep ALL existing content intact. Do not remove, reword, or restructure lines that are working.
-- Only ADD a new line, a new section, or MODIFY the minimum words needed.
-- When adding a new section (e.g. Constraints, Rubric, Sources), place it after the existing sections.
-- Return the COMPLETE skill body (all sections, old and new) so nothing is lost.
-- Do NOT include the skill name as a heading — return only the body content.
-- Preserve the existing structure (indented list items with "- " prefixes).
-- Prefer adding a constraint, rubric criterion, or instruction line over rewriting existing ones.`;
+ROAM LIST FORMAT — all sections use indented list items:
+- SectionName:
+    - child item 1
+    - child item 2
+
+Return JSON only — NO explanation, NO other text:
+{
+  "section": "<the section name you are modifying or creating>",
+  "content": "<complete updated section text, including the header line>"
+}
+
+Rules:
+- content must start with "- SectionName:" on the first line (e.g. "- Rubric:")
+- child items use 4-space indent with "- " prefix
+- Return ONLY the named section — no other sections, no skill name heading
+- Preserve all existing lines in the section unless they directly conflict with the improvement`;
 
 /**
  * Extract a named section (Sources, Tools, Models) from skill content.
@@ -665,239 +690,104 @@ function replaceSection(content, sectionName, originalSectionText) {
     const after = lines.slice(current.end);
     return [...before, ...originalSectionText.split("\n"), ...after].join("\n");
   }
-  // Section was removed — append it back
+  // Section not present — append it
   return content + "\n" + originalSectionText;
 }
 
 /**
- * Parses skill content into first-level child block sections.
- * First-level blocks start with "- " at indent 0 (no leading spaces).
- * Each section includes the header line and all deeper-indented lines below it.
- * @param {string} content - Flattened skill content from flattenTreeToLines(children, 0)
- * @returns {{ key: string, fullText: string }[]}
+ * Parses a structured mutation diff from LLM response text.
+ * Returns { section, content } or null if the response is not valid.
  */
-export function parseFirstLevelSections(content) {
-  const lines = String(content || "").split("\n");
-  const sections = [];
-  let current = null;
-
-  for (const line of lines) {
-    if (/^- /.test(line)) {
-      if (current) sections.push(current);
-      let key = line.slice(2).trim();
-      const colonIdx = key.indexOf(":");
-      if (colonIdx > 0 && colonIdx < 50) key = key.slice(0, colonIdx);
-      key = key.toLowerCase().replace(/\s+/g, " ").trim();
-      current = { key, lines: [line] };
-    } else if (current) {
-      current.lines.push(line);
+export function parseMutationDiff(text) {
+  if (!text) return null;
+  const stripped = text.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/, "").trim();
+  let parsed = null;
+  try {
+    parsed = JSON.parse(stripped);
+  } catch (_) {
+    if (typeof deps.extractBalancedJsonObjects === "function") {
+      const objects = deps.extractBalancedJsonObjects(stripped);
+      if (objects.length > 0) parsed = objects[0].parsed;
     }
   }
-  if (current) sections.push(current);
-  return sections.map(s => ({ key: s.key, fullText: s.lines.join("\n") }));
+  if (!parsed || typeof parsed.section !== "string" || typeof parsed.content !== "string") return null;
+  if (!parsed.section.trim() || !parsed.content.trim()) return null;
+  return { section: parsed.section.trim(), content: parsed.content.trim() };
 }
 
 /**
- * Normalises a content line for absorption comparison.
- * Strips leading whitespace, bullet prefix, lowercases.
+ * Applies a section-level diff to skill content.
+ * Replaces the named section entirely, or appends it if not present.
  */
-function normaliseLine(line) {
-  return line.replace(/^\s*-\s*/, "").trim().toLowerCase();
-}
-
-const ABSORPTION_LINE_MIN_LENGTH = 10;
-const ABSORPTION_THRESHOLD = 0.6;
-
-/**
- * Restores first-level sections from pre-mutation content that were dropped
- * by the LLM. Matches by normalised section header key.
- * When a section header is missing but ≥60% of its content lines appear
- * elsewhere in the mutation (absorbed into a new section structure), it is
- * not restored — preventing duplication.
- * @param {string} preContent - Content before mutation
- * @param {string} postContent - Content after mutation
- * @returns {{ content: string, restored: string[], absorbed: string[] }}
- */
-export function restoreDroppedSections(preContent, postContent) {
-  const preSections = parseFirstLevelSections(preContent);
-  const postSections = parseFirstLevelSections(postContent);
-  const postKeys = new Set(postSections.map(s => s.key));
-
-  // Build set of normalised content lines from post-mutation content
-  // for absorption detection (content reorganised into a different section)
-  const postLineSet = new Set();
-  for (const line of String(postContent || "").split("\n")) {
-    const norm = normaliseLine(line);
-    if (norm.length > ABSORPTION_LINE_MIN_LENGTH) postLineSet.add(norm);
-  }
-
-  const restored = [];
-  const absorbed = [];
-  let result = postContent;
-  for (const section of preSections) {
-    if (!section.key) continue;
-    if (postKeys.has(section.key)) continue;
-
-    // Check if section's content lines were absorbed into the mutation
-    const contentLines = section.fullText.split("\n")
-      .map(normaliseLine)
-      .filter(l => l.length > ABSORPTION_LINE_MIN_LENGTH);
-    if (contentLines.length > 0) {
-      const matchCount = contentLines.filter(l => postLineSet.has(l)).length;
-      if (matchCount / contentLines.length >= ABSORPTION_THRESHOLD) {
-        absorbed.push(section.key);
-        continue;
-      }
-    }
-
-    result += "\n" + section.fullText;
-    restored.push(section.key);
-  }
-  return { content: result, restored, absorbed };
-}
-
-/**
- * Detects and repairs truncation at the tail of mutated content.
- * When the LLM hits max_output_tokens, the last section gets cut off mid-line.
- * Compares the last first-level section in the post against the same section
- * in the pre; if the post version has fewer non-empty lines, replaces it with
- * the pre version.
- * @param {string} preContent - Content before mutation
- * @param {string} postContent - Content after mutation (possibly truncated)
- * @returns {{ content: string, repaired: string|null }}
- */
-export function repairTruncatedTail(preContent, postContent) {
-  const preSections = parseFirstLevelSections(preContent);
-  const postSections = parseFirstLevelSections(postContent);
-  if (postSections.length === 0 || preSections.length === 0) return { content: postContent, repaired: null };
-
-  const lastPost = postSections[postSections.length - 1];
-  const matchingPre = preSections.find(s => s.key === lastPost.key);
-  if (!matchingPre) return { content: postContent, repaired: null };
-
-  const preLineCount = matchingPre.fullText.split("\n").filter(l => l.trim()).length;
-  const postLineCount = lastPost.fullText.split("\n").filter(l => l.trim()).length;
-  if (postLineCount >= preLineCount) return { content: postContent, repaired: null };
-
-  // Replace the truncated last section with the pre version
-  const headerLine = lastPost.fullText.split("\n")[0];
-  const lastIdx = postContent.lastIndexOf(headerLine);
-  if (lastIdx < 0) return { content: postContent, repaired: null };
-
-  return { content: postContent.slice(0, lastIdx) + matchingPre.fullText, repaired: lastPost.key };
-}
-
-/**
- * Per-section line preservation guard.
- * For each first-level section present in both pre and post, detects content
- * lines that were removed by the mutation and appends them back to the section.
- * Uses normalised line matching (same as absorption detection).
- * Skips the section header line itself and lines ≤ ABSORPTION_LINE_MIN_LENGTH.
- * @param {string} preContent - Content before mutation
- * @param {string} postContent - Content after mutation
- * @returns {{ content: string, restoredLines: { section: string, count: number }[] }}
- */
-export function preserveSectionLines(preContent, postContent) {
-  const preSections = parseFirstLevelSections(preContent);
-  const postSections = parseFirstLevelSections(postContent);
-  const postByKey = new Map(postSections.map(s => [s.key, s]));
-
-  // Build global set of normalised lines in post (for cross-section moves)
-  const postAllLines = new Set();
-  for (const line of String(postContent || "").split("\n")) {
-    const norm = normaliseLine(line);
-    if (norm.length > ABSORPTION_LINE_MIN_LENGTH) postAllLines.add(norm);
-  }
-
-  const restoredLines = [];
-  let result = postContent;
-
-  for (const preSection of preSections) {
-    if (!preSection.key) continue;
-    const postSection = postByKey.get(preSection.key);
-    if (!postSection) continue; // handled by restoreDroppedSections
-
-    // Get content lines from pre section (skip header line)
-    const preLines = preSection.fullText.split("\n").slice(1);
-    const missingLines = [];
-    for (const line of preLines) {
-      const norm = normaliseLine(line);
-      if (norm.length <= ABSORPTION_LINE_MIN_LENGTH) continue;
-      // Only restore if the line doesn't appear ANYWHERE in the post
-      // (could have been moved to another section — that's fine)
-      if (!postAllLines.has(norm)) {
-        missingLines.push(line);
-      }
-    }
-
-    if (missingLines.length === 0) continue;
-
-    // Append missing lines at the end of the post section
-    const postSectionText = postSection.fullText;
-    const insertIdx = result.lastIndexOf(postSectionText);
-    if (insertIdx < 0) continue;
-
-    const insertEnd = insertIdx + postSectionText.length;
-    result = result.slice(0, insertEnd) + "\n" + missingLines.join("\n") + result.slice(insertEnd);
-    restoredLines.push({ section: preSection.key, count: missingLines.length });
-  }
-
-  return { content: result, restoredLines };
+export function applyMutationDiff(currentContent, diff) {
+  if (!diff || !diff.section || !diff.content) return currentContent;
+  return replaceSection(currentContent, diff.section, diff.content);
 }
 
 async function mutateSkill(state, currentContent, failingSummary, aspect, passRate, miniModel, usePowerMutation) {
-  // Detect locked sections: Sources, Tools, Models contain hand-curated config;
-  // Trigger defines activation semantics and should only change during trigger_clarity.
-  const alwaysLocked = ["Sources", "Tools", "Models"];
-  const conditionallyLocked = aspect !== "trigger_clarity" ? ["Trigger"] : [];
-  const lockedSections = {};
-  for (const name of [...alwaysLocked, ...conditionallyLocked]) {
-    const section = extractSection(currentContent, name);
-    if (section) lockedSections[name] = section.text;
-  }
-  const hasLockedSections = Object.keys(lockedSections).length > 0;
+  const targetSection = ASPECT_SECTION_MAP[aspect] || "Approach";
+
+  // Provide the current section text as context so the LLM knows what it's replacing
+  const currentSection = extractSection(currentContent, targetSection);
+  const currentSectionText = currentSection
+    ? currentSection.text
+    : `(section "${targetSection}" does not yet exist — create it)`;
 
   let aspectGuidance;
-
   switch (aspect) {
     case "add_rubric":
-      aspectGuidance = `Add a Rubric section with 3-5 binary pass/fail quality criteria derived from the skill's Approach and Output sections. Each criterion should test a specific, observable quality in the response (e.g. "Does the output include all three required sections?"). Place the Rubric after the existing sections.`;
+      aspectGuidance = `Create a Rubric section with 3-5 binary pass/fail quality criteria derived from the skill's Approach and Output sections. Each criterion should test a specific, observable quality (e.g. "Does the output include all three required sections?").`;
       break;
     case "add_constraints":
-      aspectGuidance = `Add a Constraints section with four quadrants:
-  - Must Do: non-negotiable behaviours the assistant must always follow
-  - Must Not Do: forbidden behaviours (e.g. "Do not send emails", "Do not call get-current-time")
-  - Prefer: soft preferences (e.g. "Prefer bullet points over paragraphs")
-  - Escalate: conditions where the assistant should ask the user rather than proceeding
-Derive the constraints from the skill's existing Approach instructions and the failing criteria below. Place the Constraints after the existing sections.`;
+      aspectGuidance = `Create a Constraints section with four quadrants:
+    - Must Do: non-negotiable behaviours the assistant must always follow
+    - Must Not Do: forbidden behaviours (e.g. "Do not send emails")
+    - Prefer: soft preferences (e.g. "Prefer bullet points over paragraphs")
+    - Escalate: conditions where the assistant should ask the user rather than proceeding
+  Derive from the skill's existing Approach instructions and the failing criteria below.`;
       break;
     case "add_or_fix_sources": {
       const hasSources = /\bSources\s*(?:—|:)/i.test(currentContent);
       if (hasSources) {
-        aspectGuidance = `Clean the Sources section. Each Sources child line should contain ONLY the tool name (e.g. \`roam_bt_search_tasks\`, \`list_calendars\`, \`search_email\`), not parameter hints, descriptions, or inline JSON. Move any parameter guidance or descriptions to the Approach section instead. Keep the same tools, just clean the formatting.`;
+        aspectGuidance = `Clean the Sources section. Each child line should contain ONLY the tool name (e.g. \`roam_bt_search_tasks\`, \`list_calendars\`), not parameter hints, descriptions, or inline JSON. Move parameter guidance to the Approach section instead. Keep the same tools, just clean the formatting.`;
       } else {
-        aspectGuidance = `Add a Sources section listing the specific tool names this skill MUST call before producing output. Use exact tool names from the skill's Approach section (e.g. \`roam_search\`, \`list_calendars\`, \`roam_bt_search_tasks\`). One tool per line, no descriptions or parameters — just the tool name.`;
+        aspectGuidance = `Create a Sources section listing the specific tool names this skill MUST call before producing output. Use exact tool names from the skill's Approach section (e.g. \`roam_search\`, \`list_calendars\`). One tool per line, no descriptions or parameters.`;
       }
       break;
     }
+    case "approach_specificity":
+      aspectGuidance = `Make the Approach section more specific. Add or clarify step-by-step instructions to address the failing criteria. Keep all existing steps.`;
+      break;
+    case "output_format":
+      aspectGuidance = `Clarify or improve the Output section. Specify the expected structure, format, or completion criteria more precisely.`;
+      break;
+    case "constraint_tightening":
+      aspectGuidance = `Add or tighten constraints in the Constraints section to address the failing criteria. Prefer adding a Must Do or Must Not Do entry over rewriting existing ones.`;
+      break;
+    case "edge_case_handling":
+      aspectGuidance = `Extend the Approach section with explicit edge case handling — what the skill should do for ambiguous input, missing context, or boundary conditions.`;
+      break;
+    case "trigger_clarity":
+      aspectGuidance = `Clarify or expand the Trigger section so it matches more of the intended user phrases while still being specific enough to avoid false positives.`;
+      break;
     default:
-      aspectGuidance = `Mutate ONLY the "${aspect.replace(/_/g, " ")}" aspect. Make one targeted change to improve the failing criteria.`;
+      aspectGuidance = `Improve the "${targetSection}" section to address the failing criteria. Make one targeted change.`;
   }
 
-  const lockedWarning = hasLockedSections
-    ? `\n\nLOCKED SECTIONS — do NOT modify, rewrite, or remove these sections: ${Object.keys(lockedSections).join(", ")}. They contain hand-curated tool configuration. Copy them exactly as-is into your output.`
-    : "";
-
-  const userPrompt = `The current version scores ${Math.round(passRate * 100)}% on evaluation criteria.
+  const userPrompt = `The current skill scores ${Math.round(passRate * 100)}% on evaluation criteria.
 
 Failing test cases and criteria:
 ${failingSummary}
 
-Current skill body:
+Current skill body (for context):
 ${currentContent}
 
-${aspectGuidance}${lockedWarning}
-Return the complete updated skill body.`;
+Current "${targetSection}" section:
+${currentSectionText}
+
+${aspectGuidance}
+
+Return JSON with the updated "${targetSection}" section.`;
 
   const callFn = usePowerMutation && typeof deps.callLlmPower === "function"
     ? deps.callLlmPower
@@ -905,7 +795,6 @@ Return the complete updated skill body.`;
   const mutationModel = usePowerMutation && typeof deps.getPowerModel === "function"
     ? deps.getPowerModel()
     : miniModel;
-  // Provider is the same for both tiers — only the model differs
   const mutationProvider = deps.getMiniProvider();
 
   const response = await callFn(
@@ -915,47 +804,17 @@ Return the complete updated skill body.`;
   );
   trackCallCost(state, response, mutationModel, "mutate");
 
-  let text = extractResponseText(response, mutationProvider);
-  // Strip code fences if present
-  text = text.replace(/^```(?:markdown|md)?\s*\n?/i, "").replace(/\n?```\s*$/, "").trim();
+  const text = extractResponseText(response, mutationProvider);
+  const diff = parseMutationDiff(text);
 
-  // Post-validate: restore locked sections if the mutation changed them
-  if (hasLockedSections) {
-    for (const [name, originalText] of Object.entries(lockedSections)) {
-      const mutated = extractSection(text, name);
-      if (!mutated || mutated.text !== originalText) {
-        text = replaceSection(text, name, originalText);
-        deps.debugLog(`[Autoresearch] Restored locked section: ${name}`);
-      }
-    }
+  if (!diff) {
+    deps.debugLog("[Autoresearch] Mutation returned invalid diff — no change. Raw response:", String(text || "").slice(0, 300));
+    return currentContent;
   }
 
-  // Restore any first-level sections the LLM dropped from the output
-  const { content: sectionRestored, restored: restoredSections, absorbed: absorbedSections } = restoreDroppedSections(currentContent, text);
-  if (restoredSections.length > 0) {
-    text = sectionRestored;
-    deps.debugLog("[Autoresearch] Restored dropped sections:", restoredSections.join(", "));
-  }
-  if (absorbedSections.length > 0) {
-    deps.debugLog("[Autoresearch] Sections absorbed (not restored):", absorbedSections.join(", "));
-  }
-
-  // Repair truncation at the tail (LLM hit max_output_tokens)
-  const { content: tailRepaired, repaired: repairedSection } = repairTruncatedTail(currentContent, text);
-  if (repairedSection) {
-    text = tailRepaired;
-    deps.debugLog("[Autoresearch] Repaired truncated tail section:", repairedSection);
-  }
-
-  // Per-section line preservation: restore content lines removed within sections
-  const { content: linePreserved, restoredLines } = preserveSectionLines(currentContent, text);
-  if (restoredLines.length > 0) {
-    text = linePreserved;
-    deps.debugLog("[Autoresearch] Restored removed lines:",
-      restoredLines.map(r => `${r.section}: ${r.count} lines`).join(", "));
-  }
-
-  return text;
+  deps.debugLog("[Autoresearch] Mutation diff:", diff.section,
+    `(${diff.content.split("\n").length} lines)`);
+  return applyMutationDiff(currentContent, diff);
 }
 
 /**
@@ -1025,7 +884,8 @@ async function persistDebriefResults(state) {
         + `(${state.testCases.length} tests, ${state.evalCriteria.length} criteria, `
         + `${state.mutationsAccepted.length + state.mutationsDiscarded.length} mutations tried, `
         + `${state.mutationsAccepted.length} accepted, $${state.totalCostUsd.toFixed(2)})`;
-      await deps.createRoamBlock(evalPageUid, logLine, "first");
+      const evalInsertOrder = deps.getFirstContentOrder ? deps.getFirstContentOrder(evalPageUid) : 0;
+      await deps.createRoamBlock(evalPageUid, logLine, evalInsertOrder);
     }
 
     // Decisions entry (only if improved)
@@ -1039,7 +899,8 @@ async function persistDebriefResults(state) {
           .join(", ");
         const decisionLine = `[[${dateStr}]] Skill "${state.skillName}" optimised \u2014 `
           + `${baselinePct}% \u2192 ${finalPct}%. Accepted: ${acceptedSummary}.`;
-        await deps.createRoamBlock(decisionsPageUid, decisionLine, "first");
+        const decInsertOrder = deps.getFirstContentOrder ? deps.getFirstContentOrder(decisionsPageUid) : 0;
+        await deps.createRoamBlock(decisionsPageUid, decisionLine, decInsertOrder);
       }
     }
     // Audit Log entry — makes optimization runs visible in the Activity tab
@@ -1253,14 +1114,6 @@ export async function runSkillOptimization(skillName, options = {}) {
     // Seed wall criteria with unprovable ones so they're excluded from mutation prompts
     for (const id of excludedCriteria) wallCriteria.add(id);
 
-    // Locked sections from original skill — restored after each mutation + validation
-    // to prevent tool reference stripping from damaging hand-curated Sources/Tools/Trigger
-    const originalLockedSections = {};
-    for (const name of ["Sources", "Tools", "Models", "Trigger"]) {
-      const section = extractSection(state.originalContent, name);
-      if (section) originalLockedSections[name] = section.text;
-    }
-
     while (true) {
       const stopCheck = shouldStop(state, budgetUsd);
       if (stopCheck.stop) {
@@ -1294,15 +1147,7 @@ export async function runSkillOptimization(skillName, options = {}) {
         deps.debugLog("[Autoresearch] Stripped invalid tool references:",
           validation.stripped.join(", "));
       }
-      // Restore locked sections after validation — prevents validateAndFixToolReferences
-      // from stripping tool names (e.g. sentry__search_issues) from hand-curated Sources
-      let validatedContent = validation.content;
-      for (const [name, originalText] of Object.entries(originalLockedSections)) {
-        const current = extractSection(validatedContent, name);
-        if (!current || current.text !== originalText) {
-          validatedContent = replaceSection(validatedContent, name, originalText);
-        }
-      }
+      const validatedContent = validation.content;
 
       // Simulate mutated version
       const iterationStart = Date.now();
@@ -1358,7 +1203,15 @@ export async function runSkillOptimization(skillName, options = {}) {
               criterionFailStreak[r.id] = (criterionFailStreak[r.id] || 0) + 1;
               if (criterionFailStreak[r.id] >= OPTIMIZATION_DEFAULTS.wallCriterionFailLimit && !wallCriteria.has(r.id)) {
                 wallCriteria.add(r.id);
-                deps.debugLog("[Autoresearch] Wall criterion detected:", r.id, "— deprioritised after", criterionFailStreak[r.id], "consecutive failures");
+                // Also exclude from pass-rate so the optimizer stops chasing an unachievable target.
+                // Recalculate currentBestPassRate on the same exclusion basis so future comparisons
+                // are apples-to-apples.
+                state.excludedCriteria.add(r.id);
+                state.currentBestPassRate = computePassRate(
+                  state.currentBestScores, state.evalCriteria.length, state.excludedCriteria
+                );
+                deps.debugLog("[Autoresearch] Wall criterion detected:", r.id,
+                  "— excluded from pass rate. Adjusted current best:", Math.round(state.currentBestPassRate * 100) + "%");
               }
             }
           }
@@ -1375,9 +1228,12 @@ export async function runSkillOptimization(skillName, options = {}) {
         continue;
       }
 
-      // Accept only if score is equal or better. No noise margin — accepting lower
-      // scores ratchets content quality down while the tracked rate stays inflated.
-      if (mutatedPassRate >= state.currentBestPassRate) {
+      // Accept if score strictly improves. On a tie, accept only if the mutation
+      // does not grow the skill (size-neutral or shorter). Ties that add content
+      // are rejected — they bloat the skill with no measurable benefit.
+      const isTie = mutatedPassRate === state.currentBestPassRate;
+      const isShorterOrEqual = validatedContent.length <= state.currentBestContent.length;
+      if (mutatedPassRate > state.currentBestPassRate || (isTie && isShorterOrEqual)) {
         deps.debugLog("[Autoresearch] Mutation accepted:", aspect,
           Math.round(state.currentBestPassRate * 100) + "% ->", Math.round(mutatedPassRate * 100) + "%");
         state.currentBestContent = validatedContent;
@@ -1393,7 +1249,7 @@ export async function runSkillOptimization(skillName, options = {}) {
           "vs current best:", Math.round(state.currentBestPassRate * 100) + "%");
         state.consecutiveDiscards++;
         trackDiscardFailures(mutatedScores);
-        state.mutationsDiscarded.push({ aspect, description: "no improvement" });
+        state.mutationsDiscarded.push({ aspect, description: isTie ? "tie — content grew" : "no improvement" });
       }
 
       // Progress toast every 2 iterations so the user knows it's alive
@@ -1516,6 +1372,7 @@ export async function runSkillOptimization(skillName, options = {}) {
           },
           onRevert: () => {
             deps.debugLog("[Autoresearch] User reverted — no changes written");
+            deps.appendChatPanelMessage("assistant", `Reverted — no changes written to "${state.skillName}".`);
           },
         });
       }
@@ -1524,10 +1381,15 @@ export async function runSkillOptimization(skillName, options = {}) {
       deps.debugLog("[Autoresearch] Debrief complete. User choice:", userChoice);
     } else {
       // No improvement — post summary to chat panel
-      const noImproveSummary = `#### Skill "${state.skillName}" — no improvement found\n\n`
-        + `**Baseline:** ${baselinePct}%\n\n`
-        + `**Per-criterion:**\n${criteriaLines}\n\n`
-        + `**Stats:** ${statsLine}`;
+      const alreadyPerfect = state.stopReason === STOP_REASONS.perfect
+        && state.mutationsAccepted.length === 0
+        && state.mutationsDiscarded.length === 0;
+      const noImproveSummary = alreadyPerfect
+        ? `#### Skill "${state.skillName}" — already at 100%\n\n**Baseline:** ${baselinePct}% — no iterations needed.\n\n**Per-criterion:**\n${criteriaLines}\n\n**Stats:** ${statsLine}`
+        : `#### Skill "${state.skillName}" — no improvement found\n\n`
+          + `**Baseline:** ${baselinePct}%\n\n`
+          + `**Per-criterion:**\n${criteriaLines}\n\n`
+          + `**Stats:** ${statsLine}`;
       if (typeof deps.appendChatPanelMessage === "function") {
         deps.appendChatPanelMessage("assistant", noImproveSummary);
       }
@@ -1536,7 +1398,9 @@ export async function runSkillOptimization(skillName, options = {}) {
       if (!panelOpen) {
         deps.showOptimizationResultToast({
           title: `Skill "${state.skillName}"`,
-          message: `Already performing well \u2014 no improvements found ($${state.totalCostUsd.toFixed(2)} spent).`,
+          message: alreadyPerfect
+            ? `Already at 100% \u2014 no iterations needed ($${state.totalCostUsd.toFixed(2)} spent).`
+            : `Already performing well \u2014 no improvements found ($${state.totalCostUsd.toFixed(2)} spent).`,
           onAccept: () => {},
           onRevert: () => {},
         });
