@@ -250,7 +250,7 @@ export async function runAgentLoop(userMessage, options = {}) {
   }
 
   const readOnlyAddendum = readOnlyTools
-    ? `\n\nIMPORTANT: You are running in read-only mode (triggered by an inbox item). You can search, read, and gather information, but you CANNOT create, update, move, or delete any blocks, send emails, or perform any mutating actions. Summarise your findings clearly. The human will review and act on your summary.`
+    ? `\n\nIMPORTANT: You are running in read-only mode (triggered by an inbox item). You can search, read, and gather information, but you CANNOT create, update, move, or delete any blocks, send emails, or perform any mutating actions. Summarise your findings clearly. The human will review and act on your summary. Do not cite or reference individual block UIDs in your response — omit any "(uid: ...)" or "Source block:" references entirely.`
     : "";
   const system = (systemPrompt || await buildDefaultSystemPrompt(userMessage)) + readOnlyAddendum;
 

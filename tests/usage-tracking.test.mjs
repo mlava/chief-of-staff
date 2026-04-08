@@ -22,6 +22,7 @@ import {
   getCostHistorySummary,
   recordUsageStat,
   flushUsageTracking,
+  persistAuditLogEntry,
 } from "../src/usage-tracking.js";
 
 // ── Test helpers ─────────────────────────────────────────────────────────────
@@ -483,6 +484,71 @@ test("flushUsageTracking handles null api gracefully", () => {
   // Flush with null api — should not throw
   flushUsageTracking(null);
   assert.ok(true);
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Integration: recordCostEntry + isDailyCapExceeded round-trip
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ═════════════════════════════════════════════════════════════════════════════
+// persistAuditLogEntry + trimAuditLog batched deletes
+// ═════════════════════════════════════════════════════════════════════════════
+
+test("trimAuditLog deletes stale entries in batches via persistAuditLogEntry", async () => {
+  // Build 25 fake audit blocks older than 7 days, all matching the date-ref format
+  const oldDate = new Date();
+  oldDate.setDate(oldDate.getDate() - 30);
+  const monthNames = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+  const dateStr = `${monthNames[oldDate.getMonth()]} ${oldDate.getDate()}th, ${oldDate.getFullYear()}`;
+
+  const staleBlocks = Array.from({ length: 25 }, (_, i) => [
+    `stale-uid-${i}`,
+    `[[${dateStr}]] **model** (1 iter, 0.5s, 100 tok) — success`,
+  ]);
+
+  const deletedUids = [];
+  const mockApi = {
+    q: (query) => {
+      // Return stale blocks for audit log query
+      if (query.includes("Audit Log")) return staleBlocks;
+      return [];
+    },
+    deleteBlock: async ({ block }) => {
+      deletedUids.push(block.uid);
+    },
+  };
+
+  initUsageTracking(makeDeps({
+    getSettingString: (_api, key, fallback) =>
+      key === "audit-log-retention-days" ? "7" : fallback,
+    getRoamAlphaApi: () => mockApi,
+    ensurePageUidByTitle: async () => "audit-page-uid",
+    createRoamBlock: async () => {},
+    formatRoamDate: () => "April 9th, 2026",
+  }));
+  loadCostHistory({ settings: { get: () => null, set: () => {} } });
+
+  const trace = {
+    startedAt: Date.now() - 5000,
+    finishedAt: Date.now(),
+    model: "test-model",
+    iterations: 1,
+    toolCalls: [],
+    totalInputTokens: 100,
+    totalOutputTokens: 50,
+    cost: 0.001,
+  };
+
+  await persistAuditLogEntry(trace, "test prompt");
+  // Give the non-blocking trim a moment to complete
+  await new Promise(r => setTimeout(r, 300));
+
+  // All 25 stale blocks should have been deleted
+  assert.equal(deletedUids.length, 25);
+  // Verify they're the right UIDs
+  for (let i = 0; i < 25; i++) {
+    assert.ok(deletedUids.includes(`stale-uid-${i}`), `expected stale-uid-${i} to be deleted`);
+  }
 });
 
 // ═════════════════════════════════════════════════════════════════════════════

@@ -5377,7 +5377,10 @@ function registerMemoryPullWatches({ force = false } = {}) {
   }
 
   const allPages = [...getActiveMemoryPageTitles(), SKILLS_PAGE_TITLE];
-  const defaultPullPattern = "[:block/children :block/string {:block/children ...}]";
+  // Shallow pattern for memory/skills: watches immediate children + grandchildren
+  // for change detection without materialising the full recursive tree. The 5-min
+  // MEMORY_CACHE_TTL_MS catches deeper edits that the shallow watch misses.
+  const shallowPullPattern = "[:block/children :block/string {:block/children [:block/string]}]";
   const inboxPullPattern = "[:block/children :block/string :block/uid {:block/children ...}]";
   const alreadyWatched = new Set(activePullWatches.map(w => w.pageTitle));
   let newCount = 0;
@@ -5388,7 +5391,7 @@ function registerMemoryPullWatches({ force = false } = {}) {
     const isSkills = pageTitle === SKILLS_PAGE_TITLE;
     const isInbox = pageTitle === "Chief of Staff/Inbox";
     const cacheType = isSkills ? "skills" : "memory";
-    const pullPattern = isInbox ? inboxPullPattern : defaultPullPattern;
+    const pullPattern = isInbox ? inboxPullPattern : shallowPullPattern;
     const entityId = `[:node/title "${escapeForDatalog(pageTitle)}"]`;
 
     const callback = function (_before, _after) {
@@ -5924,6 +5927,7 @@ function onload({ extensionAPI }) {
     clearConversationContext,
     resetLastPromptSections,
     isUnloadInProgress: () => unloadInProgress,
+    withRoamWriteRetry,
   });
   initCronScheduler({
     debugLog,
