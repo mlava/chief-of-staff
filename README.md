@@ -26,6 +26,10 @@ https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 - **Correction capture** — opt-in background feature that detects when you edit COS outputs (briefings, pinned responses) and records the differences on `[[Chief of Staff/Corrections]]`. Corrections are cross-referenced with the Review Queue for feedback loop closure. Runs during idle time only — enable in Settings → Show Automatic Actions.
 - **Post-run evaluation** — opt-in LLM-as-judge that scores each agent interaction on task completion, factual grounding, and safety (1–5 rubric) plus five deterministic binary pass/fail checks (e.g. "were all claims tool-backed?", "did the response answer the question?"). Skills can define custom `Rubric:` criteria that are evaluated alongside the standard checks. Low scores, failed checks, or failed rubric items route to `[[Chief of Staff/Review Queue]]` with exactly what failed. Enable in Settings → Show Automatic Actions.
 - **Skill constraints** — skills can define structured behavioural boundaries via a `Constraints:` field with four quadrants: Must Do (non-negotiable requirements), Must Not Do (hard prohibitions), Prefer (soft guidance), and Escalate (stop and ask the user). Injected as binding system instructions for each skill run.
+- **Skill auto-optimisation** — automatic prompt improvement via the Karpathy Loop. Generates synthetic test cases, scores the current skill, then iteratively mutates and evaluates — presenting results with accept/revert. All mutations stay in-memory until accepted. Ask "optimise my Daily Briefing skill" or use the `cos_skill_optimize` tool. Enable in Settings > Automatic Actions.
+- **LLM Council** — multi-model review panel that stress-tests a question through independent analysis, anonymous peer critique with robustness scores, and a chair's decisive synthesis. Results written to `[[LLM Council]]` page with cost breakdown. Ask "council: should I use X or Y?" or use the `cos_llm_council` tool.
+- **Health check / doctor** — self-diagnostic that validates API keys, MCP server connections, memory page integrity, skill definitions, cron job health, Composio auth, and Extension Tools discovery. Returns a structured pass/warn/fail report with fix suggestions. Type `/doctor` in the chat panel, say "health check", or use `cos_doctor`.
+- **Budget warning toasts** — automatic notifications when daily API spend reaches 50%, 80%, and 100% of your configured cap. Fires once per threshold per day.
 - **Guided onboarding** — first-run onboarding walks you through API key setup, memory page bootstrapping, and chat panel introduction.
 
 ---
@@ -282,6 +286,7 @@ The tool is now available to the assistant. Ask it to "fetch https://example.com
 |---|---|
 | **Chief of Staff: Ask** | Opens a prompt dialogue. The assistant reasons over your question using LLM + available tools. |
 | **Chief of Staff: Toggle Chat Panel** | Shows or hides the floating chat panel. |
+| **Chief of Staff: Doctor (Health Check)** | Runs a self-diagnostic across API keys, MCP connections, memory, skills, cron jobs, Composio, and Extension Tools. Summary toast + full report in console. |
 | **Chief of Staff: Run Onboarding** | Launches the guided onboarding flow (API key setup, memory bootstrapping, chat panel intro). |
 | **Chief of Staff: Bootstrap Memory Pages** | Creates memory pages (if missing) with starter content. |
 | **Chief of Staff: Bootstrap Skills Page** | Creates `Chief of Staff/Skills` with starter skills (if missing). |
@@ -318,6 +323,7 @@ The floating chat panel (bottom-right corner by default) provides a persistent c
 - **Enter** to send, **Shift+Enter** for a new line.
 - **Arrow Up / Down** to cycle through previous messages (like a terminal).
 - `/clear` resets conversation history and context (same as the Clear button).
+- `/doctor` runs a health check across API keys, MCP servers, memory, skills, cron jobs, Composio, and Extension Tools — results displayed inline.
 - `/lesson` reviews the conversation and records lessons learned to `[[Chief of Staff/Lessons Learned]]`. Add a topic to focus the reflection (e.g. `/lesson error handling`).
 - Suffix a message with `/power` or `/ludicrous` to use a more capable model for that request. Use `/claude`, `/gemini`, `/openai`, `/mistral`, or `/groq` to force a specific provider.
 - A **cost indicator** in the header shows cumulative API spend. Hover for a detailed breakdown: session cost with input/output token counts, today's cost with per-model splits (e.g. `3-flash $2.06`), and rolling 7-day and 30-day totals. Cost history is persisted across sessions. Use **Chief of Staff: Reset Token Usage Stats** to zero the session counters.
@@ -407,6 +413,7 @@ Many common tasks are handled by a **deterministic router** that matches your in
 | `undo` | Undoes the last Roam action |
 | `redo` | Redoes the last undone action |
 | `what time is it` | Current time and today's daily page title |
+| `health check` or `doctor` | Self-diagnostic report (API keys, MCP, memory, skills, cron, Composio, Extension Tools) |
 | `help` | Context-aware capability summary |
 | `tools` | Lists all available tools by category |
 | `what roam tools do you have` | Lists tools for a specific category |
@@ -673,8 +680,8 @@ If you discover a security issue, please report it directly rather than filing a
 ## Limitations and performance considerations
 
 - **Graph scans** — task search queries scan all blocks in your graph that match TODO/DONE patterns. Performance scales with graph size. On very large graphs (100k+ blocks) this may take a second or two.
-- **Agent iterations** — the reasoning loop is capped at 10 iterations per request to prevent runaway API usage.
-- **Conversation context** — the assistant retains up to 12 recent turns (truncated to 500 user / 2,000 assistant characters each) for follow-up context. Older turns are dropped automatically. Within a single agent run, tool result payloads are progressively trimmed if the message budget (50,000 characters) is exceeded. Key references (identifiers from MCP tool results) are extracted and stored at the front of assistant turns to survive truncation.
+- **Agent iterations** — the reasoning loop is capped at 20 iterations per request (10 for skills with a defined iteration limit) to prevent runaway API usage.
+- **Conversation context** — the assistant retains up to 12 recent turns (truncated to 500 user / 2,000 assistant characters each) for follow-up context. Older turns are dropped automatically. Within a single agent run, tool result payloads are progressively trimmed if the message budget (70,000 characters) is exceeded. Key references (identifiers from MCP tool results) are extracted and stored at the front of assistant turns to survive truncation.
 - **Composio dependency** — external tool features (Gmail, Google Calendar, Todoist, etc.) require an active Composio connection. Roam graph and task features work fully without Composio.
 - **LLM API costs** — requests are sent directly from your browser to your configured provider. Costs are billed to your API account. Structured briefings, multi-tool agent runs, and scheduled jobs consume more tokens than simple queries. The chat panel shows a running cost estimate with per-model breakdowns — for Anthropic, this includes a cache breakdown showing how many input tokens were served from cache. **Note:** displayed costs are estimates based on hardcoded per-model rates and may not reflect current provider pricing. Always check your provider's billing dashboard for authoritative usage and charges.
 - **Prompt caching** — the extension is structured to maximise cache hits across all providers. The system prompt and tool definitions (the largest, most stable token blocks) are placed at the start of every request, and variable content (conversation history, user message) comes last. For **Anthropic**, explicit `cache_control` breakpoints mark the system prompt and tool definitions as cacheable — after the first call in a session, subsequent calls serve these tokens from cache at 90% off the normal input price. For **OpenAI**, automatic prefix caching applies without opt-in as long as the prompt prefix is stable across calls, which this layout ensures. For **Gemini** and **Mistral**, the stable-prefix ordering provides the best conditions for any future caching support. With caching reducing input costs by up to 90%, output tokens become the dominant expense — use the **Response Verbosity** setting to control this directly.

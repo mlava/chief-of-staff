@@ -4,6 +4,8 @@
 // evaluates, presents accept/revert. All mutations in-memory until accepted.
 // DI via initSkillAutoresearch(deps). No Roam writes during the loop.
 
+import { persistAuditLogEntry } from "./usage-tracking.js";
+
 let deps = {};
 
 export function initSkillAutoresearch(injected) { deps = injected; }
@@ -109,6 +111,8 @@ function trackCallCost(state, response, model, label) {
   state.totalOutputTokens += outputTokens;
   deps.recordCostEntry("autoresearch-" + label, inputTokens, outputTokens, cost);
   deps.accumulateSessionTokens(inputTokens, outputTokens, cost);
+  if (!state.model) state.model = model;
+  if (typeof deps.updateChatPanelCostIndicator === "function") deps.updateChatPanelCostIndicator();
   return cost;
 }
 
@@ -825,6 +829,28 @@ async function persistDebriefResults(state) {
         await deps.createRoamBlock(decisionsPageUid, decisionLine, "first");
       }
     }
+    // Audit Log entry — makes optimization runs visible in the Activity tab
+    // Non-blocking, non-fatal — errors swallowed to match persistAuditLogEntry's contract
+    try {
+      const baselinePctAudit = Math.round(state.baselinePassRate * 100);
+      const finalPctAudit = Math.round(state.currentBestPassRate * 100);
+      const syntheticTrace = {
+        startedAt: state.startedAt || Date.now(),
+        finishedAt: Date.now(),
+        model: state.model || "autoresearch",
+        iterations: state.iteration || 0,
+        totalInputTokens: state.totalInputTokens || 0,
+        totalOutputTokens: state.totalOutputTokens || 0,
+        cost: state.totalCostUsd || 0,
+        toolCalls: [],
+      };
+      await persistAuditLogEntry(syntheticTrace, `optimise ${state.skillName}`, {
+        skillName: `Optimise: ${state.skillName} (${baselinePctAudit}%→${finalPctAudit}%)`
+      });
+    } catch (auditErr) {
+      deps.debugLog("[Autoresearch] Audit log entry failed (non-fatal):", auditErr?.message);
+    }
+
   } catch (err) {
     deps.debugLog("[Autoresearch] Debrief persistence failed (non-fatal):", err?.message);
   }
@@ -880,6 +906,8 @@ export async function runSkillOptimization(skillName, options = {}) {
     phase: "setup",
     iteration: 0,
     consecutiveDiscards: 0,
+    startedAt: Date.now(),
+    model: null,  // set after first LLM call to capture the model used
   };
 
   try {

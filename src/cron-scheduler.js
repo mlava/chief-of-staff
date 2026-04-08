@@ -460,6 +460,11 @@ export function stopCronScheduler() {
   deps.debugLog("[Chief cron] Scheduler stopped");
 }
 
+export function isValidCronExpression(expression) {
+  if (!expression) return false;
+  try { new Cron(expression); return true; } catch { return false; }
+}
+
 // ─── Cron Scheduler: COS Tools ─────────────────────────────────────────────────
 
 export function getCronTools() {
