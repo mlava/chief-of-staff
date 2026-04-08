@@ -15,7 +15,7 @@ import { installComposioTool, deregisterComposioTool, connectComposio, reconcile
 import { getLocalMcpTools, formatToolListByServer, getLocalMcpClients } from "./local-mcp.js";
 import { getRemoteMcpTools, getRemoteMcpClients } from "./remote-mcp.js";
 import { getLatestWorkflowSuggestionsFromConversation, promptLooksLikeWorkflowDraftFollowUp, extractWorkflowSuggestionIndex } from "./conversation.js";
-import { showInfoToastIfAllowed, promptWriteToDailyPage, promptToolExecutionApproval } from "./chat-panel.js";
+import { showInfoToastIfAllowed, promptWriteToDailyPage, promptToolExecutionApproval, appendChatPanelMessage } from "./chat-panel.js";
 import { loadCronJobs, isValidCronExpression } from "./cron-scheduler.js";
 import { buildDefaultSystemPrompt } from "./system-prompt.js";
 import { wrapUntrustedWithInjectionScan } from "./security.js";
@@ -2459,7 +2459,8 @@ export async function tryRunDeterministicAskIntent(prompt, context = {}) {
         powerMutations: !!optimizeIntent.powerMutations,
       }).catch(err => {
         deps.debugLog("[Autoresearch] Background optimization failed:", err?.message);
-        deps.showErrorToast("Optimisation Failed", err?.message || "Unknown error");
+        appendChatPanelMessage("assistant",
+          `Optimisation of "${entry.title}" failed: ${err?.message || "Unknown error"}`);
       });
       // Check both the flag and the settings toggle to determine the actual mode
       const toolCallingSetting = extensionAPIRef?.settings?.get?.(deps.SETTINGS_KEYS?.skillAutoresearchToolCalling);

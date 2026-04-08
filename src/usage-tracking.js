@@ -250,7 +250,8 @@ export async function persistAuditLogEntry(trace, userPrompt, options = {}) {
       + `\nPrompt: ${prompt}`
       + `\nTools: ${toolSummary}`;
 
-    await deps.createRoamBlock(pageUid, block, "first");
+    const insertOrder = deps.getFirstContentOrder ? deps.getFirstContentOrder(pageUid) : 0;
+    await deps.createRoamBlock(pageUid, block, insertOrder);
     deps.debugLog("[Chief flow] Audit log entry persisted");
 
     // Non-blocking trim of old entries (runs in background)
@@ -519,7 +520,8 @@ export async function persistUsageStatsPage() {
     if (existingUid) {
       await api.updateBlock({ block: { uid: existingUid, string: block } });
     } else {
-      await deps.createRoamBlock(pageUid, block, "first");
+      const insertOrder = deps.getFirstContentOrder ? deps.getFirstContentOrder(pageUid) : 0;
+      await deps.createRoamBlock(pageUid, block, insertOrder);
     }
     deps.debugLog("[Chief flow] Usage stats page updated");
   } catch (err) {

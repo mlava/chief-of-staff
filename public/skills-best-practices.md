@@ -22,6 +22,18 @@ Skills live as top-level blocks on the `Chief of Staff/Skills` page. Each skill 
 
 The skill name should be short and descriptive — it appears in a compact index injected into every system prompt, so clarity matters more than cleverness.
 
+**Named sections.** You can structure the instruction body using named child sections — `Approach:`, `Output:`, `Trigger:`, `Rubric:`, `Constraints:` — rather than free-form prose. This is optional but recommended: named sections make the skill's intent clearer, and the automatic optimiser targets them specifically when improving a skill. A skill with a named `Approach:` section gets precise, section-level improvements; a skill with undifferentiated prose gets treated as a single opaque block.
+
+```
+- Daily Briefing
+  - Trigger: user asks for a daily briefing or morning summary
+  - Approach: gather today's calendar, check overdue tasks, scan inbox highlights
+  - Output: three sections — Schedule, Priorities, FYIs — written to today's daily page under a "Briefing" heading
+  - Sources: get_calendar_events, bt_search, Gmail
+  - Tier: mini
+  - Budget: $0.08
+```
+
 ### How Skills Are Loaded
 
 1. **Index** — On every agent run, Chief of Staff injects a compact skill index (all names + first-line summaries) into the system prompt. This is lightweight and always present.
@@ -329,11 +341,42 @@ When building or refining a skill, follow this progression:
 
 5. **Set Budget and Iterations.** Run the skill 3–5 times and note the cost and iteration count. Set Budget at ~1.5× the average cost and Iterations at the max you observed plus 1–2 buffer.
 
-6. **Add Constraints.** After observing failure modes or unwanted behaviours, encode the fixes as Must Do / Must Not Do items. Add Prefer for stylistic preferences and Escalate for genuine decision points.
+6. **Run the optimiser.** Say `optimise [skill name]`. The optimiser generates synthetic test cases from your skill definition, scores the current skill against evaluation criteria to establish a baseline, then iteratively proposes section-level improvements — to Approach, Output, Constraints, Rubric, and Sources — keeping only changes that improve the score. It presents the before/after breakdown and waits for your confirmation before writing anything. For most skills, this replaces several manual cycles of steps 7 and 8 below. Add `--power` if the skill has dense or complex instructions.
 
-7. **Add Rubric items.** Define what "good output" looks like for this specific skill. Run a few more times and check the Review Queue — are the rubric items catching real problems?
+7. **Add Constraints manually if needed.** The optimiser will suggest Constraints automatically, but you may want to add specific Must Not Do rules it couldn't infer — particularly around shared data, sensitive operations, or preferences specific to your workflow.
 
-8. **Monitor and iterate.** Check the Review Queue and Corrections page periodically. If a skill consistently fails a rubric item, the instructions or constraints need adjustment. If users consistently edit a particular section of the output, the skill's approach to that section needs rethinking.
+8. **Add Rubric items manually if needed.** The optimiser generates Rubric criteria from the skill definition, but only you know what "great output" truly looks like for your workflow. Add criteria for aspects that matter to you but aren't obvious from the instructions alone.
+
+9. **Monitor and iterate.** Check the Review Queue and Corrections page periodically. If a skill consistently fails a rubric item, re-run the optimiser or adjust the instructions directly. If you consistently edit a particular section of the output, that section's Approach instructions need tightening.
+
+---
+
+## Skill Optimisation
+
+The optimiser automates the most tedious part of skill tuning: generating test cases, identifying failure modes, and proposing targeted improvements.
+
+**How to invoke:** Say `optimise [skill name]` (or `optimize`). The run happens in the background — you'll see a starting message in the chat panel immediately and a result toast when it finishes.
+
+**What happens:**
+
+1. The assistant generates 5 synthetic test cases that exercise different aspects of the skill, including edge cases.
+2. It scores the current skill against 5 evaluation criteria derived from the skill definition (the *baseline*).
+3. It iterates through structured mutation aspects — adding a Rubric, adding or tightening Constraints, improving Approach step specificity, clarifying Output format, cleaning up Sources. Each mutation is scored and accepted only if it genuinely improves the pass rate.
+4. When the loop finds an improvement (or exhausts budget/iterations), it shows you the full per-criterion breakdown and the proposed skill content. You accept or revert — nothing is written until you confirm.
+
+**Wall criteria.** Some evaluation criteria test behaviours that text-only simulation cannot reproduce — for example, "does the response include real calendar data?" The optimiser detects these automatically (they fail consistently regardless of mutations) and excludes them from scoring rather than wasting iterations chasing an unachievable target. They're reported in the debrief as *wall criteria*.
+
+**Budget.** Set the per-run cost cap in extension settings (*Skill optimisation budget*, default $2.00). Most runs cost $0.10–$0.50. The run stops cleanly when the budget is reached and presents whatever improvement was found.
+
+**Power mutations.** Add `--power` to use the power-tier model for generating mutations: `optimise Daily Briefing --power`. Slower and more expensive, but produces better results for skills with dense or complex instructions.
+
+**What the optimiser does not change.** Trigger, Sources (unless the Sources section is absent or has parameter hints), Tools, Models, Tier, Budget, and Iterations are never modified by the optimiser. It only improves the structural quality sections.
+
+**Tips for best results:**
+
+- Use named sections (`Approach:`, `Output:`, `Trigger:`) in your skill rather than undifferentiated prose. The optimiser targets sections by name — a skill with a clear `Approach:` section gets precise improvements; a flat prose skill gets treated as a single block.
+- Run the optimiser after the skill is working but before heavy manual Constraints/Rubric work. Let it propose the initial structure, then refine manually.
+- If the optimised skill scores well on the eval criteria but still doesn't match your taste, add a Rubric item that captures the specific quality you care about and run again.
 
 ---
 
@@ -352,4 +395,4 @@ When building or refining a skill, follow this progression:
 
 ---
 
-*This document reflects Chief of Staff features as of March 2026. All fields described here — Sources, Tools, Tier, Budget, Iterations, Constraints, Rubric, and Models — are implemented and available in the current release.*
+*This document reflects Chief of Staff features as of April 2026. All fields described here — Sources, Tools, Tier, Budget, Iterations, Constraints, Rubric, and Models — are implemented and available in the current release. The skill optimiser is available in LLM-only mode; tool-calling simulation (for skills with Sources) is a future addition.*

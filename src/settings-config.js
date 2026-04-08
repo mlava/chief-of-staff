@@ -583,7 +583,7 @@ export function buildSettingsConfig(extensionAPI) {
           value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.evalReviewThreshold, "2"),
           placeholder: "2"
         }
-      }/*,
+      },
       {
         id: deps.SETTINGS_KEYS.skillAutoresearchEnabled,
         name: "Skill Auto-Optimisation",
@@ -602,7 +602,7 @@ export function buildSettingsConfig(extensionAPI) {
           value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.skillAutoresearchBudget, "2.00"),
           placeholder: "2.00"
         }
-      },
+      }/*,
       {
         id: deps.SETTINGS_KEYS.skillAutoresearchToolCalling,
         name: "Enable Tool-Calling Simulation",
@@ -620,7 +620,7 @@ export function buildSettingsConfig(extensionAPI) {
           type: "switch",
           value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.skillAutoresearchToolCache, true)
         }
-      },
+      }*/,
       {
         id: deps.SETTINGS_KEYS.skillAutoresearchPowerMutations,
         name: "Power-Tier Mutations",
@@ -629,7 +629,7 @@ export function buildSettingsConfig(extensionAPI) {
           type: "switch",
           value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.skillAutoresearchPowerMutations, false)
         }
-      }*/
+      }
     );
   }
 

@@ -272,7 +272,8 @@ async function persistCorrections(corrections) {
       .replace(/\{\{/g, "\u2983").replace(/\}\}/g, "\u2984");
 
     const headerText = `[[${dateStr}]] **${sanitise(source)}** — ${parts.join(", ")}`;
-    const headerUid = await deps.createRoamBlock?.(pageUid, headerText, "first");
+    const insertOrder = deps.getFirstContentOrder ? deps.getFirstContentOrder(pageUid) : 0;
+    const headerUid = await deps.createRoamBlock?.(pageUid, headerText, insertOrder);
     if (!headerUid) continue;
 
     for (const c of corrs) {
@@ -320,7 +321,8 @@ export async function trackDismissedSuggestion({ type, originalPrompt, classifie
     if (classifiedIntent) line += ` — classified as: "${intent}"`;
     if (userOverride) line += ` → user said: "${sanitise(String(userOverride).slice(0, 120))}"`;
 
-    await deps.createRoamBlock?.(pageUid, line, "first");
+    const insertOrder = deps.getFirstContentOrder ? deps.getFirstContentOrder(pageUid) : 0;
+    await deps.createRoamBlock?.(pageUid, line, insertOrder);
     deps.debugLog?.("[Corrections] Tracked dismissed suggestion:", type);
   } catch (err) {
     deps.debugLog?.("[Corrections] trackDismissedSuggestion error (non-fatal):", err?.message);

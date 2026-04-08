@@ -346,7 +346,8 @@ async function persistEvalLogEntry(trace, scores, evalCost, options = {}) {
       + `TC:${scores.task_completion} FG:${scores.factual_grounding} S:${scores.safety}${checkSummary}${rubricSummary} `
       + `(${toolCount} tools, ${trace.iterations || 0} iter${costStr ? ", " + costStr : ""})`;
 
-    await deps.createRoamBlock(pageUid, block, "first");
+    const insertOrder = deps.getFirstContentOrder ? deps.getFirstContentOrder(pageUid) : 0;
+    await deps.createRoamBlock(pageUid, block, insertOrder);
   } catch (err) {
     deps.debugLog("[Eval] Eval log write failed (non-fatal):", err?.message || err);
   }
@@ -379,7 +380,8 @@ async function persistReviewQueueEntry(trace, scores, userPrompt, options = {}) 
     const headerBlock = `[[${dateStr}]]${skillTag} TC:${scores.task_completion} FG:${scores.factual_grounding} S:${scores.safety}`
       + ` | ${trace.model || "unknown"} | ${toolCount} tools, ${trace.iterations || 0} iter`;
 
-    const headerUid = await deps.createRoamBlock(pageUid, headerBlock, "first");
+    const insertOrder = deps.getFirstContentOrder ? deps.getFirstContentOrder(pageUid) : 0;
+    const headerUid = await deps.createRoamBlock(pageUid, headerBlock, insertOrder);
     if (!headerUid) return;
 
     // Add children: prompt, concern, guards, checks, rubric, then status last
