@@ -334,7 +334,8 @@ const SETTINGS_KEYS = {
   skillAutoresearchEnabled: "skill-autoresearch-enabled",
   skillAutoresearchBudget: "skill-autoresearch-budget",
   skillAutoresearchToolCalling: "skill-autoresearch-tool-calling",
-  skillAutoresearchToolCache: "skill-autoresearch-tool-cache"
+  skillAutoresearchToolCache: "skill-autoresearch-tool-cache",
+  skillAutoresearchPowerMutations: "skill-autoresearch-power-mutations"
 };
 const TOOLS_SCHEMA_VERSION = 3;
 const AUTH_POLL_INTERVAL_MS = 9000;
@@ -5448,6 +5449,14 @@ function onload({ extensionAPI }) {
       if (!apiKey) throw new Error("No API key configured for " + provider);
       return callLlm(provider, apiKey, model, system, messages, [], options);
     },
+    callLlmPower: async (system, messages, options) => {
+      const provider = getLlmProvider(extensionAPIRef);
+      const apiKey = getApiKeyForProvider(extensionAPIRef, provider);
+      const model = getPowerModel(provider);
+      if (!apiKey) throw new Error("No API key configured for " + provider);
+      return callLlm(provider, apiKey, model, system, messages, [], options);
+    },
+    getPowerModel: () => getPowerModel(getLlmProvider(extensionAPIRef)),
     callLlmJudge: async (system, messages, options) => {
       const config = getAutoresearchJudgeConfig();
       if (!config) throw new Error("No LLM provider available for judge");
@@ -5532,6 +5541,7 @@ function onload({ extensionAPI }) {
     getLastAgentRunTrace: () => getLastAgentRunTrace(),
     getToolCallingSetting: () => getSettingBool(extensionAPIRef, SETTINGS_KEYS.skillAutoresearchToolCalling, false),
     getToolCacheSetting: () => getSettingBool(extensionAPIRef, SETTINGS_KEYS.skillAutoresearchToolCache, true),
+    getPowerMutationSetting: () => getSettingBool(extensionAPIRef, SETTINGS_KEYS.skillAutoresearchPowerMutations, false),
     updateChatPanelCostIndicator,
   });
   initIntentClassifier({

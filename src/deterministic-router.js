@@ -2453,14 +2453,21 @@ export async function tryRunDeterministicAskIntent(prompt, context = {}) {
       const budgetStr = deps.getSettingString(extensionAPIRef, deps.SETTINGS_KEYS?.skillAutoresearchBudget, "2.00");
       const budget = parseFloat(budgetStr) || 2.0;
       // Fire-and-forget — do NOT await
-      deps.runSkillOptimization(entry.title, { budgetUsd: budget, withTools: !!optimizeIntent.withTools }).catch(err => {
+      deps.runSkillOptimization(entry.title, {
+        budgetUsd: budget,
+        withTools: !!optimizeIntent.withTools,
+        powerMutations: !!optimizeIntent.powerMutations,
+      }).catch(err => {
         deps.debugLog("[Autoresearch] Background optimization failed:", err?.message);
         deps.showErrorToast("Optimisation Failed", err?.message || "Unknown error");
       });
       // Check both the flag and the settings toggle to determine the actual mode
       const toolCallingSetting = extensionAPIRef?.settings?.get?.(deps.SETTINGS_KEYS?.skillAutoresearchToolCalling);
       const willUseTools = optimizeIntent.withTools || toolCallingSetting;
-      const modeLabel = willUseTools ? "tool-calling" : "LLM-only";
+      const powerMutationSetting = extensionAPIRef?.settings?.get?.(deps.SETTINGS_KEYS?.skillAutoresearchPowerMutations);
+      const willUsePower = optimizeIntent.powerMutations || powerMutationSetting;
+      const modeLabel = (willUseTools ? "tool-calling" : "LLM-only")
+        + (willUsePower ? ", power mutations" : "");
       return deps.publishAskResponse(prompt,
         `Starting optimisation of "${entry.title}" (${modeLabel}, budget: $${budget.toFixed(2)}). `
         + `This runs in the background \u2014 I'll show a toast when it's done with results to accept or revert.`,

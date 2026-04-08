@@ -583,7 +583,7 @@ export function buildSettingsConfig(extensionAPI) {
           value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.evalReviewThreshold, "2"),
           placeholder: "2"
         }
-      },
+      }/*,
       {
         id: deps.SETTINGS_KEYS.skillAutoresearchEnabled,
         name: "Skill Auto-Optimisation",
@@ -602,7 +602,7 @@ export function buildSettingsConfig(extensionAPI) {
           value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.skillAutoresearchBudget, "2.00"),
           placeholder: "2.00"
         }
-      }/*,
+      },
       {
         id: deps.SETTINGS_KEYS.skillAutoresearchToolCalling,
         name: "Enable Tool-Calling Simulation",
@@ -619,6 +619,15 @@ export function buildSettingsConfig(extensionAPI) {
         action: {
           type: "switch",
           value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.skillAutoresearchToolCache, true)
+        }
+      },
+      {
+        id: deps.SETTINGS_KEYS.skillAutoresearchPowerMutations,
+        name: "Power-Tier Mutations",
+        description: "Use the power model (e.g. Sonnet, GPT-4.1) for mutation calls instead of mini. Better content fidelity — fewer dropped sections and lines. Simulations and scoring stay on mini. Higher cost per iteration. Also available via --power flag.",
+        action: {
+          type: "switch",
+          value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.skillAutoresearchPowerMutations, false)
         }
       }*/
     );
