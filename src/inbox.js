@@ -15,6 +15,12 @@ const INBOX_MAX_ITEMS_PER_SCAN = 8;   // Prevent large inbox bursts from floodin
 const INBOX_MAX_PENDING_ITEMS = 40;   // Hard cap on queued+in-flight inbox items
 const INBOX_FULL_SCAN_COOLDOWN_MS = 60_000; // Avoid repeated idle full scans
 
+// Safety caps for inbox block tree writes — mirror the limits in index.js's
+// shared write helpers so inbox doesn't bypass the extension's own safety layer.
+const INBOX_BLOCK_TREE_MAX_DEPTH = 30;
+const INBOX_BLOCK_TREE_MAX_BLOCKS = 50;
+const INBOX_MAX_BLOCK_CHARS = 20_000;
+
 // ── Module state ───────────────────────────────────────────────────────
 
 const inboxProcessingSet = new Set();  // block UIDs currently being processed
@@ -62,8 +68,8 @@ export function getInboxProcessingTierSuffix(promptText) {
   const lower = text.toLowerCase();
   const lines = text.split(/\n/).length;
 
-  // Escalate to ludicrous for complex, synthesis-heavy requests.
-  // Keep default at /power to reduce cost/latency for simple inbox captures.
+  // Escalate to power for complex, synthesis-heavy requests.
+  // Keep default at /mini to reduce cost/latency for simple inbox captures.
   const complexitySignals = [
     /\bweekly review\b/,
     /\bweekly planning\b/,
@@ -81,7 +87,9 @@ export function getInboxProcessingTierSuffix(promptText) {
     lines > 10 ||
     complexitySignals.some((re) => re.test(lower));
 
-  return looksComplex ? "/ludicrous" : "/power";
+  // Inbox runs in read-only mode — ludicrous is overkill. Power handles complex
+  // synthesis; mini handles simple captures and short queries.
+  return looksComplex ? "/power" : "/mini";
 }
 
 // ── State accessors (for pull watch callback & lifecycle) ──────────────
@@ -258,7 +266,10 @@ async function processInboxItem(block) {
       deps.debugLog?.("[Chief flow] Inbox skip — concurrency guard rejected, will retry:", block.uid);
       return;
     }
-    const responseText = String(result?.text || result || "").trim().replace(/\[Key reference:[^\]]*\]\s*/g, "").trim() || "Processed (no text response).";
+    const responseText = String(result?.text || result || "").trim()
+      .replace(/\[Key reference:[^\]]*\]\s*/g, "")
+      .replace(/\s*\(uid:[^)]*\)/g, "")
+      .trim() || "Processed (no text response).";
 
     // Block may have been deleted while the model was running; skip move quietly.
     if (getInboxBlockStringIfExists(block.uid) === null) {
@@ -290,6 +301,126 @@ async function processInboxItem(block) {
   }
 }
 
+/**
+ * Parse a markdown string into a tree of block nodes.
+ * Returns an array of { text, heading?, children[] }.
+ *
+ * Recognised patterns (checked in priority order):
+ *   ### Heading   → heading:3, depth 1
+ *   ## Heading    → heading:2, depth 0
+ *   # Heading     → heading:1, depth 0
+ *   - / * / 1.   → plain block, depth driven by leading spaces
+ *   plain text    → plain block, depth 0
+ */
+export function parseMarkdownToBlocks(text) {
+  const lines = String(text || "").split("\n");
+  const root = { children: [] };
+  // Stack entries: { node, depth }  (root is depth -1)
+  const stack = [{ node: root, depth: -1 }];
+  // Tracks the depth of the most recently seen heading so that plain text
+  // and list items are placed one level under it rather than at a fixed depth.
+  let currentHeadingDepth = -1;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    if (!line.trim()) continue;
+
+    let blockText = "";
+    let heading = null;
+    let depth = 0;
+
+    // Detect heading levels — most specific first to avoid partial matches
+    const h3 = line.match(/^###(?!#)\s+(.+)/);
+    const h2 = !h3 && line.match(/^##(?!#)\s+(.+)/);
+    const h1 = !h3 && !h2 && line.match(/^#(?!#)\s+(.+)/);
+    // List items: capture leading whitespace, marker, and content
+    const listItem = !h3 && !h2 && !h1 && line.match(/^(\s*)([-*]|\d+\.)\s+(.+)/);
+    // Bold-only lines (entire line is **bold** or __bold__) — LLMs often use
+    // these as section headings instead of ##. Treat as implicit sub-headings.
+    const boldOnly = !h3 && !h2 && !h1 && !listItem &&
+      line.match(/^\*\*(.+)\*\*$|^__(.+)__$/);
+
+    if (h3) {
+      blockText = h3[1]; heading = 3; depth = 1;
+      currentHeadingDepth = 1;
+    } else if (h2) {
+      blockText = h2[1]; heading = 2; depth = 0;
+      currentHeadingDepth = 0;
+    } else if (h1) {
+      blockText = h1[1]; heading = 1; depth = 0;
+      currentHeadingDepth = 0;
+    } else if (boldOnly) {
+      // Strip the bold markers and treat as an implicit heading at the next
+      // level under the current heading context. Update currentHeadingDepth
+      // so subsequent plain text and list items nest beneath it.
+      blockText = (boldOnly[1] || boldOnly[2]).trim();
+      depth = currentHeadingDepth + 1;
+      currentHeadingDepth = depth;
+    } else if (listItem) {
+      const spaces = listItem[1].length;
+      blockText = listItem[3];
+      // Place list items one level under the current heading, plus indent
+      depth = (currentHeadingDepth + 1) + Math.floor(spaces / 2);
+    } else {
+      blockText = line.trim();
+      // Plain text sits one level under the current heading context
+      depth = currentHeadingDepth + 1;
+    }
+
+    if (!blockText.trim()) continue;
+
+    // Pop the stack until the top is a valid parent for this depth
+    while (stack.length > 1 && stack[stack.length - 1].depth >= depth) {
+      stack.pop();
+    }
+
+    const node = { text: blockText, heading, children: [] };
+    stack[stack.length - 1].node.children.push(node);
+    stack.push({ node, depth });
+  }
+
+  return root.children;
+}
+
+/**
+ * Recursively create Roam blocks from a parseMarkdownToBlocks() tree.
+ * Each node becomes a block parented to parentUid; children nest beneath it.
+ *
+ * Safety caps (matching the shared write helpers in index.js):
+ * - Depth capped at INBOX_BLOCK_TREE_MAX_DEPTH (30)
+ * - Total blocks capped at INBOX_BLOCK_TREE_MAX_BLOCKS (50)
+ * - Block text truncated at INBOX_MAX_BLOCK_CHARS (20K)
+ */
+export async function createRoamBlockTree(api, parentUid, nodes, depth = 0, counter = { created: 0 }) {
+  if (depth >= INBOX_BLOCK_TREE_MAX_DEPTH) return;
+  for (const node of nodes) {
+    if (counter.created >= INBOX_BLOCK_TREE_MAX_BLOCKS) {
+      deps.debugLog?.("[Chief flow] Inbox block tree hit max block cap:", INBOX_BLOCK_TREE_MAX_BLOCKS);
+      return;
+    }
+    const uid = api.util?.generateUID?.();
+    if (!uid) continue;
+    const safeText = String(node.text || "").slice(0, INBOX_MAX_BLOCK_CHARS);
+    const blockDef = { uid, string: safeText };
+    if (node.heading) blockDef.heading = node.heading;
+
+    const createFn = () => api.data.block.create({
+      location: { "parent-uid": parentUid, order: "last" },
+      block: blockDef,
+    });
+    if (deps.withRoamWriteRetry) {
+      await deps.withRoamWriteRetry(createFn);
+    } else {
+      await createFn();
+    }
+    counter.created++;
+
+    if (node.children && node.children.length > 0) {
+      await createRoamBlockTree(api, uid, node.children, depth + 1, counter);
+    }
+  }
+}
+
 async function moveInboxBlockToDNP(blockUid, responseText) {
   const api = deps.getRoamAlphaApi?.();
   if (!api) return;
@@ -316,27 +447,72 @@ async function moveInboxBlockToDNP(blockUid, responseText) {
     `[:find ?uid . :where [?p :block/uid "${escapeForDatalog(dnpUid)}"] [?p :block/children ?b] [?b :block/string "${escapeForDatalog(headingText)}"] [?b :block/uid ?uid]]`
   );
 
+  // Helper: route write through shared retry wrapper when available
+  const retryWrite = deps.withRoamWriteRetry || (fn => fn());
+
   let headingUid = existingHeading;
   if (!headingUid) {
     headingUid = api.util?.generateUID?.();
-    await api.data.block.create({
+    await retryWrite(() => api.data.block.create({
       location: { "parent-uid": dnpUid, order: "last" },
       block: { uid: headingUid, string: headingText, heading: 3 }
-    });
+    }));
   }
 
   // Move the inbox block under the heading
-  await api.data.block.move({
+  await retryWrite(() => api.data.block.move({
     location: { "parent-uid": headingUid, order: "last" },
     block: { uid: blockUid }
-  });
+  }));
 
-  // Add COS response as child of the moved block
-  if (responseText) {
-    await api.data.block.create({
+  // Write a processing-status child immediately after move so partial state
+  // is explicit and visible in the graph if later writes fail.
+  const statusUid = api.util?.generateUID?.();
+  if (statusUid) {
+    await retryWrite(() => api.data.block.create({
       location: { "parent-uid": blockUid, order: "last" },
-      block: { string: responseText }
-    });
+      block: { uid: statusUid, string: "**[Chief of Staff]** Processing response..." }
+    }));
+  }
+
+  // Add COS response as child of the moved block.
+  // Parse markdown into a Roam block hierarchy rather than dumping raw text.
+  // Wrapped in try/catch so a child-write failure doesn't leave a silently
+  // incomplete result — the status marker above remains visible.
+  if (responseText) {
+    try {
+      const nodes = parseMarkdownToBlocks(responseText);
+      if (nodes.length > 0) {
+        await createRoamBlockTree(api, blockUid, nodes);
+      } else {
+        // Fallback: response had no parseable structure — write as a single block
+        await retryWrite(() => api.data.block.create({
+          location: { "parent-uid": blockUid, order: "last" },
+          block: { string: String(responseText || "").slice(0, INBOX_MAX_BLOCK_CHARS) },
+        }));
+      }
+      // Success — remove the processing-status marker
+      if (statusUid) {
+        try { await retryWrite(() => api.deleteBlock({ block: { uid: statusUid } })); } catch (_) { /* non-fatal */ }
+      }
+    } catch (writeErr) {
+      console.warn("[Chief of Staff] Inbox child write failed after move:", writeErr?.message || writeErr);
+      // Update the status marker to reflect the failure
+      if (statusUid) {
+        try {
+          await retryWrite(() => api.updateBlock({
+            block: { uid: statusUid, string: `**[Chief of Staff]** Response write failed: ${String(writeErr?.message || "unknown error").slice(0, 200)}. Original response was generated but could not be saved.` }
+          }));
+        } catch (_markerErr) {
+          console.warn("[Chief of Staff] Inbox failure marker update also failed:", _markerErr?.message || _markerErr);
+        }
+      }
+    }
+  } else {
+    // No response text — remove the processing marker
+    if (statusUid) {
+      try { await retryWrite(() => api.deleteBlock({ block: { uid: statusUid } })); } catch (_) { /* non-fatal */ }
+    }
   }
 }
 

@@ -13,7 +13,7 @@ https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 - **Better Tasks integration** — search, create, and modify Better Tasks (TODO/DONE parent blocks with `BT_attr*` attribute children) directly from natural language. Supports filtering by due date, project, status, and free text.
 - **Persistent memory** — loads context from dedicated memory pages into the system prompt each run (see [Memory and learning](#memory-and-learning)).
 - **Skill routing** — reads `Chief of Staff/Skills`, injects a compact skill index into the prompt, and can apply a specific skill on request. A gathering completeness guard ensures the assistant calls all required data sources before writing.
-- **Inbox as input channel** — drop blocks into `Chief of Staff/Inbox` and they are automatically processed in read-only mode (the assistant can search and read but cannot mutate your graph). Responses are nested under the inbox block and moved to your daily page.
+- **Inbox as input channel** — drop blocks into `Chief of Staff/Inbox` and they are automatically processed in read-only mode (the assistant can search and read but cannot mutate your graph). Responses are nested under the inbox block and moved to your daily page. Works as a natural integration point for external automation — Make, Zapier, n8n, local agents, or any MCP-capable tool can write a pointer block to the inbox and COS will pick it up, read the linked output, and file a synthesis to your daily page.
 - **Composio tool connections** — connect Google Calendar, Gmail, Todoist, and hundreds of other apps via Composio MCP. The assistant discovers and executes tools on your behalf.
 - **Local MCP server integration** — connect to MCP servers running on your machine (e.g. Zotero, GitHub, custom tools). Servers with many tools use a two-stage routing system to keep token costs low. Connections retry automatically on failure.
 - **Remote MCP server integration** — connect to any remote MCP server on the internet via StreamableHTTP or SSE transport. Configure up to 10 remote servers with token-based auth or automatic OAuth sign-in. Servers that implement the MCP OAuth 2.1 spec (GitHub, Notion, Linear, Sentry, Stripe, and 30+ others) can be connected with a single click — no manual token management needed. SSE connections that fail automatically fall back to StreamableHTTP. Tools are discovered at connection time and made available to the agent alongside local and Composio tools.
@@ -492,9 +492,75 @@ Because memory content is loaded into every system prompt, it is a high-value ta
 
 ## Inbox
 
-`Chief of Staff/Inbox` acts as an semi-automated input channel. Drop a block into the inbox page and the assistant will automatically process it in **read-only mode** — it can search, read, and gather information from your graph and connected tools, but it cannot create, update, move, or delete any blocks or send emails. The response is nested under the original inbox block, which is then moved to today's daily page under a "Processed Chief of Staff items" heading.
+`Chief of Staff/Inbox` acts as a semi-automated input channel. Drop a block into the inbox page and the assistant will automatically process it in **read-only mode** — it can search, read, and gather information from your graph and connected tools, but it cannot create, update, move, or delete any blocks or send emails. The response is nested under the original inbox block as a structured hierarchy of Roam blocks, which is then moved to today's daily page under a "Processed Chief of Staff items" heading.
 
-This is useful for quick captures — jot down a question or instruction as a block under `Chief of Staff/Inbox` and let the assistant process it in the background.
+### How it works
+
+- COS watches `Chief of Staff/Inbox` with a live pull watch. New top-level blocks are detected within a few seconds of being written (5-second debounce to let batch writes settle).
+- Items are processed one at a time in a sequential queue (max 40 pending).
+- The block text becomes the prompt. The model tier is chosen automatically: **mini** for short, simple items; **power** for items longer than 700 characters, more than 10 lines, or containing keywords like `triage`, `weekly review`, `daily briefing`, `deep research`, `catch me up`, `retrospective`, or `end-of-day`.
+- The response is parsed from markdown into a proper Roam block hierarchy — headings, bullets, and nested lists all land as real nested blocks, not flat text.
+- After processing, the original inbox block (and its children) is moved to today's daily notes page under a `### Processed Chief of Staff items` heading, with the COS response appended as child blocks beneath it.
+
+### Read-only tool allowlist
+
+Inbox processing uses a strict allowlist — any tool not on this list is blocked, regardless of what the model requests:
+
+| Category | Tools available |
+|---|---|
+| Roam read | `roam_search`, `roam_get_page`, `roam_get_daily_page`, `roam_get_block_children`, `roam_get_block_context`, `roam_get_page_metadata`, `roam_get_recent_changes`, `roam_link_suggestions` |
+| Better Tasks read | `roam_bt_search_tasks`, `roam_bt_get_projects`, `roam_bt_get_waiting_for`, `roam_bt_get_context`, `roam_bt_get_analytics`, `roam_bt_get_task_by_uid`, `roam_bt_get_attributes` |
+| Web | `roam_web_fetch` |
+| COS | `cos_get_skill`, `cos_get_tool_ecosystem`, `cos_cron_list` |
+| MCP routing | `LOCAL_MCP_ROUTE` (explicit); remote MCP tools flagged as `isMutating: false` by their server also pass through automatically, so read-only remote tools (e.g. Open Brain's `search_thoughts`) are available |
+
+`roam_open_page` is intentionally excluded — it would navigate your main window mid-background-run.
+
+### Simple captures
+
+For quick questions or instructions, just write a block directly to the inbox page:
+
+```
+What tasks are overdue in Better Tasks?
+```
+
+```
+Fetch https://example.com/article and summarise the key points.
+```
+
+### Using the inbox with external automation
+
+The inbox is a natural integration point for Make, Zapier, n8n, local agents (like a home-server agent), or any tool that can write to your Roam graph via MCP. The recommended pattern is a clean separation of concerns:
+
+**Step 1 — The external tool writes its output to a dedicated page**, not directly to the inbox. Use a consistent naming convention, e.g.:
+
+```
+[[Hermes/2026-04-09]]          ← overnight agent run
+[[Gmail Digest/2026-04-09]]    ← daily email summary from Make
+[[Zapier/Meeting Notes/2026-04-09]]
+```
+
+Structure the page with clear sections — Summary, Findings, Action items — so COS can navigate it efficiently with `roam_get_page`.
+
+**Step 2 — The external tool writes a short pointer block to `Chief of Staff/Inbox`**:
+
+```
+I've written overnight research to [[Hermes/2026-04-09]]. Triage the findings and identify action items.
+```
+
+```
+Gmail digest for today is at [[Gmail Digest/2026-04-09]]. Summarise anything requiring a response.
+```
+
+```
+New meeting notes at [[Zapier/Meeting Notes/2026-04-09]]. Extract action items and decisions.
+```
+
+COS picks up the inbox block, reads the linked page with `roam_get_page`, synthesises the content, and moves everything to your daily page with a structured response beneath it. You wake up (or check in later) to a clean daily note with the work already triaged.
+
+**Tip — use trigger words intentionally.** The inbox pointer wording determines which model tier processes the request. Including `triage`, `daily briefing`, `weekly review`, or `deep research` upgrades from mini to power. For simple filing tasks ("save this to my daily page") you don't need those keywords and will get a faster, cheaper mini-tier run.
+
+**What the external tool needs.** Any tool that can write blocks to a Roam graph via the Roam MCP server can use this pattern. The Roam MCP server exposes tools like `roam_create_page` and `roam_import_markdown` that make it straightforward to write structured output pages and inbox pointer blocks from external agents, Make scenarios, or n8n workflows.
 
 ---
 

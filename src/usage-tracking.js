@@ -28,6 +28,8 @@ let usageStatsPersistTimeoutId = null;
 const USAGE_STATS_MAX_DAYS = 90;
 
 let auditTrimInFlight = false;
+const AUDIT_TRIM_BATCH_SIZE = 10;
+const AUDIT_TRIM_BATCH_YIELD_MS = 50;
 
 // Budget warning thresholds — tracks which thresholds have been shown this session
 // to avoid repeat toasts. Resets when the day changes.
@@ -298,7 +300,8 @@ async function trimAuditLog() {
     };
     const dateRefRe = /^\[\[(\w+)\s+(\d+)\w{0,2},\s*(\d{4})\]\]/;
 
-    let deleted = 0;
+    // First pass: collect UIDs to delete (no API calls)
+    const toDelete = [];
     for (const [uid, str] of allBlocks) {
       const m = String(str).match(dateRefRe);
       if (!m) continue;
@@ -306,8 +309,21 @@ async function trimAuditLog() {
       if (monthIdx === undefined) continue;
       const blockDate = new Date(parseInt(m[3], 10), monthIdx, parseInt(m[2], 10));
       if (blockDate < cutoff) {
-        await api.deleteBlock({ block: { uid } });
+        toDelete.push(uid);
+      }
+    }
+
+    // Second pass: delete serially with a yield every AUDIT_TRIM_BATCH_SIZE
+    // deletes. Serial writes avoid tripping Roam's internal write-lock race
+    // conditions; the periodic yield prevents blocking the UI thread.
+    let deleted = 0;
+    for (let i = 0; i < toDelete.length; i++) {
+      try {
+        await api.deleteBlock({ block: { uid: toDelete[i] } });
         deleted++;
+      } catch (_) { /* individual delete failure is non-fatal */ }
+      if ((i + 1) % AUDIT_TRIM_BATCH_SIZE === 0 && i + 1 < toDelete.length) {
+        await new Promise(resolve => setTimeout(resolve, AUDIT_TRIM_BATCH_YIELD_MS));
       }
     }
     if (deleted > 0) {

@@ -18,6 +18,7 @@ import {
   cleanupInbox,
   getInboxProcessingQueue,
   getInboxPendingQueueCount,
+  createRoamBlockTree,
 } from "../src/inbox.js";
 
 // ── Test helpers ─────────────────────────────────────────────────────────────
@@ -93,50 +94,50 @@ test("collectInboxBlockMap treats missing string as empty string", () => {
 
 // ── getInboxProcessingTierSuffix ──────────────────────────────────────────────
 
-test("getInboxProcessingTierSuffix returns /power for simple text", () => {
-  assert.equal(getInboxProcessingTierSuffix("remind me to buy milk"), "/power");
+test("getInboxProcessingTierSuffix returns /mini for simple text", () => {
+  assert.equal(getInboxProcessingTierSuffix("remind me to buy milk"), "/mini");
 });
 
-test("getInboxProcessingTierSuffix returns /ludicrous for weekly review", () => {
-  assert.equal(getInboxProcessingTierSuffix("Run my weekly review"), "/ludicrous");
+test("getInboxProcessingTierSuffix returns /power for weekly review", () => {
+  assert.equal(getInboxProcessingTierSuffix("Run my weekly review"), "/power");
 });
 
-test("getInboxProcessingTierSuffix returns /ludicrous for daily briefing", () => {
-  assert.equal(getInboxProcessingTierSuffix("Give me a daily briefing"), "/ludicrous");
+test("getInboxProcessingTierSuffix returns /power for daily briefing", () => {
+  assert.equal(getInboxProcessingTierSuffix("Give me a daily briefing"), "/power");
 });
 
-test("getInboxProcessingTierSuffix returns /ludicrous for deep research", () => {
-  assert.equal(getInboxProcessingTierSuffix("Do deep research on AI trends"), "/ludicrous");
+test("getInboxProcessingTierSuffix returns /power for deep research", () => {
+  assert.equal(getInboxProcessingTierSuffix("Do deep research on AI trends"), "/power");
 });
 
-test("getInboxProcessingTierSuffix returns /ludicrous for long text (>700 chars)", () => {
+test("getInboxProcessingTierSuffix returns /power for long text (>700 chars)", () => {
   const longText = "a".repeat(701);
-  assert.equal(getInboxProcessingTierSuffix(longText), "/ludicrous");
+  assert.equal(getInboxProcessingTierSuffix(longText), "/power");
 });
 
-test("getInboxProcessingTierSuffix returns /ludicrous for many lines (>10)", () => {
+test("getInboxProcessingTierSuffix returns /power for many lines (>10)", () => {
   const multiLine = Array(12).fill("line").join("\n");
-  assert.equal(getInboxProcessingTierSuffix(multiLine), "/ludicrous");
+  assert.equal(getInboxProcessingTierSuffix(multiLine), "/power");
 });
 
 test("getInboxProcessingTierSuffix handles null/undefined gracefully", () => {
-  assert.equal(getInboxProcessingTierSuffix(null), "/power");
-  assert.equal(getInboxProcessingTierSuffix(undefined), "/power");
-  assert.equal(getInboxProcessingTierSuffix(""), "/power");
+  assert.equal(getInboxProcessingTierSuffix(null), "/mini");
+  assert.equal(getInboxProcessingTierSuffix(undefined), "/mini");
+  assert.equal(getInboxProcessingTierSuffix(""), "/mini");
 });
 
 test("getInboxProcessingTierSuffix detects triage keyword", () => {
-  assert.equal(getInboxProcessingTierSuffix("triage my inbox"), "/ludicrous");
+  assert.equal(getInboxProcessingTierSuffix("triage my inbox"), "/power");
 });
 
 test("getInboxProcessingTierSuffix detects end-of-day keyword", () => {
-  assert.equal(getInboxProcessingTierSuffix("do my end-of-day review"), "/ludicrous");
-  assert.equal(getInboxProcessingTierSuffix("end of day wrap up"), "/ludicrous");
+  assert.equal(getInboxProcessingTierSuffix("do my end-of-day review"), "/power");
+  assert.equal(getInboxProcessingTierSuffix("end of day wrap up"), "/power");
 });
 
 test("getInboxProcessingTierSuffix detects multi-step keyword", () => {
-  assert.equal(getInboxProcessingTierSuffix("multi-step analysis"), "/ludicrous");
-  assert.equal(getInboxProcessingTierSuffix("multi step plan"), "/ludicrous");
+  assert.equal(getInboxProcessingTierSuffix("multi-step analysis"), "/power");
+  assert.equal(getInboxProcessingTierSuffix("multi step plan"), "/power");
 });
 
 // ── getInboxStaticUIDs / resetInboxStaticUIDs / setInboxStaticUIDs ────────────
@@ -386,4 +387,99 @@ test("getInboxProcessingQueue returns a promise", () => {
 test("getInboxPendingQueueCount returns 0 after cleanup", () => {
   cleanupInbox();
   assert.equal(getInboxPendingQueueCount(), 0);
+});
+
+// ── createRoamBlockTree safety caps ─────────────────────────────────────────
+
+function makeMockApi() {
+  let uidCounter = 0;
+  const createdBlocks = [];
+  return {
+    createdBlocks,
+    util: { generateUID: () => `uid-${++uidCounter}` },
+    data: {
+      block: {
+        create: async ({ block, location }) => {
+          createdBlocks.push({ uid: block.uid, string: block.string, parent: location["parent-uid"] });
+        },
+      },
+    },
+  };
+}
+
+test("createRoamBlockTree caps depth at 30", async () => {
+  cleanupInbox();
+  initInbox(stubDeps());
+
+  // Build a chain 40 levels deep
+  let deepNode = { text: "leaf", children: [] };
+  for (let i = 39; i >= 0; i--) {
+    deepNode = { text: `level-${i}`, children: [deepNode] };
+  }
+  const api = makeMockApi();
+  await createRoamBlockTree(api, "root", [deepNode]);
+
+  // Should have created exactly 30 blocks (depth 0-29), not 41
+  assert.equal(api.createdBlocks.length, 30);
+});
+
+test("createRoamBlockTree caps total blocks at 50", async () => {
+  cleanupInbox();
+  initInbox(stubDeps());
+
+  // 60 flat sibling nodes
+  const nodes = Array.from({ length: 60 }, (_, i) => ({
+    text: `block-${i}`,
+    children: [],
+  }));
+  const api = makeMockApi();
+  await createRoamBlockTree(api, "root", nodes);
+
+  assert.equal(api.createdBlocks.length, 50);
+});
+
+test("createRoamBlockTree truncates block text at 20000 chars", async () => {
+  cleanupInbox();
+  initInbox(stubDeps());
+
+  const longText = "x".repeat(25_000);
+  const nodes = [{ text: longText, children: [] }];
+  const api = makeMockApi();
+  await createRoamBlockTree(api, "root", nodes);
+
+  assert.equal(api.createdBlocks.length, 1);
+  assert.equal(api.createdBlocks[0].string.length, 20_000);
+});
+
+test("createRoamBlockTree block count cap spans across nested branches", async () => {
+  cleanupInbox();
+  initInbox(stubDeps());
+
+  // 10 parents each with 10 children = 110 total nodes, cap should kick in at 50
+  const nodes = Array.from({ length: 10 }, (_, i) => ({
+    text: `parent-${i}`,
+    children: Array.from({ length: 10 }, (_, j) => ({
+      text: `child-${i}-${j}`,
+      children: [],
+    })),
+  }));
+  const api = makeMockApi();
+  await createRoamBlockTree(api, "root", nodes);
+
+  assert.equal(api.createdBlocks.length, 50);
+});
+
+test("createRoamBlockTree uses withRoamWriteRetry when injected", async () => {
+  cleanupInbox();
+  let retryCallCount = 0;
+  initInbox(stubDeps({
+    withRoamWriteRetry: async (fn) => { retryCallCount++; return fn(); },
+  }));
+
+  const nodes = [{ text: "hello", children: [] }];
+  const api = makeMockApi();
+  await createRoamBlockTree(api, "root", nodes);
+
+  assert.equal(retryCallCount, 1);
+  assert.equal(api.createdBlocks.length, 1);
 });
