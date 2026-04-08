@@ -904,6 +904,18 @@ async function handleChatPanelSend() {
     return;
   }
 
+  if (/^\/doctor$/i.test(message)) {
+    chatPanelInput.value = "";
+    removeEmptyStateHint();
+    if (typeof deps.getDoctorReport === "function" && typeof deps.formatDoctorReportAsMarkdown === "function") {
+      const report = await deps.getDoctorReport();
+      appendChatPanelMessage("assistant", deps.formatDoctorReportAsMarkdown(report));
+    } else {
+      appendChatPanelMessage("assistant", "Doctor command is not available.");
+    }
+    return;
+  }
+
   removeEmptyStateHint();
   appendChatPanelMessage("user", message);
   appendChatPanelHistory("user", message);

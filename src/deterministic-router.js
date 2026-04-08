@@ -12,11 +12,11 @@
 
 import { normaliseToolSlugToken, getToolsConfigState, getToolkitSchemaRegistry, getToolSchema } from "./composio-mcp.js";
 import { installComposioTool, deregisterComposioTool, connectComposio, reconcileInstalledToolsWithComposio } from "./composio-ui.js";
-import { getLocalMcpTools, formatToolListByServer } from "./local-mcp.js";
-import { getRemoteMcpTools } from "./remote-mcp.js";
+import { getLocalMcpTools, formatToolListByServer, getLocalMcpClients } from "./local-mcp.js";
+import { getRemoteMcpTools, getRemoteMcpClients } from "./remote-mcp.js";
 import { getLatestWorkflowSuggestionsFromConversation, promptLooksLikeWorkflowDraftFollowUp, extractWorkflowSuggestionIndex } from "./conversation.js";
 import { showInfoToastIfAllowed, promptWriteToDailyPage, promptToolExecutionApproval } from "./chat-panel.js";
-import { loadCronJobs } from "./cron-scheduler.js";
+import { loadCronJobs, isValidCronExpression } from "./cron-scheduler.js";
 import { buildDefaultSystemPrompt } from "./system-prompt.js";
 import { wrapUntrustedWithInjectionScan } from "./security.js";
 import { persistAuditLogEntry, recordUsageStat } from "./usage-tracking.js";
@@ -56,6 +56,19 @@ export function isConnectionStatusIntent(userMessage) {
     "connection status"
   ];
   return patterns.some((pattern) => text.includes(pattern));
+}
+
+export function isDoctorIntent(userMessage) {
+  const text = String(userMessage || "").toLowerCase().trim();
+  if (!text) return false;
+  const patterns = [
+    "health check", "run diagnostics", "run a diagnostic", "doctor",
+    "cos doctor", "what's wrong", "what is wrong", "system check",
+    "system status", "check my setup", "self-diagnostic", "self diagnostic",
+    "diagnose", "run doctor", "run health check", "check health",
+    "extension health", "chief of staff health", "cos health"
+  ];
+  return patterns.some((p) => text.includes(p));
 }
 
 export function parseMemorySaveIntent(userMessage) {
@@ -1280,6 +1293,7 @@ export async function buildHelpSummary() {
   lines.push("- `/help` — This summary");
   lines.push("- `/clear` — Clear chat history");
   lines.push("- `/compact` — Compress older turns into a summary to free up context");
+  lines.push("- `/doctor` — Run a health check on API keys, MCP servers, memory, skills, and more");
   lines.push("- `/lesson` — Record lessons learned from this conversation");
   lines.push("- `/power` — Use a more capable model for this message");
   lines.push("- `/ludicrous` — Use the most capable model");
@@ -1287,6 +1301,268 @@ export async function buildHelpSummary() {
   lines.push("");
   lines.push("**Tips:** Ask me to search your graph, manage tasks, send emails, create pages, run your daily briefing, or anything else. I'll use the right tools automatically.");
 
+  return lines.join("\n");
+}
+
+// ── Doctor / health check ─────────────────────────────────────────────────────
+
+async function runDoctorChecks() {
+  const checks = [];
+  const extensionAPI = deps.getExtensionAPIRef();
+
+  // ── 1. API Keys ──
+  try {
+    const providers = deps.VALID_LLM_PROVIDERS || [];
+    const primary = extensionAPI ? deps.getLlmProvider(extensionAPI) : "anthropic";
+    const perProvider = [];
+    let configuredCount = 0;
+    let primaryOk = false;
+    const coolingDown = [];
+
+    for (const p of providers) {
+      const hasKey = Boolean(extensionAPI && deps.getApiKeyForProvider(extensionAPI, p));
+      const cooling = deps.isProviderCoolingDown(p);
+      if (hasKey) configuredCount++;
+      if (p === primary && hasKey) primaryOk = true;
+      if (cooling) coolingDown.push(p);
+      perProvider.push(`${p}: ${hasKey ? "configured" : "missing"}${cooling ? " (cooling down)" : ""}${p === primary ? " [primary]" : ""}`);
+    }
+
+    const status = !primaryOk ? "fail" : coolingDown.includes(primary) ? "warn" : configuredCount < 2 ? "warn" : "pass";
+    const suggestion = !primaryOk
+      ? `Add an API key for ${primary} in Settings > API Keys.`
+      : configuredCount < 2
+        ? "Add keys for additional providers to enable automatic failover."
+        : coolingDown.length
+          ? `${coolingDown.join(", ")} currently cooling down after a rate limit.`
+          : "";
+    checks.push({ area: "API Keys", status, details: `${configuredCount}/${providers.length} configured. ${perProvider.join("; ")}.`, suggestion });
+  } catch (e) {
+    checks.push({ area: "API Keys", status: "fail", details: `Check failed: ${e?.message}`, suggestion: "Ensure extension settings are accessible." });
+  }
+
+  // ── 2. Local MCP ──
+  try {
+    const clients = getLocalMcpClients();
+    if (!clients || clients.size === 0) {
+      checks.push({ area: "Local MCP", status: "pass", details: "No local MCP servers configured.", suggestion: "" });
+    } else {
+      const servers = [];
+      let failCount = 0;
+      let warnCount = 0;
+      for (const [port, entry] of clients) {
+        const name = entry.serverName || `port ${port}`;
+        const toolCount = Array.isArray(entry.tools) ? entry.tools.length : 0;
+        const connected = toolCount > 0;
+        const failures = entry.failureCount || 0;
+        if (!connected) { failCount++; servers.push(`${name}: disconnected`); }
+        else if (failures > 0) { warnCount++; servers.push(`${name}: ${toolCount} tools (${failures} recent failure${failures !== 1 ? "s" : ""})`); }
+        else { servers.push(`${name}: ${toolCount} tools`); }
+      }
+      const status = failCount > 0 ? "fail" : warnCount > 0 ? "warn" : "pass";
+      const suggestion = failCount > 0 ? "Check that local MCP servers are running and ports are correct." : "";
+      checks.push({ area: "Local MCP", status, details: `${clients.size} server(s). ${servers.join("; ")}.`, suggestion });
+    }
+  } catch (e) {
+    checks.push({ area: "Local MCP", status: "fail", details: `Check failed: ${e?.message}`, suggestion: "" });
+  }
+
+  // ── 3. Remote MCP ──
+  try {
+    const clients = getRemoteMcpClients();
+    if (!clients || clients.size === 0) {
+      checks.push({ area: "Remote MCP", status: "pass", details: "No remote MCP servers configured.", suggestion: "" });
+    } else {
+      const servers = [];
+      let failCount = 0;
+      let warnCount = 0;
+      for (const [, entry] of clients) {
+        const name = entry.serverName || "Unknown";
+        const toolCount = Array.isArray(entry.tools) ? entry.tools.length : 0;
+        const connected = toolCount > 0;
+        const failures = entry.failureCount || 0;
+        if (!connected) { failCount++; servers.push(`${name}: disconnected`); }
+        else if (failures > 0) { warnCount++; servers.push(`${name}: ${toolCount} tools (${failures} recent failure${failures !== 1 ? "s" : ""})`); }
+        else { servers.push(`${name}: ${toolCount} tools`); }
+      }
+      const status = failCount > 0 ? "fail" : warnCount > 0 ? "warn" : "pass";
+      const suggestion = failCount > 0 ? "Check remote MCP server URLs and auth tokens in Settings." : "";
+      checks.push({ area: "Remote MCP", status, details: `${clients.size} server(s). ${servers.join("; ")}.`, suggestion });
+    }
+  } catch (e) {
+    checks.push({ area: "Remote MCP", status: "fail", details: `Check failed: ${e?.message}`, suggestion: "" });
+  }
+
+  // ── 4. Memory Pages ──
+  try {
+    const titles = deps.MEMORY_PAGE_TITLES_BASE || [];
+    const roamApi = deps.getRoamAlphaApi();
+    const missing = [];
+    for (const title of titles) {
+      const exists = roamApi?.data?.pull ? roamApi.data.pull("[:node/title]", [":node/title", title]) : null;
+      if (!exists) missing.push(title.replace("Chief of Staff/", ""));
+    }
+
+    // Size cap check — use cache if warm, otherwise load fresh
+    const memCache = deps.getMemoryPromptCache();
+    let memContent = memCache?.content || "";
+    if (!memContent && typeof deps.getAllMemoryContent === "function") {
+      memContent = await deps.getAllMemoryContent({ force: false }) || "";
+    }
+    const totalChars = memContent.length;
+    const totalCap = deps.MEMORY_TOTAL_MAX_CHARS || 8000;
+    const nearCap = totalChars > totalCap * 0.85;
+
+    if (missing.length === 0 && !nearCap) {
+      checks.push({ area: "Memory Pages", status: "pass", details: `All ${titles.length} pages exist. Memory size: ${totalChars}/${totalCap} chars.`, suggestion: "" });
+    } else if (missing.length > 0 && nearCap) {
+      checks.push({ area: "Memory Pages", status: "warn", details: `${missing.length} page(s) missing: ${missing.join(", ")}. Memory at ${totalChars}/${totalCap} chars (${Math.round(totalChars / totalCap * 100)}%).`, suggestion: "Run 'Initialise memory' from the command palette. Consider pruning older memory entries to stay under the cap." });
+    } else if (nearCap) {
+      checks.push({ area: "Memory Pages", status: "warn", details: `All ${titles.length} pages exist. Memory at ${totalChars}/${totalCap} chars (${Math.round(totalChars / totalCap * 100)}%).`, suggestion: "Memory is near the size cap — older entries may be truncated. Consider pruning to keep the most relevant context." });
+    } else {
+      checks.push({ area: "Memory Pages", status: "warn", details: `${missing.length} page(s) missing: ${missing.join(", ")}. Memory size: ${totalChars}/${totalCap} chars.`, suggestion: "Run 'Initialise memory' from the command palette to create them." });
+    }
+  } catch (e) {
+    checks.push({ area: "Memory Pages", status: "fail", details: `Check failed: ${e?.message}`, suggestion: "" });
+  }
+
+  // ── 5. Skills ──
+  try {
+    const roamApi = deps.getRoamAlphaApi();
+    const skillsPageTitle = "Chief of Staff/Skills";
+    const pageExists = roamApi?.data?.pull ? roamApi.data.pull("[:node/title]", [":node/title", skillsPageTitle]) : null;
+    if (!pageExists) {
+      checks.push({ area: "Skills", status: "warn", details: "Skills page does not exist.", suggestion: "Run 'Initialise skills' from the command palette." });
+    } else {
+      const entries = await deps.getSkillEntries({ force: true });
+      if (!entries || entries.length === 0) {
+        checks.push({ area: "Skills", status: "warn", details: "Skills page exists but no valid skills found.", suggestion: "Add skill definitions as child blocks under Chief of Staff/Skills." });
+      } else {
+        checks.push({ area: "Skills", status: "pass", details: `${entries.length} skill(s) parsed successfully.`, suggestion: "" });
+      }
+    }
+  } catch (e) {
+    checks.push({ area: "Skills", status: "fail", details: `Check failed: ${e?.message}`, suggestion: "" });
+  }
+
+  // ── 6. Cron Jobs ──
+  try {
+    const jobs = loadCronJobs();
+    if (!jobs || jobs.length === 0) {
+      checks.push({ area: "Cron Jobs", status: "pass", details: "No scheduled jobs configured.", suggestion: "" });
+    } else {
+      const enabled = jobs.filter(j => j.enabled);
+      const withErrors = jobs.filter(j => j.lastRunError);
+      const invalidCron = jobs.filter(j => j.type === "cron" && j.expression && !isValidCronExpression(j.expression));
+      const status = invalidCron.length > 0 ? "fail" : withErrors.length > 0 ? "warn" : "pass";
+      const parts = [`${jobs.length} job(s) (${enabled.length} enabled)`];
+      if (withErrors.length > 0) parts.push(`${withErrors.length} with errors`);
+      if (invalidCron.length > 0) parts.push(`${invalidCron.length} with invalid cron expression(s)`);
+      const suggestion = invalidCron.length > 0
+        ? `Fix invalid schedules: ${invalidCron.map(j => j.name || j.id).join(", ")}.`
+        : withErrors.length > 0
+          ? `Jobs with errors: ${withErrors.map(j => `${j.name || j.id} — ${j.lastRunError}`).join("; ")}.`
+          : "";
+      checks.push({ area: "Cron Jobs", status, details: `${parts.join(". ")}.`, suggestion });
+    }
+  } catch (e) {
+    checks.push({ area: "Cron Jobs", status: "fail", details: `Check failed: ${e?.message}`, suggestion: "" });
+  }
+
+  // ── 7. Composio ──
+  try {
+    const client = deps.getMcpClient();
+    const connected = client != null;
+    const state = extensionAPI ? getToolsConfigState(extensionAPI) : { installedTools: [] };
+    const installed = (state.installedTools || []).filter(t => t.installState === "installed");
+    const pending = (state.installedTools || []).filter(t => t.installState === "pending_auth");
+    const failed = (state.installedTools || []).filter(t => t.installState === "failed");
+    const total = installed.length + pending.length + failed.length;
+
+    if (total === 0 && !connected) {
+      checks.push({ area: "Composio", status: "pass", details: "Not configured.", suggestion: "" });
+    } else {
+      const parts = [];
+      if (connected) parts.push("connected");
+      else parts.push("disconnected");
+      parts.push(`${installed.length} installed`);
+      if (pending.length > 0) parts.push(`${pending.length} pending auth`);
+      if (failed.length > 0) parts.push(`${failed.length} failed`);
+      const status = !connected && total > 0 ? "warn" : failed.length > 0 ? "warn" : pending.length > 0 ? "warn" : "pass";
+      const suggestion = !connected && total > 0
+        ? "Composio is disconnected — check your proxy URL and API key in Settings."
+        : pending.length > 0
+          ? `Complete authentication for: ${pending.map(t => t.slug).join(", ")}.`
+          : failed.length > 0
+            ? `Reinstall failed tools: ${failed.map(t => t.slug).join(", ")}.`
+            : "";
+      checks.push({ area: "Composio", status, details: parts.join(", ") + ".", suggestion });
+    }
+  } catch (e) {
+    checks.push({ area: "Composio", status: "fail", details: `Check failed: ${e?.message}`, suggestion: "" });
+  }
+
+  // ── 8. Extension Tools ──
+  try {
+    const registry = deps.getExtensionToolsRegistry();
+    const config = deps.getExtToolsConfig();
+    if (!registry || Object.keys(registry).length === 0) {
+      checks.push({ area: "Extension Tools", status: "pass", details: "No extension tools discovered.", suggestion: "" });
+    } else {
+      let totalTools = 0;
+      let missingExecute = 0;
+      const enabledExts = [];
+      for (const [extKey, ext] of Object.entries(registry)) {
+        if (!config[extKey]?.enabled) continue;
+        if (!ext || !Array.isArray(ext.tools)) continue;
+        enabledExts.push(ext.name || extKey);
+        for (const t of ext.tools) {
+          if (!t?.name) continue;
+          totalTools++;
+          if (typeof t.execute !== "function") missingExecute++;
+        }
+      }
+      const status = missingExecute > 0 ? "warn" : "pass";
+      const details = enabledExts.length > 0
+        ? `${enabledExts.length} extension(s) enabled (${totalTools} tools): ${enabledExts.join(", ")}.`
+        : "Extensions discovered but none enabled.";
+      const suggestion = missingExecute > 0 ? `${missingExecute} tool(s) missing execute function — may not work correctly.` : "";
+      checks.push({ area: "Extension Tools", status, details, suggestion });
+    }
+  } catch (e) {
+    checks.push({ area: "Extension Tools", status: "fail", details: `Check failed: ${e?.message}`, suggestion: "" });
+  }
+
+  return checks;
+}
+
+export async function getDoctorReport() {
+  const checks = await runDoctorChecks();
+  const passed = checks.filter(c => c.status === "pass").length;
+  const warned = checks.filter(c => c.status === "warn").length;
+  const failed = checks.filter(c => c.status === "fail").length;
+  const overallStatus = failed > 0 ? "fail" : warned > 0 ? "warn" : "pass";
+  return { checks, summary: { passed, warned, failed, total: checks.length, overallStatus } };
+}
+
+export function formatDoctorReportAsMarkdown(report) {
+  const statusLabel = { pass: "Pass", warn: "Warning", fail: "Fail" };
+  const lines = [];
+  lines.push("## Health Check Report\n");
+
+  const { passed, warned, failed, total } = report.summary;
+  const overall = failed > 0 ? "Issues found"
+    : warned > 0 ? "Mostly healthy, some warnings"
+    : "All systems healthy";
+  lines.push(`**Overall:** ${overall} (${passed} passed, ${warned} warning${warned !== 1 ? "s" : ""}, ${failed} failed — ${total} checks)\n`);
+
+  for (const check of report.checks) {
+    const label = statusLabel[check.status] || check.status;
+    lines.push(`**${check.area}** — ${label}`);
+    lines.push(`  ${check.details}`);
+    if (check.suggestion) lines.push(`  *${check.suggestion}*`);
+    lines.push("");
+  }
   return lines.join("\n");
 }
 
@@ -1314,6 +1590,14 @@ export async function tryRunDeterministicAskIntent(prompt, context = {}) {
     deps.debugLog("[Chief flow] Deterministic route matched: help");
     const helpText = await buildHelpSummary();
     return deps.publishAskResponse(prompt, helpText, assistantName, suppressToasts);
+  }
+
+  // ── Doctor / health check ──────────────────────────────────────
+  if (isDoctorIntent(prompt)) {
+    deps.debugLog("[Chief flow] Deterministic route matched: doctor");
+    const report = await getDoctorReport();
+    const responseText = formatDoctorReportAsMarkdown(report);
+    return deps.publishAskResponse(prompt, responseText, assistantName, suppressToasts);
   }
 
   const extensionAPIRef = deps.getExtensionAPIRef();
@@ -2169,14 +2453,21 @@ export async function tryRunDeterministicAskIntent(prompt, context = {}) {
       const budgetStr = deps.getSettingString(extensionAPIRef, deps.SETTINGS_KEYS?.skillAutoresearchBudget, "2.00");
       const budget = parseFloat(budgetStr) || 2.0;
       // Fire-and-forget — do NOT await
-      deps.runSkillOptimization(entry.title, { budgetUsd: budget, withTools: !!optimizeIntent.withTools }).catch(err => {
+      deps.runSkillOptimization(entry.title, {
+        budgetUsd: budget,
+        withTools: !!optimizeIntent.withTools,
+        powerMutations: !!optimizeIntent.powerMutations,
+      }).catch(err => {
         deps.debugLog("[Autoresearch] Background optimization failed:", err?.message);
         deps.showErrorToast("Optimisation Failed", err?.message || "Unknown error");
       });
       // Check both the flag and the settings toggle to determine the actual mode
       const toolCallingSetting = extensionAPIRef?.settings?.get?.(deps.SETTINGS_KEYS?.skillAutoresearchToolCalling);
       const willUseTools = optimizeIntent.withTools || toolCallingSetting;
-      const modeLabel = willUseTools ? "tool-calling" : "LLM-only";
+      const powerMutationSetting = extensionAPIRef?.settings?.get?.(deps.SETTINGS_KEYS?.skillAutoresearchPowerMutations);
+      const willUsePower = optimizeIntent.powerMutations || powerMutationSetting;
+      const modeLabel = (willUseTools ? "tool-calling" : "LLM-only")
+        + (willUsePower ? ", power mutations" : "");
       return deps.publishAskResponse(prompt,
         `Starting optimisation of "${entry.title}" (${modeLabel}, budget: $${budget.toFixed(2)}). `
         + `This runs in the background \u2014 I'll show a toast when it's done with results to accept or revert.`,

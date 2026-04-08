@@ -18,6 +18,10 @@ import {
   hasSourcesWithParameterHints,
   validateAndFixToolReferences,
   shouldStop,
+  parseFirstLevelSections,
+  restoreDroppedSections,
+  repairTruncatedTail,
+  preserveSectionLines,
   OPTIMIZATION_DEFAULTS,
 } from "../src/skill-autoresearch.js";
 
@@ -89,47 +93,62 @@ function makeSetupResponse(testCaseCount = 3, criteriaCount = 2) {
 describe("parseSkillOptimizeIntent", () => {
   it("matches 'optimize my Daily Briefing skill'", () => {
     const result = parseSkillOptimizeIntent("optimize my Daily Briefing skill");
-    assert.deepStrictEqual(result, { skillName: "Daily Briefing", withTools: false });
+    assert.deepStrictEqual(result, { skillName: "Daily Briefing", withTools: false, powerMutations: false });
   });
 
   it("matches 'improve the research skill'", () => {
     const result = parseSkillOptimizeIntent("improve the research skill");
-    assert.deepStrictEqual(result, { skillName: "research", withTools: false });
+    assert.deepStrictEqual(result, { skillName: "research", withTools: false, powerMutations: false });
   });
 
   it("matches British spelling 'optimise my writing skill'", () => {
     const result = parseSkillOptimizeIntent("optimise my writing skill");
-    assert.deepStrictEqual(result, { skillName: "writing", withTools: false });
+    assert.deepStrictEqual(result, { skillName: "writing", withTools: false, powerMutations: false });
   });
 
   it("matches 'refine Daily Briefing'", () => {
     const result = parseSkillOptimizeIntent("refine Daily Briefing");
-    assert.deepStrictEqual(result, { skillName: "Daily Briefing", withTools: false });
+    assert.deepStrictEqual(result, { skillName: "Daily Briefing", withTools: false, powerMutations: false });
   });
 
   it("matches 'enhance my Task Triage skill'", () => {
     const result = parseSkillOptimizeIntent("enhance my Task Triage skill");
-    assert.deepStrictEqual(result, { skillName: "Task Triage", withTools: false });
+    assert.deepStrictEqual(result, { skillName: "Task Triage", withTools: false, powerMutations: false });
   });
 
   it("matches with 'please' prefix", () => {
     const result = parseSkillOptimizeIntent("please optimize my briefing skill");
-    assert.deepStrictEqual(result, { skillName: "briefing", withTools: false });
+    assert.deepStrictEqual(result, { skillName: "briefing", withTools: false, powerMutations: false });
   });
 
   it("matches quoted skill name", () => {
     const result = parseSkillOptimizeIntent('optimize "Daily Briefing"');
-    assert.deepStrictEqual(result, { skillName: "Daily Briefing", withTools: false });
+    assert.deepStrictEqual(result, { skillName: "Daily Briefing", withTools: false, powerMutations: false });
   });
 
   it("parses --with-tools flag", () => {
     const result = parseSkillOptimizeIntent("optimise Daily Briefing --with-tools");
-    assert.deepStrictEqual(result, { skillName: "Daily Briefing", withTools: true });
+    assert.deepStrictEqual(result, { skillName: "Daily Briefing", withTools: true, powerMutations: false });
   });
 
   it("parses --with-tools flag with quoted name", () => {
     const result = parseSkillOptimizeIntent('optimize "Daily Briefing" --with-tools');
-    assert.deepStrictEqual(result, { skillName: "Daily Briefing", withTools: true });
+    assert.deepStrictEqual(result, { skillName: "Daily Briefing", withTools: true, powerMutations: false });
+  });
+
+  it("parses --power flag", () => {
+    const result = parseSkillOptimizeIntent("optimise Daily Briefing --power");
+    assert.deepStrictEqual(result, { skillName: "Daily Briefing", withTools: false, powerMutations: true });
+  });
+
+  it("parses --power-mutations flag", () => {
+    const result = parseSkillOptimizeIntent("optimise Daily Briefing --power-mutations");
+    assert.deepStrictEqual(result, { skillName: "Daily Briefing", withTools: false, powerMutations: true });
+  });
+
+  it("parses both --with-tools and --power flags", () => {
+    const result = parseSkillOptimizeIntent("optimise Daily Briefing --with-tools --power");
+    assert.deepStrictEqual(result, { skillName: "Daily Briefing", withTools: true, powerMutations: true });
   });
 
   it("returns null for 'run skill Daily Briefing'", () => {
@@ -1039,6 +1058,383 @@ describe("detectUnprovableCriteria", () => {
     const criteria = [{ id: "daily_page_write_confirmation", prompt: "blocks are on the page" }];
     const result = detectUnprovableCriteria(scores, criteria, true);
     assert.ok(result.has("daily_page_write_confirmation"));
+  });
+});
+
+// ── parseFirstLevelSections ──────────────────────────────────────────────
+
+describe("parseFirstLevelSections", () => {
+  it("parses first-level sections from skill content", () => {
+    const content = [
+      "- Trigger: user provides messy input",
+      "- Approach:",
+      "  - Step 1",
+      "  - Step 2",
+      "- Constraints:",
+      "  - Must Do:",
+      "    - Extract tasks",
+      "- Tools: bt_create, roam_create_block",
+    ].join("\n");
+    const sections = parseFirstLevelSections(content);
+    assert.strictEqual(sections.length, 4);
+    assert.strictEqual(sections[0].key, "trigger");
+    assert.strictEqual(sections[1].key, "approach");
+    assert.strictEqual(sections[2].key, "constraints");
+    assert.strictEqual(sections[3].key, "tools");
+  });
+
+  it("includes children in section fullText", () => {
+    const content = "- Approach:\n  - Step 1\n  - Step 2\n- Rubric:\n  - Check A";
+    const sections = parseFirstLevelSections(content);
+    assert.strictEqual(sections.length, 2);
+    assert.ok(sections[0].fullText.includes("Step 1"));
+    assert.ok(sections[0].fullText.includes("Step 2"));
+  });
+
+  it("handles sections without colons", () => {
+    const content = "- OPERATING PRINCIPLES\n  - Be thorough\n- PHASE 1\n  - Do stuff";
+    const sections = parseFirstLevelSections(content);
+    assert.strictEqual(sections[0].key, "operating principles");
+    assert.strictEqual(sections[1].key, "phase 1");
+  });
+
+  it("returns empty array for empty content", () => {
+    assert.deepStrictEqual(parseFirstLevelSections(""), []);
+    assert.deepStrictEqual(parseFirstLevelSections(null), []);
+  });
+
+  it("ignores indented lines before first section", () => {
+    const content = "  - orphan child\n- Trigger: test\n  - detail";
+    const sections = parseFirstLevelSections(content);
+    assert.strictEqual(sections.length, 1);
+    assert.strictEqual(sections[0].key, "trigger");
+  });
+});
+
+// ── restoreDroppedSections ──────────────────────────────────────────────
+
+describe("restoreDroppedSections", () => {
+  const original = [
+    "- Trigger: user provides messy input",
+    "- Approach:",
+    "  - Step 1",
+    "  - Step 2",
+    "- OPERATING PRINCIPLES",
+    "  - Be thorough",
+    "- PHASE 1: ORGANISE",
+    "  - Core Ideas",
+    "- Constraints:",
+    "  - Must Do:",
+    "    - Extract tasks",
+    "- Rubric:",
+    "  - Check quality",
+    "- Tools: bt_create",
+  ].join("\n");
+
+  it("restores sections dropped by the LLM", () => {
+    const mutated = [
+      "- Constraints:",
+      "  - Must Do:",
+      "    - Extract tasks",
+      "    - New constraint added",
+      "- Rubric:",
+      "  - Check quality",
+      "  - New criterion added",
+      "- Tools: bt_create",
+    ].join("\n");
+
+    const result = restoreDroppedSections(original, mutated);
+    assert.ok(result.restored.includes("trigger"));
+    assert.ok(result.restored.includes("approach"));
+    assert.ok(result.restored.includes("operating principles"));
+    assert.ok(result.restored.includes("phase 1"));
+    assert.strictEqual(result.restored.length, 4);
+    // Restored content should include the original sections
+    assert.ok(result.content.includes("Trigger: user provides messy input"));
+    assert.ok(result.content.includes("Step 1"));
+    assert.ok(result.content.includes("OPERATING PRINCIPLES"));
+    assert.ok(result.content.includes("Core Ideas"));
+  });
+
+  it("does not duplicate sections already present", () => {
+    const mutated = original + "\n- Extra: new section";
+    const result = restoreDroppedSections(original, mutated);
+    assert.strictEqual(result.restored.length, 0);
+    assert.strictEqual(result.content, mutated);
+  });
+
+  it("matches case-insensitively", () => {
+    const mutated = "- trigger: user provides messy input\n- tools: bt_create";
+    const result = restoreDroppedSections(original, mutated);
+    // trigger and tools are present (case-insensitive), others should be restored
+    assert.ok(!result.restored.includes("trigger"));
+    assert.ok(!result.restored.includes("tools"));
+    assert.ok(result.restored.includes("approach"));
+  });
+
+  it("returns unchanged content when nothing is dropped", () => {
+    const result = restoreDroppedSections(original, original);
+    assert.strictEqual(result.restored.length, 0);
+    assert.strictEqual(result.content, original);
+  });
+
+  it("handles empty post-mutation content", () => {
+    const result = restoreDroppedSections(original, "");
+    // All sections should be restored
+    assert.ok(result.restored.length > 0);
+    assert.ok(result.content.includes("Trigger"));
+    assert.ok(result.content.includes("Approach"));
+  });
+
+  it("detects absorbed sections and skips restoration", () => {
+    const pre = [
+      "- ROUTING",
+      "  - After organising and extracting, route outputs to the correct destinations:",
+      "  - My tasks → create via bt_create with project, due date, and effort attributes where known",
+      "  - Others' tasks → create via bt_create with assignee set to owner (becomes waiting-for)",
+      "  - Ideas and parking lot items → add to [[Chief of Staff/Inbox]] via roam_create_block",
+      "  - Questions needing decisions → add to [[Chief of Staff/Decisions]] via roam_create_block",
+      "- Trigger: test input",
+    ].join("\n");
+
+    // LLM reorganised ROUTING content into a new Output section
+    const post = [
+      "- Output:",
+      "  - Where output goes:",
+      "    - My tasks → create via bt_create with project, due date, and effort attributes where known",
+      "    - Others' tasks → create via bt_create with assignee set to owner (becomes waiting-for)",
+      "    - Ideas and parking lot items → add to [[Chief of Staff/Inbox]] via roam_create_block",
+      "    - Questions needing decisions → add to [[Chief of Staff/Decisions]] via roam_create_block",
+      "- Trigger: test input",
+    ].join("\n");
+
+    const result = restoreDroppedSections(pre, post);
+    assert.ok(!result.restored.includes("routing"));
+    assert.ok(result.absorbed.includes("routing"));
+    assert.strictEqual(result.restored.length, 0);
+  });
+
+  it("restores sections with low absorption rate", () => {
+    const pre = [
+      "- OPERATING PRINCIPLES",
+      "  - **Extract aggressively.** Surface all potential tasks",
+      "  - **Preserve context.** Keep the why behind each item",
+      "  - **Flag ambiguity.** Mark unclear items with [UNCLEAR]",
+      "  - **Suggest ownership.** Note if task is mine or someone else's",
+      "  - **Identify dependencies.** Link related tasks",
+      "- Tools: bt_create",
+    ].join("\n");
+
+    // LLM output has only one overlapping line — not enough for absorption
+    const post = [
+      "- Constraints:",
+      "  - Must Do:",
+      "    - **Flag ambiguity.** Mark unclear items with [UNCLEAR]",
+      "- Tools: bt_create",
+    ].join("\n");
+
+    const result = restoreDroppedSections(pre, post);
+    assert.ok(result.restored.includes("operating principles"));
+    assert.strictEqual(result.absorbed.length, 0);
+  });
+
+  it("returns absorbed array even when empty", () => {
+    const result = restoreDroppedSections(original, original);
+    assert.deepStrictEqual(result.absorbed, []);
+  });
+});
+
+// ── repairTruncatedTail ─────────────────────────────────────────────────
+
+describe("repairTruncatedTail", () => {
+  it("repairs a truncated last section", () => {
+    const pre = [
+      "- Approach:",
+      "  - Step 1",
+      "- Rubric:",
+      "  - Check quality of output",
+      "  - Check ownership labels present",
+      "  - Check effort estimation included",
+    ].join("\n");
+
+    const post = [
+      "- Approach:",
+      "  - Step 1",
+      "- Rubric:",
+      "  - Check quality of output",
+      "  - Check ownership labels",
+    ].join("\n");
+
+    const result = repairTruncatedTail(pre, post);
+    assert.strictEqual(result.repaired, "rubric");
+    assert.ok(result.content.includes("Check effort estimation included"));
+    assert.ok(result.content.includes("Check ownership labels present"));
+  });
+
+  it("returns unchanged when last section is not truncated", () => {
+    const content = [
+      "- Trigger: test",
+      "- Rubric:",
+      "  - Check A",
+      "  - Check B",
+    ].join("\n");
+
+    const result = repairTruncatedTail(content, content);
+    assert.strictEqual(result.repaired, null);
+    assert.strictEqual(result.content, content);
+  });
+
+  it("returns unchanged when last section is longer in post", () => {
+    const pre = "- Rubric:\n  - Check A";
+    const post = "- Rubric:\n  - Check A\n  - Check B (new)";
+
+    const result = repairTruncatedTail(pre, post);
+    assert.strictEqual(result.repaired, null);
+    assert.strictEqual(result.content, post);
+  });
+
+  it("returns unchanged when last section has no pre match", () => {
+    const pre = "- Trigger: test";
+    const post = "- NewSection: added by mutation\n  - Detail";
+
+    const result = repairTruncatedTail(pre, post);
+    assert.strictEqual(result.repaired, null);
+  });
+
+  it("preserves content before the truncated section", () => {
+    const pre = [
+      "- Trigger: test input",
+      "- Approach:",
+      "  - Step 1",
+      "  - Step 2",
+      "- Constraints:",
+      "  - Must Do:",
+      "    - Extract tasks",
+      "    - Preserve voice",
+    ].join("\n");
+
+    const post = [
+      "- Trigger: test input",
+      "- Approach:",
+      "  - Step 1",
+      "  - Step 2",
+      "  - Step 3 (new)",
+      "- Constraints:",
+      "  - Must Do:",
+      "    - Extract tasks",
+    ].join("\n");
+
+    const result = repairTruncatedTail(pre, post);
+    assert.strictEqual(result.repaired, "constraints");
+    // Approach (with new Step 3) should be preserved
+    assert.ok(result.content.includes("Step 3 (new)"));
+    // Constraints should be restored from pre
+    assert.ok(result.content.includes("Preserve voice"));
+  });
+
+  it("handles empty inputs gracefully", () => {
+    assert.strictEqual(repairTruncatedTail("", "- X:\n  - Y").repaired, null);
+    assert.strictEqual(repairTruncatedTail("- X:\n  - Y", "").repaired, null);
+  });
+});
+
+// ── preserveSectionLines ────────────────────────────────────────────────
+
+describe("preserveSectionLines", () => {
+  it("restores lines removed from within a section", () => {
+    const pre = [
+      "- Output:",
+      "  - My tasks → create via bt_create with project and due date",
+      "  - Others' tasks → create via bt_create with assignee",
+      "  - If input looks like a project, group them and suggest creating a project page",
+      "- Trigger: test input",
+    ].join("\n");
+
+    const post = [
+      "- Output:",
+      "  - My tasks → create via bt_create with project and due date",
+      "  - Others' tasks → create via bt_create with assignee",
+      "  - New addition from the mutation",
+      "- Trigger: test input",
+    ].join("\n");
+
+    const result = preserveSectionLines(pre, post);
+    assert.strictEqual(result.restoredLines.length, 1);
+    assert.strictEqual(result.restoredLines[0].section, "output");
+    assert.ok(result.content.includes("If input looks like a project"));
+    // New addition should still be present
+    assert.ok(result.content.includes("New addition from the mutation"));
+  });
+
+  it("does not restore lines that were moved to another section", () => {
+    const pre = [
+      "- ROUTING",
+      "  - My tasks → create via bt_create with project and due date",
+      "- Output:",
+      "  - Summary of results",
+    ].join("\n");
+
+    const post = [
+      "- ROUTING",
+      "  - Routes are defined elsewhere",
+      "- Output:",
+      "  - Summary of results",
+      "  - My tasks → create via bt_create with project and due date",
+    ].join("\n");
+
+    const result = preserveSectionLines(pre, post);
+    // Line was moved to Output, not deleted — should not be restored into ROUTING
+    assert.strictEqual(result.restoredLines.length, 0);
+  });
+
+  it("does not restore short/header lines", () => {
+    const pre = "- Constraints:\n  - Must Do:\n  - Extract tasks aggressively but flag ambiguity";
+    const post = "- Constraints:\n  - Extract tasks aggressively but flag ambiguity";
+
+    const result = preserveSectionLines(pre, post);
+    // "Must Do:" is ≤10 chars normalised — should not be restored
+    assert.strictEqual(result.restoredLines.length, 0);
+  });
+
+  it("returns unchanged when no lines are missing", () => {
+    const content = "- Approach:\n  - Step 1 is to do something\n  - Step 2 is to do another thing";
+    const result = preserveSectionLines(content, content);
+    assert.strictEqual(result.restoredLines.length, 0);
+    assert.strictEqual(result.content, content);
+  });
+
+  it("skips sections only in pre (handled by restoreDroppedSections)", () => {
+    const pre = "- Approach:\n  - Step 1 is important\n- Rubric:\n  - Check quality of output";
+    const post = "- Approach:\n  - Step 1 is important";
+
+    const result = preserveSectionLines(pre, post);
+    // Rubric section is missing entirely — not this guard's job
+    assert.strictEqual(result.restoredLines.length, 0);
+  });
+
+  it("restores multiple lines from multiple sections", () => {
+    const pre = [
+      "- Output:",
+      "  - Route tasks to correct destinations for processing",
+      "  - If input looks like a project, group them and suggest creating a project page",
+      "- Constraints:",
+      "  - Must preserve original voice and context in all outputs",
+      "  - Must route items to correct destinations for processing",
+    ].join("\n");
+
+    const post = [
+      "- Output:",
+      "  - Route tasks to correct destinations for processing",
+      "  - New output line added by mutation here",
+      "- Constraints:",
+      "  - Must preserve original voice and context in all outputs",
+      "  - New constraint added by mutation here",
+    ].join("\n");
+
+    const result = preserveSectionLines(pre, post);
+    assert.strictEqual(result.restoredLines.length, 2);
+    assert.ok(result.content.includes("If input looks like a project"));
+    assert.ok(result.content.includes("Must route items to correct destinations"));
   });
 });
 

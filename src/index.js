@@ -275,6 +275,8 @@ import {
   parseSkillSources,
   parseSkillTools,
   buildHelpSummary,
+  getDoctorReport,
+  formatDoctorReportAsMarkdown,
 } from "./deterministic-router.js";
 import {
   initAgentLoop, runAgentLoopWithFailover,
@@ -332,7 +334,8 @@ const SETTINGS_KEYS = {
   skillAutoresearchEnabled: "skill-autoresearch-enabled",
   skillAutoresearchBudget: "skill-autoresearch-budget",
   skillAutoresearchToolCalling: "skill-autoresearch-tool-calling",
-  skillAutoresearchToolCache: "skill-autoresearch-tool-cache"
+  skillAutoresearchToolCache: "skill-autoresearch-tool-cache",
+  skillAutoresearchPowerMutations: "skill-autoresearch-power-mutations"
 };
 const TOOLS_SCHEMA_VERSION = 3;
 const AUTH_POLL_INTERVAL_MS = 9000;
@@ -3549,6 +3552,26 @@ function getCosIntegrationTools() {
           message: `Council started with ${resolved.length} models (chair: ${resolvedChair}). Results will appear on [[LLM Council]] page.`
         });
       }
+    },
+    {
+      name: "cos_doctor",
+      isMutating: false,
+      description: "Run a self-diagnostic health check. Validates API keys, MCP connections, memory pages, skills, cron jobs, Composio, and Extension Tools. Returns structured pass/warn/fail report with fix suggestions.",
+      input_schema: {
+        type: "object",
+        properties: {
+          format: {
+            type: "string",
+            enum: ["json", "markdown"],
+            description: "Output format. Default: json."
+          }
+        }
+      },
+      execute: async ({ format } = {}) => {
+        const report = await getDoctorReport();
+        if (format === "markdown") return formatDoctorReportAsMarkdown(report);
+        return JSON.stringify(report);
+      }
     }
   ];
 }
@@ -4579,6 +4602,15 @@ function registerCommandPaletteCommands(extensionAPI) {
     callback: () => toggleChatPanel()
   });
   extensionAPI.ui.commandPalette.addCommand({
+    label: "Chief of Staff: Doctor (Health Check)",
+    callback: async () => {
+      const report = await getDoctorReport();
+      const md = formatDoctorReportAsMarkdown(report);
+      showInfoToast("Health Check", md.slice(0, 280));
+      console.info("[Chief of Staff] Health Check Report:\n" + md);
+    }
+  });
+  extensionAPI.ui.commandPalette.addCommand({
     label: "Chief of Staff: Run Onboarding",
     callback: () => launchOnboarding(extensionAPI, buildOnboardingDeps(extensionAPI))
   });
@@ -5417,6 +5449,14 @@ function onload({ extensionAPI }) {
       if (!apiKey) throw new Error("No API key configured for " + provider);
       return callLlm(provider, apiKey, model, system, messages, [], options);
     },
+    callLlmPower: async (system, messages, options) => {
+      const provider = getLlmProvider(extensionAPIRef);
+      const apiKey = getApiKeyForProvider(extensionAPIRef, provider);
+      const model = getPowerModel(provider);
+      if (!apiKey) throw new Error("No API key configured for " + provider);
+      return callLlm(provider, apiKey, model, system, messages, [], options);
+    },
+    getPowerModel: () => getPowerModel(getLlmProvider(extensionAPIRef)),
     callLlmJudge: async (system, messages, options) => {
       const config = getAutoresearchJudgeConfig();
       if (!config) throw new Error("No LLM provider available for judge");
@@ -5501,6 +5541,8 @@ function onload({ extensionAPI }) {
     getLastAgentRunTrace: () => getLastAgentRunTrace(),
     getToolCallingSetting: () => getSettingBool(extensionAPIRef, SETTINGS_KEYS.skillAutoresearchToolCalling, false),
     getToolCacheSetting: () => getSettingBool(extensionAPIRef, SETTINGS_KEYS.skillAutoresearchToolCache, true),
+    getPowerMutationSetting: () => getSettingBool(extensionAPIRef, SETTINGS_KEYS.skillAutoresearchPowerMutations, false),
+    updateChatPanelCostIndicator,
   });
   initIntentClassifier({
     callLlm,
@@ -5635,6 +5677,8 @@ function onload({ extensionAPI }) {
     getLastAgentRunTrace: () => getLastAgentRunTrace(),
     debugLog,
     buildHelpSummary,
+    getDoctorReport,
+    formatDoctorReportAsMarkdown,
     getChipCapabilities: () => {
       const caps = { composioEmail: false, composioCalendar: false, localMcp: false, extensionToolNames: [] };
       // Composio: check installed & enabled tool slugs for email/calendar toolkits
@@ -5930,6 +5974,7 @@ function onload({ extensionAPI }) {
     getSkillEntries,
     getSkillsPromptCache: () => skillsPromptCache,
     getMemoryPromptCache: () => memoryPromptCache,
+    getAllMemoryContent,
     setLastAgentRunTrace: (t) => setLastAgentRunTrace(t),
     getLastAgentRunTrace: () => getLastAgentRunTrace(),
     publishAskResponse, writeResponseToTodayDailyPage, writeStructuredResponseToTodayDailyPage,
@@ -5938,7 +5983,11 @@ function onload({ extensionAPI }) {
     getAvailableToolSchemas,
     runAgentLoopWithFailover,
     SETTINGS_KEYS, MAX_AGENT_ITERATIONS_SKILL,
-    MEMORY_PAGE_TITLES_BASE, SOURCE_TOOL_NAME_MAP,
+    MEMORY_PAGE_TITLES_BASE, MEMORY_TOTAL_MAX_CHARS, SOURCE_TOOL_NAME_MAP,
+    getApiKeyForProvider: (ext, p) => getApiKeyForProvider(ext, p),
+    isProviderCoolingDown,
+    VALID_LLM_PROVIDERS,
+    getMcpClient: () => mcpClient,
     evaluateAgentRun,
     runSkillOptimization,
     parseSkillOptimizeIntent,

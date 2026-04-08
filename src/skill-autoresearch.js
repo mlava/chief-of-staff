@@ -4,6 +4,8 @@
 // evaluates, presents accept/revert. All mutations in-memory until accepted.
 // DI via initSkillAutoresearch(deps). No Roam writes during the loop.
 
+import { persistAuditLogEntry } from "./usage-tracking.js";
+
 let deps = {};
 
 export function initSkillAutoresearch(injected) { deps = injected; }
@@ -65,9 +67,10 @@ export function parseSkillOptimizeIntent(userMessage) {
   let text = String(userMessage || "").trim();
   if (!text) return null;
 
-  // Extract --with-tools flag before matching (so it doesn't interfere with quotes/name)
-  const withTools = /\s+--with-tools\s*$/i.test(text);
-  if (withTools) text = text.replace(/\s+--with-tools\s*$/i, "").trim();
+  // Extract flags before matching (so they don't interfere with quotes/name)
+  const withTools = /\s+--with-tools(?:\s|$)/i.test(text);
+  const powerMutations = /\s+--power(?:-mutations)?(?:\s|$)/i.test(text);
+  text = text.replace(/\s+--with-tools(?:\s|$)/i, " ").replace(/\s+--power(?:-mutations)?(?:\s|$)/i, " ").trim();
 
   // "optimize my Daily Briefing skill", "improve the research skill", "optimise skill: X"
   const m = text.match(
@@ -76,7 +79,7 @@ export function parseSkillOptimizeIntent(userMessage) {
   if (!m) return null;
   const name = m[1].replace(/\s+skill$/i, "").trim();
   if (!name) return null;
-  return { skillName: name, withTools };
+  return { skillName: name, withTools, powerMutations };
 }
 
 // ── LLM Response Text Extraction ─────────────────────────────────────────
@@ -109,6 +112,8 @@ function trackCallCost(state, response, model, label) {
   state.totalOutputTokens += outputTokens;
   deps.recordCostEntry("autoresearch-" + label, inputTokens, outputTokens, cost);
   deps.accumulateSessionTokens(inputTokens, outputTokens, cost);
+  if (!state.model) state.model = model;
+  if (typeof deps.updateChatPanelCostIndicator === "function") deps.updateChatPanelCostIndicator();
   return cost;
 }
 
@@ -664,11 +669,189 @@ function replaceSection(content, sectionName, originalSectionText) {
   return content + "\n" + originalSectionText;
 }
 
-async function mutateSkill(state, currentContent, failingSummary, aspect, passRate, miniModel) {
-  // Detect locked sections: Sources and Tools contain hand-curated tool config
-  // (tool names, parameters, server routing) that mutations should not rewrite.
+/**
+ * Parses skill content into first-level child block sections.
+ * First-level blocks start with "- " at indent 0 (no leading spaces).
+ * Each section includes the header line and all deeper-indented lines below it.
+ * @param {string} content - Flattened skill content from flattenTreeToLines(children, 0)
+ * @returns {{ key: string, fullText: string }[]}
+ */
+export function parseFirstLevelSections(content) {
+  const lines = String(content || "").split("\n");
+  const sections = [];
+  let current = null;
+
+  for (const line of lines) {
+    if (/^- /.test(line)) {
+      if (current) sections.push(current);
+      let key = line.slice(2).trim();
+      const colonIdx = key.indexOf(":");
+      if (colonIdx > 0 && colonIdx < 50) key = key.slice(0, colonIdx);
+      key = key.toLowerCase().replace(/\s+/g, " ").trim();
+      current = { key, lines: [line] };
+    } else if (current) {
+      current.lines.push(line);
+    }
+  }
+  if (current) sections.push(current);
+  return sections.map(s => ({ key: s.key, fullText: s.lines.join("\n") }));
+}
+
+/**
+ * Normalises a content line for absorption comparison.
+ * Strips leading whitespace, bullet prefix, lowercases.
+ */
+function normaliseLine(line) {
+  return line.replace(/^\s*-\s*/, "").trim().toLowerCase();
+}
+
+const ABSORPTION_LINE_MIN_LENGTH = 10;
+const ABSORPTION_THRESHOLD = 0.6;
+
+/**
+ * Restores first-level sections from pre-mutation content that were dropped
+ * by the LLM. Matches by normalised section header key.
+ * When a section header is missing but ≥60% of its content lines appear
+ * elsewhere in the mutation (absorbed into a new section structure), it is
+ * not restored — preventing duplication.
+ * @param {string} preContent - Content before mutation
+ * @param {string} postContent - Content after mutation
+ * @returns {{ content: string, restored: string[], absorbed: string[] }}
+ */
+export function restoreDroppedSections(preContent, postContent) {
+  const preSections = parseFirstLevelSections(preContent);
+  const postSections = parseFirstLevelSections(postContent);
+  const postKeys = new Set(postSections.map(s => s.key));
+
+  // Build set of normalised content lines from post-mutation content
+  // for absorption detection (content reorganised into a different section)
+  const postLineSet = new Set();
+  for (const line of String(postContent || "").split("\n")) {
+    const norm = normaliseLine(line);
+    if (norm.length > ABSORPTION_LINE_MIN_LENGTH) postLineSet.add(norm);
+  }
+
+  const restored = [];
+  const absorbed = [];
+  let result = postContent;
+  for (const section of preSections) {
+    if (!section.key) continue;
+    if (postKeys.has(section.key)) continue;
+
+    // Check if section's content lines were absorbed into the mutation
+    const contentLines = section.fullText.split("\n")
+      .map(normaliseLine)
+      .filter(l => l.length > ABSORPTION_LINE_MIN_LENGTH);
+    if (contentLines.length > 0) {
+      const matchCount = contentLines.filter(l => postLineSet.has(l)).length;
+      if (matchCount / contentLines.length >= ABSORPTION_THRESHOLD) {
+        absorbed.push(section.key);
+        continue;
+      }
+    }
+
+    result += "\n" + section.fullText;
+    restored.push(section.key);
+  }
+  return { content: result, restored, absorbed };
+}
+
+/**
+ * Detects and repairs truncation at the tail of mutated content.
+ * When the LLM hits max_output_tokens, the last section gets cut off mid-line.
+ * Compares the last first-level section in the post against the same section
+ * in the pre; if the post version has fewer non-empty lines, replaces it with
+ * the pre version.
+ * @param {string} preContent - Content before mutation
+ * @param {string} postContent - Content after mutation (possibly truncated)
+ * @returns {{ content: string, repaired: string|null }}
+ */
+export function repairTruncatedTail(preContent, postContent) {
+  const preSections = parseFirstLevelSections(preContent);
+  const postSections = parseFirstLevelSections(postContent);
+  if (postSections.length === 0 || preSections.length === 0) return { content: postContent, repaired: null };
+
+  const lastPost = postSections[postSections.length - 1];
+  const matchingPre = preSections.find(s => s.key === lastPost.key);
+  if (!matchingPre) return { content: postContent, repaired: null };
+
+  const preLineCount = matchingPre.fullText.split("\n").filter(l => l.trim()).length;
+  const postLineCount = lastPost.fullText.split("\n").filter(l => l.trim()).length;
+  if (postLineCount >= preLineCount) return { content: postContent, repaired: null };
+
+  // Replace the truncated last section with the pre version
+  const headerLine = lastPost.fullText.split("\n")[0];
+  const lastIdx = postContent.lastIndexOf(headerLine);
+  if (lastIdx < 0) return { content: postContent, repaired: null };
+
+  return { content: postContent.slice(0, lastIdx) + matchingPre.fullText, repaired: lastPost.key };
+}
+
+/**
+ * Per-section line preservation guard.
+ * For each first-level section present in both pre and post, detects content
+ * lines that were removed by the mutation and appends them back to the section.
+ * Uses normalised line matching (same as absorption detection).
+ * Skips the section header line itself and lines ≤ ABSORPTION_LINE_MIN_LENGTH.
+ * @param {string} preContent - Content before mutation
+ * @param {string} postContent - Content after mutation
+ * @returns {{ content: string, restoredLines: { section: string, count: number }[] }}
+ */
+export function preserveSectionLines(preContent, postContent) {
+  const preSections = parseFirstLevelSections(preContent);
+  const postSections = parseFirstLevelSections(postContent);
+  const postByKey = new Map(postSections.map(s => [s.key, s]));
+
+  // Build global set of normalised lines in post (for cross-section moves)
+  const postAllLines = new Set();
+  for (const line of String(postContent || "").split("\n")) {
+    const norm = normaliseLine(line);
+    if (norm.length > ABSORPTION_LINE_MIN_LENGTH) postAllLines.add(norm);
+  }
+
+  const restoredLines = [];
+  let result = postContent;
+
+  for (const preSection of preSections) {
+    if (!preSection.key) continue;
+    const postSection = postByKey.get(preSection.key);
+    if (!postSection) continue; // handled by restoreDroppedSections
+
+    // Get content lines from pre section (skip header line)
+    const preLines = preSection.fullText.split("\n").slice(1);
+    const missingLines = [];
+    for (const line of preLines) {
+      const norm = normaliseLine(line);
+      if (norm.length <= ABSORPTION_LINE_MIN_LENGTH) continue;
+      // Only restore if the line doesn't appear ANYWHERE in the post
+      // (could have been moved to another section — that's fine)
+      if (!postAllLines.has(norm)) {
+        missingLines.push(line);
+      }
+    }
+
+    if (missingLines.length === 0) continue;
+
+    // Append missing lines at the end of the post section
+    const postSectionText = postSection.fullText;
+    const insertIdx = result.lastIndexOf(postSectionText);
+    if (insertIdx < 0) continue;
+
+    const insertEnd = insertIdx + postSectionText.length;
+    result = result.slice(0, insertEnd) + "\n" + missingLines.join("\n") + result.slice(insertEnd);
+    restoredLines.push({ section: preSection.key, count: missingLines.length });
+  }
+
+  return { content: result, restoredLines };
+}
+
+async function mutateSkill(state, currentContent, failingSummary, aspect, passRate, miniModel, usePowerMutation) {
+  // Detect locked sections: Sources, Tools, Models contain hand-curated config;
+  // Trigger defines activation semantics and should only change during trigger_clarity.
+  const alwaysLocked = ["Sources", "Tools", "Models"];
+  const conditionallyLocked = aspect !== "trigger_clarity" ? ["Trigger"] : [];
   const lockedSections = {};
-  for (const name of ["Sources", "Tools", "Models"]) {
+  for (const name of [...alwaysLocked, ...conditionallyLocked]) {
     const section = extractSection(currentContent, name);
     if (section) lockedSections[name] = section.text;
   }
@@ -716,14 +899,23 @@ ${currentContent}
 ${aspectGuidance}${lockedWarning}
 Return the complete updated skill body.`;
 
-  const response = await deps.callLlmMini(
+  const callFn = usePowerMutation && typeof deps.callLlmPower === "function"
+    ? deps.callLlmPower
+    : deps.callLlmMini;
+  const mutationModel = usePowerMutation && typeof deps.getPowerModel === "function"
+    ? deps.getPowerModel()
+    : miniModel;
+  // Provider is the same for both tiers — only the model differs
+  const mutationProvider = deps.getMiniProvider();
+
+  const response = await callFn(
     MUTATION_SYSTEM_PROMPT,
     [{ role: "user", content: userPrompt }],
     { maxOutputTokens: OPTIMIZATION_DEFAULTS.mutationMaxTokens }
   );
-  trackCallCost(state, response, miniModel, "mutate");
+  trackCallCost(state, response, mutationModel, "mutate");
 
-  let text = extractResponseText(response, deps.getMiniProvider());
+  let text = extractResponseText(response, mutationProvider);
   // Strip code fences if present
   text = text.replace(/^```(?:markdown|md)?\s*\n?/i, "").replace(/\n?```\s*$/, "").trim();
 
@@ -736,6 +928,31 @@ Return the complete updated skill body.`;
         deps.debugLog(`[Autoresearch] Restored locked section: ${name}`);
       }
     }
+  }
+
+  // Restore any first-level sections the LLM dropped from the output
+  const { content: sectionRestored, restored: restoredSections, absorbed: absorbedSections } = restoreDroppedSections(currentContent, text);
+  if (restoredSections.length > 0) {
+    text = sectionRestored;
+    deps.debugLog("[Autoresearch] Restored dropped sections:", restoredSections.join(", "));
+  }
+  if (absorbedSections.length > 0) {
+    deps.debugLog("[Autoresearch] Sections absorbed (not restored):", absorbedSections.join(", "));
+  }
+
+  // Repair truncation at the tail (LLM hit max_output_tokens)
+  const { content: tailRepaired, repaired: repairedSection } = repairTruncatedTail(currentContent, text);
+  if (repairedSection) {
+    text = tailRepaired;
+    deps.debugLog("[Autoresearch] Repaired truncated tail section:", repairedSection);
+  }
+
+  // Per-section line preservation: restore content lines removed within sections
+  const { content: linePreserved, restoredLines } = preserveSectionLines(currentContent, text);
+  if (restoredLines.length > 0) {
+    text = linePreserved;
+    deps.debugLog("[Autoresearch] Restored removed lines:",
+      restoredLines.map(r => `${r.section}: ${r.count} lines`).join(", "));
   }
 
   return text;
@@ -825,6 +1042,28 @@ async function persistDebriefResults(state) {
         await deps.createRoamBlock(decisionsPageUid, decisionLine, "first");
       }
     }
+    // Audit Log entry — makes optimization runs visible in the Activity tab
+    // Non-blocking, non-fatal — errors swallowed to match persistAuditLogEntry's contract
+    try {
+      const baselinePctAudit = Math.round(state.baselinePassRate * 100);
+      const finalPctAudit = Math.round(state.currentBestPassRate * 100);
+      const syntheticTrace = {
+        startedAt: state.startedAt || Date.now(),
+        finishedAt: Date.now(),
+        model: state.model || "autoresearch",
+        iterations: state.iteration || 0,
+        totalInputTokens: state.totalInputTokens || 0,
+        totalOutputTokens: state.totalOutputTokens || 0,
+        cost: state.totalCostUsd || 0,
+        toolCalls: [],
+      };
+      await persistAuditLogEntry(syntheticTrace, `optimise ${state.skillName}`, {
+        skillName: `Optimise: ${state.skillName} (${baselinePctAudit}%→${finalPctAudit}%)`
+      });
+    } catch (auditErr) {
+      deps.debugLog("[Autoresearch] Audit log entry failed (non-fatal):", auditErr?.message);
+    }
+
   } catch (err) {
     deps.debugLog("[Autoresearch] Debrief persistence failed (non-fatal):", err?.message);
   }
@@ -840,6 +1079,7 @@ async function persistDebriefResults(state) {
  * @param {object} [options]
  * @param {number} [options.budgetUsd] - Max spend (defaults to settings or OPTIMIZATION_DEFAULTS)
  * @param {boolean} [options.withTools] - Opt-in to tool-calling simulation (default: false, uses LLM-only)
+ * @param {boolean} [options.powerMutations] - Use power-tier model for mutation calls (default: false)
  * @returns {Promise<{improved: boolean, baselineRate: number, finalRate: number, cost: number, reason: string}>}
  */
 export async function runSkillOptimization(skillName, options = {}) {
@@ -880,6 +1120,8 @@ export async function runSkillOptimization(skillName, options = {}) {
     phase: "setup",
     iteration: 0,
     consecutiveDiscards: 0,
+    startedAt: Date.now(),
+    model: null,  // set after first LLM call to capture the model used
   };
 
   try {
@@ -907,6 +1149,18 @@ export async function runSkillOptimization(skillName, options = {}) {
     if (state.useToolCalling) {
       deps.debugLog("[Autoresearch] Tool-calling mode enabled",
         options.withTools ? "(--with-tools flag)" : "(settings toggle)");
+    }
+
+    // ── Power-tier mutations: opt-in ──────────────────────────────
+    // Uses power model (e.g. Sonnet, GPT-4.1) for mutation calls only.
+    // Simulations and scoring stay on mini tier.
+    const powerMutationSetting = typeof deps.getPowerMutationSetting === "function"
+      ? deps.getPowerMutationSetting()
+      : false;
+    state.usePowerMutation = !!(options.powerMutations || powerMutationSetting);
+    if (state.usePowerMutation) {
+      deps.debugLog("[Autoresearch] Power-tier mutations enabled",
+        options.powerMutations ? "(option flag)" : "(settings toggle)");
     }
 
     // Tool result cache: shared across all test cases and iterations.
@@ -1000,9 +1254,9 @@ export async function runSkillOptimization(skillName, options = {}) {
     for (const id of excludedCriteria) wallCriteria.add(id);
 
     // Locked sections from original skill — restored after each mutation + validation
-    // to prevent tool reference stripping from damaging hand-curated Sources/Tools
+    // to prevent tool reference stripping from damaging hand-curated Sources/Tools/Trigger
     const originalLockedSections = {};
-    for (const name of ["Sources", "Tools", "Models"]) {
+    for (const name of ["Sources", "Tools", "Models", "Trigger"]) {
       const section = extractSection(state.originalContent, name);
       if (section) originalLockedSections[name] = section.text;
     }
@@ -1025,7 +1279,7 @@ export async function runSkillOptimization(skillName, options = {}) {
       // Mutate
       const mutatedContent = await mutateSkill(
         state, state.currentBestContent, failingSummary, aspect,
-        state.currentBestPassRate, miniModel
+        state.currentBestPassRate, miniModel, state.usePowerMutation
       );
 
       if (!mutatedContent.trim() || mutatedContent === state.currentBestContent) {
