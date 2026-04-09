@@ -5,6 +5,7 @@ import {
 } from "./intent-classifier.js";
 import { initCosLinkedRefsFilter, teardownCosLinkedRefsFilter } from "./cos-linked-refs-filter.js";
 import { initCorrectionCapture, trackCosWrite, readBackBlockTree, scanForCorrections, getTrackedWrites, trackDismissedSuggestion, DIFF_SCAN_INTERVAL_MS } from "./correction-capture.js";
+import { initGraphHygiene, scanOrphanPages, scanStaleLinks, getOrphanPagesResult, getStaleLinkResult, ORPHAN_SCAN_INTERVAL_MS, STALE_LINK_SCAN_INTERVAL_MS } from "./graph-hygiene.js";
 import iziToast from "izitoast";
 import { launchOnboarding, teardownOnboarding } from "./onboarding/onboarding.js";
 import { computeRoutingScore, recordTurnOutcome, sessionTrajectory } from "./tier-routing.js";
@@ -331,6 +332,8 @@ const SETTINGS_KEYS = {
   cosLinkedRefsFilter: "cos-linked-refs-filter",
   intentGateEnabled: "intent-gate-enabled",
   correctionCaptureEnabled: "correction-capture-enabled",
+  graphHygieneOrphansEnabled: "graph-hygiene-orphans-enabled",
+  graphHygieneStaleLinkEnabled: "graph-hygiene-stale-links-enabled",
   skillAutoresearchEnabled: "skill-autoresearch-enabled",
   skillAutoresearchBudget: "skill-autoresearch-budget",
   skillAutoresearchToolCalling: "skill-autoresearch-tool-calling",
@@ -3631,6 +3634,54 @@ function getCosIntegrationTools() {
       }
     },
     {
+      name: "cos_get_orphan_pages",
+      isMutating: false,
+      description: "Return the most recent orphan page scan results — pages with zero incoming references. Runs as a background idle task; returns cached results or a 'scan not yet run' message. Enable in Settings > Automatic Actions.",
+      input_schema: {
+        type: "object",
+        properties: {
+          limit: { type: "number", description: "Maximum pages to return. Default 50." }
+        }
+      },
+      execute: async ({ limit } = {}) => {
+        const result = getOrphanPagesResult();
+        if (!result) return { status: "not_yet_scanned", message: "Orphan page scan has not completed yet. It runs during idle time. Check back in a few minutes, or enable it in Settings > Automatic Actions." };
+        const cap = Math.min(Number(limit) || 50, 200);
+        return {
+          status: "ok",
+          scanned_at: new Date(result.scannedAt).toISOString(),
+          total_pages_scanned: result.totalPages,
+          orphan_count: result.orphanCount,
+          orphans: result.pages.slice(0, cap).map(p => ({ title: p.title, uid: p.uid, block_count: p.blockCount })),
+          scan_duration_ms: result.scanDurationMs
+        };
+      }
+    },
+    {
+      name: "cos_get_stale_links",
+      isMutating: false,
+      description: "Return the most recent stale link scan results — block references to deleted blocks or page references to non-existent pages. Runs as a background idle task; returns cached results or a 'scan not yet run' message. Enable in Settings > Automatic Actions.",
+      input_schema: {
+        type: "object",
+        properties: {
+          limit: { type: "number", description: "Maximum stale links to return. Default 50." }
+        }
+      },
+      execute: async ({ limit } = {}) => {
+        const result = getStaleLinkResult();
+        if (!result) return { status: "not_yet_scanned", message: "Stale link scan has not completed yet. It runs during idle time. Check back in a few minutes, or enable it in Settings > Automatic Actions." };
+        const cap = Math.min(Number(limit) || 50, 200);
+        return {
+          status: "ok",
+          scanned_at: new Date(result.scannedAt).toISOString(),
+          total_blocks_scanned: result.totalBlocks,
+          stale_link_count: result.links.length,
+          stale_links: result.links.slice(0, cap),
+          scan_duration_ms: result.scanDurationMs
+        };
+      }
+    },
+    {
       name: "cos_doctor",
       isMutating: false,
       description: "Run a self-diagnostic health check. Validates API keys, MCP connections, memory pages, skills, cron jobs, Composio, and Extension Tools. Returns structured pass/warn/fail report with fix suggestions.",
@@ -3982,6 +4033,32 @@ function setChiefNamespaceGlobals() {
     corrections: {
       tracked: () => getTrackedWrites(),
       scan: () => scanForCorrections({ offset: 0, corrections: [] }, { timeRemaining: () => 5000 }),
+    },
+    graphHygiene: {
+      orphans: () => getOrphanPagesResult(),
+      staleLinks: () => getStaleLinkResult(),
+      scanOrphans: () => {
+        let state = { allPages: null, offset: 0, orphans: [], startedAt: Date.now() };
+        const fakeDeadline = { timeRemaining: () => 60000 };
+        let safety = 1000;
+        while (safety-- > 0) {
+          const r = scanOrphanPages(state, fakeDeadline);
+          state = r.state;
+          if (r.done) break;
+        }
+        return getOrphanPagesResult();
+      },
+      scanStaleLinks: () => {
+        let state = { allBlocks: null, offset: 0, staleLinks: [], checkedUids: {}, checkedTitles: {}, startedAt: Date.now() };
+        const fakeDeadline = { timeRemaining: () => 60000 };
+        let safety = 5000;
+        while (safety-- > 0) {
+          const r = scanStaleLinks(state, fakeDeadline);
+          state = r.state;
+          if (r.done) break;
+        }
+        return getStaleLinkResult();
+      },
     },
   };
 }
@@ -5715,6 +5792,40 @@ function onload({ extensionAPI }) {
         debugLog("[Corrections] Idle task unregistered (setting toggled off)");
       }
     },
+    onGraphHygieneOrphansToggle: (enabled) => {
+      if (enabled) {
+        registerIdleTask({
+          id: "graph-hygiene-orphans",
+          priority: 80,
+          intervalMs: ORPHAN_SCAN_INTERVAL_MS,
+          init: () => ({ allPages: null, offset: 0, orphans: [], startedAt: Date.now() }),
+          processChunk: scanOrphanPages,
+          onComplete: () => { debugLog("[Graph Hygiene] Orphan page scan complete"); },
+          onError: (err) => { debugLog("[Graph Hygiene] Orphan scan error:", err?.message); }
+        });
+        debugLog("[Graph Hygiene] Orphan idle task registered (setting toggled on)");
+      } else {
+        unregisterIdleTask("graph-hygiene-orphans");
+        debugLog("[Graph Hygiene] Orphan idle task unregistered (setting toggled off)");
+      }
+    },
+    onGraphHygieneStaleLinkToggle: (enabled) => {
+      if (enabled) {
+        registerIdleTask({
+          id: "graph-hygiene-stale-links",
+          priority: 80,
+          intervalMs: STALE_LINK_SCAN_INTERVAL_MS,
+          init: () => ({ allBlocks: null, offset: 0, staleLinks: [], checkedUids: {}, checkedTitles: {}, startedAt: Date.now() }),
+          processChunk: scanStaleLinks,
+          onComplete: () => { debugLog("[Graph Hygiene] Stale link scan complete"); },
+          onError: (err) => { debugLog("[Graph Hygiene] Stale link scan error:", err?.message); }
+        });
+        debugLog("[Graph Hygiene] Stale link idle task registered (setting toggled on)");
+      } else {
+        unregisterIdleTask("graph-hygiene-stale-links");
+        debugLog("[Graph Hygiene] Stale link idle task unregistered (setting toggled off)");
+      }
+    },
   });
   initLlmProviders({
     debugLog,
@@ -6076,6 +6187,8 @@ function onload({ extensionAPI }) {
     parseSkillOptimizeIntent,
     isOptimizationRunning,
     showOptimizationResultToast,
+    getOrphanPagesResult,
+    getStaleLinkResult,
   });
   initAgentLoop({
     debugLog,
@@ -6215,6 +6328,40 @@ function onload({ extensionAPI }) {
       init: () => ({ offset: 0, corrections: [] }),
       processChunk: scanForCorrections,
       onComplete: () => { debugLog("[Corrections] Idle scan cycle complete"); }
+    });
+  }
+
+  // Graph hygiene: initialise and register idle tasks if enabled
+  initGraphHygiene({
+    debugLog,
+    getExtensionAPIRef: () => extensionAPIRef,
+    getRoamAlphaApi: () => window.roamAlphaAPI,
+    escapeForDatalog,
+    ensurePageUidByTitle: (title) => ensurePageUidByTitle(title),
+    createRoamBlock: (parentUid, text, order) => createRoamBlock(parentUid, text, order),
+    getFirstContentOrder,
+    formatRoamDate,
+  });
+  if (getSettingBool(extensionAPIRef, SETTINGS_KEYS.graphHygieneOrphansEnabled, false)) {
+    registerIdleTask({
+      id: "graph-hygiene-orphans",
+      priority: 80,
+      intervalMs: ORPHAN_SCAN_INTERVAL_MS,
+      init: () => ({ allPages: null, offset: 0, orphans: [], startedAt: Date.now() }),
+      processChunk: scanOrphanPages,
+      onComplete: () => { debugLog("[Graph Hygiene] Orphan page scan complete"); },
+      onError: (err) => { debugLog("[Graph Hygiene] Orphan scan error:", err?.message); }
+    });
+  }
+  if (getSettingBool(extensionAPIRef, SETTINGS_KEYS.graphHygieneStaleLinkEnabled, false)) {
+    registerIdleTask({
+      id: "graph-hygiene-stale-links",
+      priority: 80,
+      intervalMs: STALE_LINK_SCAN_INTERVAL_MS,
+      init: () => ({ allBlocks: null, offset: 0, staleLinks: [], checkedUids: {}, checkedTitles: {}, startedAt: Date.now() }),
+      processChunk: scanStaleLinks,
+      onComplete: () => { debugLog("[Graph Hygiene] Stale link scan complete"); },
+      onError: (err) => { debugLog("[Graph Hygiene] Stale link scan error:", err?.message); }
     });
   }
 

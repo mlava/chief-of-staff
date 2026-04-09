@@ -556,6 +556,38 @@ export function buildSettingsConfig(extensionAPI) {
         }
       },
       {
+        id: deps.SETTINGS_KEYS.graphHygieneOrphansEnabled,
+        name: "Orphan Page Detection",
+        description: "Periodically scan for pages with zero incoming references. Results available via cos_get_orphan_pages tool and logged to [[Chief of Staff/Graph Hygiene]]. Runs during idle time only.",
+        action: {
+          type: "switch",
+          value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.graphHygieneOrphansEnabled, false),
+          onChange: () => {
+            setTimeout(() => {
+              if (typeof deps.onGraphHygieneOrphansToggle === "function") {
+                deps.onGraphHygieneOrphansToggle(deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.graphHygieneOrphansEnabled, false));
+              }
+            }, 100);
+          }
+        }
+      },
+      {
+        id: deps.SETTINGS_KEYS.graphHygieneStaleLinkEnabled,
+        name: "Stale Link Detection",
+        description: "Periodically scan for broken block references ((uid)) and page references [[Title]] pointing to deleted content. Results available via cos_get_stale_links tool and logged to [[Chief of Staff/Graph Hygiene]]. Runs during idle time only.",
+        action: {
+          type: "switch",
+          value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.graphHygieneStaleLinkEnabled, false),
+          onChange: () => {
+            setTimeout(() => {
+              if (typeof deps.onGraphHygieneStaleLinkToggle === "function") {
+                deps.onGraphHygieneStaleLinkToggle(deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.graphHygieneStaleLinkEnabled, false));
+              }
+            }, 100);
+          }
+        }
+      },
+      {
         id: deps.SETTINGS_KEYS.evalEnabled,
         name: "Post-Run Evaluation",
         description: "Automatic quality scoring after each agent interaction using an LLM judge. Produces 1-5 rubric scores plus binary pass/fail checks. Low scores or failed checks are routed to [[Chief of Staff/Review Queue]]. Adds roughly $0.001–0.003 per evaluated run.",
