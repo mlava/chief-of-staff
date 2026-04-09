@@ -964,6 +964,8 @@ export function isExternalDataToolCall(toolName) {
     upper === "COS_UPDATE_MEMORY" ||
     upper === "COS_GET_SKILL" ||
     upper === "COS_GET_CURRENT_TIME" ||
+    upper === "COS_GET_ORPHAN_PAGES" ||
+    upper === "COS_GET_STALE_LINKS" ||
     upper === "ROAM_SEARCH" ||
     upper === "ROAM_GET_PAGE" ||
     upper === "ROAM_GET_DAILY_PAGE" ||

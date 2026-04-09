@@ -1654,6 +1654,49 @@ export async function tryRunDeterministicAskIntent(prompt, context = {}) {
     }
   }
 
+  // ── Orphan pages ───────────────────────────────────────────────
+  // "orphan pages", "find orphan pages", "unlinked pages", "pages with no references"
+  // MUST come before the search route below — "find orphan pages" matches both
+  const orphanPagesMatch = /^(?:(?:find|show|list|get|any|do\s+i\s+have)\s+)?(?:orphan(?:ed)?\s+pages?|pages?\s+with\s+(?:no|zero)\s+(?:references?|links?|backlinks?)|unlinked\s+pages?|unreferenced\s+pages?)(?:\s+in\s+(?:my\s+)?(?:graph|roam))?\s*[?.!]*$/i.test(prompt);
+  if (orphanPagesMatch && typeof deps.getOrphanPagesResult === "function") {
+    deps.debugLog("[Chief flow] Deterministic route matched: orphan_pages");
+    const result = deps.getOrphanPagesResult();
+    if (!result) {
+      return deps.publishAskResponse(prompt, "The orphan page scan hasn't run yet. It runs during idle time — check back in a few minutes, or enable it in Settings > Automatic Actions.", assistantName, suppressToasts);
+    }
+    const total = result.orphanCount || result.pages.length;
+    const lines = [`**Orphan Pages** (scanned ${new Date(result.scannedAt).toLocaleString()})\n`];
+    lines.push(`Found ${total} page${total === 1 ? "" : "s"} with zero incoming references out of ${result.totalPages} total pages.\n`);
+    for (const p of result.pages.slice(0, 30)) {
+      lines.push(`- [[${p.title}]] (${p.blockCount} block${p.blockCount === 1 ? "" : "s"})`);
+    }
+    if (total > 30) lines.push(`\n…and ${total - 30} more. Use \`cos_get_orphan_pages\` for the full list.`);
+    return deps.publishAskResponse(prompt, lines.join("\n"), assistantName, suppressToasts);
+  }
+
+  // ── Stale / broken links ──────────────────────────────────────
+  // "stale links", "broken links", "find broken references", "dangling refs"
+  // MUST come before the search route below — "find broken references" matches both
+  const staleLinksMatch = /^(?:(?:find|show|list|get|any|do\s+i\s+have)\s+)?(?:stale|broken|dead|dangling)\s+(?:links?|references?|refs?)(?:\s+in\s+(?:my\s+)?(?:graph|roam))?\s*[?.!]*$/i.test(prompt);
+  if (staleLinksMatch && typeof deps.getStaleLinkResult === "function") {
+    deps.debugLog("[Chief flow] Deterministic route matched: stale_links");
+    const result = deps.getStaleLinkResult();
+    if (!result) {
+      return deps.publishAskResponse(prompt, "The stale link scan hasn't run yet. It runs during idle time — check back in a few minutes, or enable it in Settings > Automatic Actions.", assistantName, suppressToasts);
+    }
+    const lines = [`**Stale Links** (scanned ${new Date(result.scannedAt).toLocaleString()})\n`];
+    lines.push(`Found ${result.links.length} broken reference${result.links.length === 1 ? "" : "s"} across ${result.totalBlocks} blocks scanned.\n`);
+    for (const link of result.links.slice(0, 30)) {
+      if (link.type === "block_ref") {
+        lines.push(`- \`((${link.targetUid}))\` in block ((${link.sourceUid})) — block no longer exists`);
+      } else {
+        lines.push(`- \`[[${link.targetTitle}]]\` in block ((${link.sourceUid})) — page no longer exists`);
+      }
+    }
+    if (result.links.length > 30) lines.push(`\n…and ${result.links.length - 30} more. Use \`cos_get_stale_links\` for the full list.`);
+    return deps.publishAskResponse(prompt, lines.join("\n"), assistantName, suppressToasts);
+  }
+
   // ── Deterministic search ─────────────────────────────────────────
   // "search for X", "find X in my graph", "search X", "look up X", "search roam for X"
   const searchMatch = prompt.match(/^(?:search\s+(?:for|roam\s+for|my\s+(?:graph|roam)\s+for)?|find|look\s*up)\s+(.+?)(?:\s+in\s+(?:my\s+)?(?:graph|roam))?\s*[?.!]*$/i);

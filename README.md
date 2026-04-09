@@ -24,6 +24,7 @@ https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 - **Dry-run mode** — simulate any mutating operation before it executes. Useful for reviewing what the agent would do before committing.
 - **Linked refs filtering** — automatically removes Chief of Staff namespace pages from the linked references section of every non-COS page you visit, keeping your graph tidy. Filters are merged with your existing manual filters (never overwritten) and applied once per page per session, so manual changes are respected. Enabled by default; toggle off in Advanced settings if needed.
 - **Correction capture** — opt-in background feature that detects when you edit COS outputs (briefings, pinned responses) and records the differences on `[[Chief of Staff/Corrections]]`. Corrections are cross-referenced with the Review Queue for feedback loop closure. Runs during idle time only — enable in Settings → Show Automatic Actions.
+- **Graph hygiene scans** — opt-in background scans that detect orphan pages (pages with zero incoming references) and stale links (block/page references pointing to deleted content). Results are cached in memory and logged to `[[Chief of Staff/Graph Hygiene]]`. Ask `orphan pages` or `broken links` for instant results, or use the `cos_get_orphan_pages` / `cos_get_stale_links` tools. Runs during idle time only — enable in Settings → Show Automatic Actions.
 - **Post-run evaluation** — opt-in LLM-as-judge that scores each agent interaction on task completion, factual grounding, and safety (1–5 rubric) plus five deterministic binary pass/fail checks (e.g. "were all claims tool-backed?", "did the response answer the question?"). Skills can define custom `Rubric:` criteria that are evaluated alongside the standard checks. Low scores, failed checks, or failed rubric items route to `[[Chief of Staff/Review Queue]]` with exactly what failed. Enable in Settings → Show Automatic Actions.
 - **Skill constraints** — skills can define structured behavioural boundaries via a `Constraints:` field with four quadrants: Must Do (non-negotiable requirements), Must Not Do (hard prohibitions), Prefer (soft guidance), and Escalate (stop and ask the user). Injected as binding system instructions for each skill run.
 - **LLM Council** — multi-model review panel that stress-tests a question through independent analysis, anonymous peer critique with robustness scores, and a chair's decisive synthesis. Results written to `[[LLM Council]]` page with cost breakdown. Ask "council: should I use X or Y?" or use the `cos_llm_council` tool.
@@ -395,6 +396,8 @@ Many common tasks are handled by a **deterministic router** that matches your in
 | `recent edits` | Same |
 | `backlinks for [[Page]]` | What links to a page |
 | `stats for [[Page]]` | Created/edited dates, block/word/reference counts |
+| `orphan pages` | Pages with zero incoming references (requires Orphan Page Detection enabled) |
+| `broken links` | Block/page refs pointing to deleted content (requires Stale Link Detection enabled) |
 
 ### Sidebar & UI
 

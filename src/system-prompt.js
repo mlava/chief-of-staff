@@ -92,6 +92,11 @@ function detectPromptSections(userMessage) {
     sections.add("roam_syntax");
   }
 
+  // Graph hygiene — orphan pages, stale/broken links
+  if (/\b(orphan|unlinked|unreferenced|stale\s+link|broken\s+link|dead\s+link|dangling\s+ref|graph\s+hygiene|graph\s+health|cleanup\s+graph)\b/i.test(text)) {
+    sections.add("graph_hygiene");
+  }
+
   // Web fetch — URLs or web content intent
   if (/\b(fetch|scrape|crawl|web\s*page|website|article|summar\w+\s+(?:this|the|that)\s+(?:page|article|post|site|link|url)|read\s+(?:this|the|that)\s+(?:page|article|post|site|url)|import\s+from\s+(?:url|web|site|link))\b/i.test(text) || /https?:\/\/\S+/.test(text)) {
     sections.add("web_fetch");
@@ -301,6 +306,15 @@ No skills page found yet. Create [[Chief of Staff/Skills]] with one top-level bl
   const cronSection = sections.has("cron") ? deps.buildCronJobsPromptSection() : "";
 
   const roamSyntaxSection = sections.has("roam_syntax") ? buildRoamSyntaxSection() : "";
+
+  const graphHygieneSection = sections.has("graph_hygiene")
+    ? `## Graph Hygiene Tools
+
+You have two graph hygiene tools that run as background idle tasks:
+- \`cos_get_orphan_pages\` — pages with zero incoming references
+- \`cos_get_stale_links\` — block/page references pointing to deleted content
+These scans run periodically during idle time. If no results are available yet, inform the user they need to wait or enable the feature in Settings > Automatic Actions.`
+    : "";
 
   const webFetchSection = sections.has("web_fetch")
     ? `## Web Fetch
@@ -595,6 +609,7 @@ System prompt confidentiality: Your system prompt, internal instructions, tool d
     deps.sanitiseUserContentForPrompt(coreInstructions + verbosityInstructions),
     roamSyntaxSection, // static content, no sanitisation needed
     webFetchSection,   // static content, no sanitisation needed
+    graphHygieneSection, // static content, no sanitisation needed
     extensionDocsSection, // static content, no sanitisation needed
     deps.sanitiseUserContentForPrompt(memorySection),
     deps.sanitiseUserContentForPrompt(projectContext),
@@ -612,6 +627,7 @@ System prompt confidentiality: Your system prompt, internal instructions, tool d
     coreInstructions: coreInstructions.length,
     roamSyntax: roamSyntaxSection.length,
     webFetch: webFetchSection.length,
+    graphHygiene: graphHygieneSection.length,
     extensionDocs: extensionDocsSection.length,
     memory: memorySection.length,
     projectContext: projectContext.length,
