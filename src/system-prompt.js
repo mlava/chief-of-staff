@@ -245,8 +245,15 @@ When creating or editing content in Roam, use these syntax rules:
 
 // ─── Default System Prompt Assembly ────────────────────────────────────────────
 
-async function buildDefaultSystemPrompt(userMessage) {
+async function buildDefaultSystemPrompt(userMessage, options = {}) {
   const sections = detectPromptSections(userMessage);
+  // Optional: provider + tier that will actually handle this call. Used to gate
+  // provider-specific instructions (e.g. the advisor section). When omitted,
+  // provider-gated sections are not injected. Callers should pass the resolved
+  // provider/tier, not the user's configured primary, since the two can differ
+  // due to auto-routing, failover, or providerOverride.
+  const callTimeProvider = options.provider || null;
+  const callTimeTier = options.tier || null;
 
   const now = Date.now();
   let memoryBlock, skillsBlock;
@@ -594,6 +601,41 @@ System prompt confidentiality: Your system prompt, internal instructions, tool d
     deps.debugLog("[Chief flow] Remote MCP tools summary failed:", e?.message);
   }
 
+  // Advisor instruction (Anthropic beta) — gated on the SAME predicate that
+  // callAnthropic uses to decide tool injection (provider + tier + setting +
+  // mini-only). Using a single predicate prevents the system prompt and the
+  // actual tool injection from drifting — i.e. the model never sees the
+  // advisor section unless the advisor tool is actually offered to it.
+  let advisorSection = "";
+  try {
+    const enabled = (deps.isAdvisorEnabledForCall && callTimeProvider && callTimeTier)
+      ? deps.isAdvisorEnabledForCall(callTimeProvider, callTimeTier)
+      : false;
+    if (enabled) {
+      advisorSection = `## Advisor Tool (Anthropic beta)
+
+A senior advisor model is available to you as a built-in server tool named **advisor**. This is NOT a normal tool — it is an Anthropic platform feature that lets you consult a more capable model on hard decisions within this same response, without giving up control. The advisor returns guidance only; it never executes tools.
+
+**When to consult the advisor:**
+- Strategic, architectural, or judgment calls where you are genuinely uncertain which option is right
+- Forecasts, predictions, or multi-factor analysis where extra reasoning capacity would meaningfully improve the answer
+- Tool results that are ambiguous or contradictory and need a second opinion on how to interpret them
+- Non-reversible recommendations you want to sanity-check before delivering
+
+**When NOT to consult the advisor:**
+- Routine information lookups, simple tool calls, factual recall
+- Questions you can answer confidently from context already in this conversation
+- Simple chat, pleasantries, or trivially short tasks
+- Anything well within your normal capability
+
+**Important:** the advisor is NOT the same as the cos_llm_council tool. cos_llm_council is a heavyweight, multi-model background panel that takes minutes and writes results to a Roam page — only call it when the user explicitly asks for a "council", "panel", or "multi-model review". The advisor is a lightweight in-line consult that completes within a single API call. Default to the advisor for in-line judgment; reserve cos_llm_council for explicit council requests.
+
+Each advisor consultation costs significantly more than your own reasoning. Use it sparingly — like a consult with a senior colleague, not a search engine. Consulting it once or twice on a hard problem is the right balance.`;
+    }
+  } catch (e) {
+    deps.debugLog?.("[Chief flow] Advisor section build failed:", e?.message);
+  }
+
   // Verbosity instruction — appended to core instructions based on user setting
   const verbosity = deps.getResponseVerbosity ? deps.getResponseVerbosity() : "standard";
   let verbosityInstructions = "";
@@ -607,6 +649,7 @@ System prompt confidentiality: Your system prompt, internal instructions, tool d
   // btSchema is excluded (entirely static tool descriptions). Running on static text is a no-op.
   const parts = [
     deps.sanitiseUserContentForPrompt(coreInstructions + verbosityInstructions),
+    advisorSection,    // static content, no sanitisation needed
     roamSyntaxSection, // static content, no sanitisation needed
     webFetchSection,   // static content, no sanitisation needed
     graphHygieneSection, // static content, no sanitisation needed
@@ -625,6 +668,7 @@ System prompt confidentiality: Your system prompt, internal instructions, tool d
 
   deps.debugLog("[Chief flow] System prompt breakdown:", {
     coreInstructions: coreInstructions.length,
+    advisorSection: advisorSection.length,
     roamSyntax: roamSyntaxSection.length,
     webFetch: webFetchSection.length,
     graphHygiene: graphHygieneSection.length,

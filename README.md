@@ -22,6 +22,7 @@ https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 - **Scheduled jobs** — create recurring or one-shot scheduled tasks (cron expressions, intervals, or specific times) that the assistant runs automatically. Multi-tab safe via leader election.
 - **Self-healing tool calls** — if the LLM claims to have done something without actually doing it, the extension detects the hallucination, retries with the correct tool, and auto-escalates to a smarter model if needed. No user intervention required.
 - **Three model tiers with automatic routing** — most requests use a fast, cheap model. Append `/power` or `/ludicrous` to your message to force a more capable tier, or let the extension auto-escalate based on request complexity. You can also force a specific provider with `/claude`, `/gemini`, `/openai`, `/mistral`, or `/groq`. See [How tiers work](#how-tiers-work) for details.
+- **Anthropic advisor tool (beta, opt-in)** — when running on Anthropic, the cheap executor (Haiku/Sonnet) can consult Opus on hard judgment calls within a single API call without giving up control of the agent loop. The advisor returns guidance only; it never executes tools. Off by default; enable in Advanced settings. See [Anthropic advisor tool](#anthropic-advisor-tool) for details.
 - **Dry-run mode** — simulate any mutating operation before it executes. Useful for reviewing what the agent would do before committing.
 - **Linked refs filtering** — automatically removes Chief of Staff namespace pages from the linked references section of every non-COS page you visit, keeping your graph tidy. Filters are merged with your existing manual filters (never overwritten) and applied once per page per session, so manual changes are respected. Enabled by default; toggle off in Advanced settings if needed.
 - **Correction capture** — opt-in background feature that detects when you edit COS outputs (briefings, pinned responses) and records the differences on `[[Chief of Staff/Corrections]]`. Corrections are cross-referenced with the Review Queue for feedback loop closure. Runs during idle time only — enable in Settings → Show Automatic Actions.
@@ -113,6 +114,24 @@ Most of the time, you don't need to think about tiers. A composite scoring syste
 #### Automatic failover
 
 If your primary provider is unavailable or returns an error, the assistant automatically tries the next available provider in the chain. Each failed provider enters a 60-second cooldown before being retried. If all power-tier providers fail and you have **Ludicrous mode failover** enabled in settings, the assistant escalates to the most capable (and most expensive) models as a last resort. This means configuring API keys for multiple providers gives you resilience — the assistant keeps working even if one provider has an outage.
+
+#### Anthropic advisor tool
+
+When running on Anthropic, Chief of Staff supports the [advisor tool](https://www.claude.com/blog/the-advisor-strategy) — an Anthropic beta server tool (`advisor_20260301`) that lets a cheap executor model consult a more capable advisor model on hard judgment calls within a single API call. The executor stays in control of the agent loop and never gives it up; the advisor returns strategic guidance only and cannot execute tools.
+
+**Why it matters.** A typical Chief of Staff agent run handles many simple iterations — searching, fetching, formatting, listing — at very low cost on Haiku. Most of those iterations don't need high-end reasoning. A few moments do: strategic decisions, ambiguous tool results, judgment calls about what to do next. The advisor pattern lets the executor pause those specific moments to consult Opus, then resume. You get most of the cheap-iteration savings while preserving quality on the hard parts. Anthropic's published benchmarks show meaningful quality improvements at lower overall cost than a single-tier Sonnet baseline.
+
+**How to enable it.** In **Settings → Show Advanced Settings**:
+
+- **Anthropic Advisor Tool (Beta)** — master toggle. Off by default.
+- **Advisor Max Uses Per Run** — caps how many times the executor can consult the advisor per agent run. Default `2`. Each consultation calls Opus and is billed at Opus rates.
+- **Restrict Advisor to Mini Tier** — when on (the default), the advisor is only injected on mini-tier runs, where the cost-quality delta is largest. Toggle off if you also want it available on power tier.
+
+**Provider scope.** Anthropic only. Gemini, OpenAI, Mistral, and Groq are unaffected — they continue to use the existing tier and failover strategy. Eval-judge, intent classifier, and other zero-tool deterministic Anthropic calls are also exempt — the advisor only fires when there are real tools in the request.
+
+**When the model decides to consult.** The system prompt instructs the model to consult the advisor sparingly — for genuinely uncertain strategic decisions, ambiguous tool results, forecasts, and judgment calls — and *not* for routine information lookups, simple tool calls, or tasks within its normal capability. In practice, the executor self-selects appropriately: it consults on architectural questions but not on derivative follow-ups or pure tool orchestration like daily briefings.
+
+**Cost attribution.** When the advisor is consulted, its tokens are tracked separately at Opus rates. The Activity tab and persistent audit log show the model label as `claude-haiku-4-5-20251001 + claude-opus-4-6 advisor ×N` for runs that used the advisor, with the token total combining executor and advisor tokens. Cost is the sum of both. The session cost indicator in the chat panel header includes advisor cost in the same line.
 
 > **Security note:** API keys are stored in Roam Depot's settings store (browser IndexedDB). They are never transmitted except directly to the LLM provider's API endpoint (via Roam's built-in CORS proxy when available). Do not use shared or public Roam graphs if you store API keys here.
 

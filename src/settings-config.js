@@ -57,6 +57,7 @@ function getComposioSettingOrBlank(extensionAPI, key) {
 export function buildSettingsConfig(extensionAPI) {
   const showIntegrations = ensureSettingBool(extensionAPI, SETTINGS_SHOW_INTEGRATIONS, false);
   const showAdvanced = ensureSettingBool(extensionAPI, SETTINGS_SHOW_ADVANCED, false);
+  const advisorEnabled = ensureSettingBool(extensionAPI, deps.SETTINGS_KEYS.advisorEnabled, false);
 
   // --- Tier 1: Essential (always visible) -----------------------------------
   const settings = [
@@ -519,8 +520,41 @@ export function buildSettingsConfig(extensionAPI) {
           type: "switch",
           value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.intentGateEnabled, false)
         }
+      },
+      {
+        id: deps.SETTINGS_KEYS.advisorEnabled,
+        name: "Anthropic Advisor Tool (Beta)",
+        description: "When running on Anthropic, lets the executor (Haiku/Sonnet) consult Opus on hard decisions within a single API call. Costs more per consultation but typically reduces overall agent loop cost and improves quality. Anthropic-only.",
+        action: {
+          type: "switch",
+          value: advisorEnabled,
+          onChange: () => rebuildSettingsPanel(extensionAPI),
+        }
       }
     );
+    if (advisorEnabled) {
+      settings.push(
+        {
+          id: deps.SETTINGS_KEYS.advisorMaxUses,
+          name: "Advisor Max Uses Per Run",
+          description: "Maximum number of advisor consultations per agent run. 1–5 recommended. Each consultation calls Opus and is billed at Opus rates.",
+          action: {
+            type: "input",
+            value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.advisorMaxUses, "2"),
+            placeholder: "2"
+          }
+        },
+        {
+          id: deps.SETTINGS_KEYS.advisorMiniOnly,
+          name: "Restrict Advisor to Mini Tier",
+          description: "When on, advisor is only injected on mini tier runs (the highest-leverage case). Turn off to also use it on power tier — smaller cost saving but still useful.",
+          action: {
+            type: "switch",
+            value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.advisorMiniOnly, true)
+          }
+        }
+      );
+    }
   }
 
   // --- Tier 4 toggle: Automatic Actions ----------------------------------------

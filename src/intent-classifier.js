@@ -153,14 +153,22 @@ const VALID_RISK_VALUES = new Set(["low", "medium", "high"]);
  * @returns {object|null}
  */
 function parseClassificationResponse(text) {
-  const str = String(text || "").trim();
+  let str = String(text || "").trim();
 
-  // Try direct JSON parse first (clean response)
+  // Strip markdown code fences if the model wrapped its JSON.
+  // Haiku in particular sometimes returns ```json\n{...}\n``` despite
+  // being instructed to return raw JSON. Strip the fence then parse.
+  const fenceMatch = str.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?\s*```\s*$/i);
+  if (fenceMatch) {
+    str = fenceMatch[1].trim();
+  }
+
+  // Try direct JSON parse first (clean response, or de-fenced)
   let parsed = null;
   try {
     parsed = JSON.parse(str);
   } catch (_) {
-    // Fall back to extractBalancedJsonObjects
+    // Fall back to extractBalancedJsonObjects (handles stray prose/preamble)
     const objects = deps.extractBalancedJsonObjects(str);
     if (objects.length > 0) {
       parsed = objects[0].parsed;

@@ -234,7 +234,18 @@ export async function persistAuditLogEntry(trace, userPrompt, options = {}) {
           return `${tc.name}${dur}${err}`;
         }).join(", ")
       : "none";
-    const tokens = (trace.totalInputTokens || 0) + (trace.totalOutputTokens || 0);
+    // Advisor consultation accounting (Anthropic beta) — combine executor and advisor
+    // tokens into the displayed total, and surface the advisor in the model label so
+    // the Activity tab doesn't misattribute Opus cost to the executor.
+    const advisorCalls = trace.advisorCalls || 0;
+    const advisorInputTokens = trace.advisorInputTokens || 0;
+    const advisorOutputTokens = trace.advisorOutputTokens || 0;
+    const tokens = (trace.totalInputTokens || 0) + (trace.totalOutputTokens || 0)
+      + advisorInputTokens + advisorOutputTokens;
+    const baseModel = trace.model || "unknown";
+    const modelLabel = (advisorCalls > 0 && trace.advisorModel)
+      ? `${baseModel} + ${trace.advisorModel} advisor ×${advisorCalls}`
+      : baseModel;
     const cost = typeof trace.cost === "number" ? `$${trace.cost.toFixed(4)}` : "";
     const outcome = trace.capExceeded ? "cap-exceeded"
       : trace.error ? `error: ${String(trace.error).slice(0, 80).replace(/\[\[/g, "⟦").replace(/\]\]/g, "⟧").replace(/\{\{/g, "⦃⦃").replace(/\}\}/g, "⦄⦄").replace(/\(\(/g, "⦅⦅").replace(/\)\)/g, "⦆⦆")}`
@@ -245,7 +256,7 @@ export async function persistAuditLogEntry(trace, userPrompt, options = {}) {
       .replace(/\(\(/g, "⦅⦅").replace(/\)\)/g, "⦆⦆");
 
     const skillLine = skillName ? `\nSkill: ${String(skillName).slice(0, 60)}` : "";
-    const block = `[[${dateStr}]] **${trace.model || "unknown"}** `
+    const block = `[[${dateStr}]] **${modelLabel}** `
       + `(${trace.iterations || 0} iter, ${durationSec}s, ${tokens} tok${cost ? ", " + cost : ""}) `
       + `— ${outcome}`
       + skillLine
