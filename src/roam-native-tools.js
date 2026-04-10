@@ -1021,11 +1021,26 @@ export function getRoamNativeTools() {
           const available = entries.map((e) => e.title).join(", ");
           return JSON.stringify({ error: `Skill "${name}" not found. Available: ${available}` });
         }
+        // #113 — Pre-flight acceptance criteria. When the agent loads a skill via this
+        // tool (rather than the deterministic-router skill path), surface any Acceptance:
+        // criteria as a binding pre-flight section so the model treats them as required.
+        let acceptanceCriteria = [];
+        try {
+          if (typeof deps.parseSkillAcceptance === "function") {
+            acceptanceCriteria = deps.parseSkillAcceptance(entry.content) || [];
+          }
+        } catch (err) {
+          deps.debugLog?.("[cos_get_skill] parseSkillAcceptance error:", err?.message);
+        }
         return JSON.stringify({
           skill_name: entry.title,
           block_uid: entry.uid || null,
           content: entry.content,
-          children_content: entry.childrenContent || ""
+          children_content: entry.childrenContent || "",
+          acceptance_criteria: acceptanceCriteria.length > 0 ? acceptanceCriteria : undefined,
+          pre_flight_notice: acceptanceCriteria.length > 0
+            ? `BINDING PRE-FLIGHT REQUIREMENTS for skill "${entry.title}": Your final output MUST satisfy ALL of the following before responding. These are not suggestions — treat them as the acceptance tests for this run.\n${acceptanceCriteria.map(a => `- ${a}`).join("\n")}`
+            : undefined
         });
       }
     },

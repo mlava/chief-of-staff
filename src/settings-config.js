@@ -665,6 +665,20 @@ export function buildSettingsConfig(extensionAPI) {
     );
   }
 
+  // Staleness detection (#112) — applies to all skills and cron jobs, not gated on auto-research.
+  settings.push(
+    {
+      id: deps.SETTINGS_KEYS.skillStalenessDays,
+      name: "Staleness Warning Threshold (days)",
+      description: "Skills and scheduled jobs not reviewed within this many days will trigger a warning toast at startup. Use cos_review_skill / cos_review_cron to reset the timer. Set to 0 to disable staleness warnings. Default: 30.",
+      action: {
+        type: "input",
+        value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.skillStalenessDays, "30"),
+        placeholder: "30"
+      }
+    }
+  );
+
   return {
     tabTitle: "Chief of Staff",
     settings
