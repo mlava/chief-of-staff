@@ -139,7 +139,9 @@ import {
   callLlm,
   filterToolsByRelevance,
   getPromotedServerNames,
-  VALID_LLM_PROVIDERS
+  VALID_LLM_PROVIDERS,
+  isAdvisorEnabledInSettings,
+  isAdvisorEnabledForCall
 } from "./llm-providers.js";
 import {
   initConversation,
@@ -345,7 +347,10 @@ const SETTINGS_KEYS = {
   skillAutoresearchPowerMutations: "skill-autoresearch-power-mutations",
   skillStalenessDays: "skill-staleness-days",
   stalenessToastLastShownAt: "staleness-toast-last-shown-at",
-  stalenessGrandfatherAt: "staleness-grandfather-at"
+  stalenessGrandfatherAt: "staleness-grandfather-at",
+  advisorEnabled: "cos-advisor-enabled",
+  advisorMaxUses: "cos-advisor-max-uses",
+  advisorMiniOnly: "cos-advisor-mini-only"
 };
 const TOOLS_SCHEMA_VERSION = 3;
 const AUTH_POLL_INTERVAL_MS = 9000;
@@ -396,6 +401,11 @@ const LLM_MODEL_COSTS = {
   "mistral-large-2512": [0.50, 1.50],
   "llama-3.3-70b-versatile": [0.59, 0.79]
 };
+// Anthropic advisor tool (beta) — model invoked when the executor consults the advisor.
+// Pinned to Opus to maximise the quality delta over the executor (Haiku/Sonnet).
+const ANTHROPIC_ADVISOR_MODEL = "claude-opus-4-6";
+const ANTHROPIC_ADVISOR_BETA_HEADER = "advisor-tool-2026-03-01";
+const ANTHROPIC_ADVISOR_TOOL_TYPE = "advisor_20260301";
 // Map skill shorthand source names → actual LLM tool names
 const SOURCE_TOOL_NAME_MAP = {
   "bt_search": "roam_bt_search_tasks",
@@ -3585,7 +3595,7 @@ function getCosIntegrationTools() {
     {
       name: "cos_llm_council",
       isMutating: false,
-      description: "Run an LLM Council — a multi-model review panel that stress-tests a question through independent analysis (Phase 1), anonymous peer critique with robustness scores (Phase 2), and a Chair's decisive synthesis (Phase 3). Results are written to the [[LLM Council]] page. Runs in the background.",
+      description: "Run an LLM Council — a HEAVYWEIGHT background panel that runs the same question through 2-4 different LLM providers in parallel, then has them peer-review each other and a Chair synthesises the result. Takes minutes, costs ~$0.50-$2.00 per run, writes results to a Roam page. ONLY call this when the user EXPLICITLY asks for a 'council', 'panel', 'multi-model review', 'multi-LLM analysis', or names two or more specific providers (e.g. 'compare what Claude and GPT think about X'). Do NOT call this for generic 'advisor', 'advice', 'second opinion', 'expert opinion', or 'help me decide' requests — those should be answered directly using your own reasoning, or via the in-line advisor server tool if available.",
       input_schema: {
         type: "object",
         properties: {
@@ -5739,6 +5749,9 @@ function onload({ extensionAPI }) {
   if (extensionAPI?.settings?.get?.(SETTINGS_KEYS.skillAutoresearchToolCache) === undefined) {
     extensionAPI.settings.set(SETTINGS_KEYS.skillAutoresearchToolCache, true);
   }
+  if (extensionAPI?.settings?.get?.(SETTINGS_KEYS.advisorMiniOnly) === undefined) {
+    extensionAPI.settings.set(SETTINGS_KEYS.advisorMiniOnly, true);
+  }
 
   initUsageTracking({
     SETTINGS_KEYS,
@@ -6026,6 +6039,9 @@ function onload({ extensionAPI }) {
     LLM_STREAM_CHUNK_TIMEOUT_MS,
     LLM_RESPONSE_TIMEOUT_MS,
     STANDARD_MAX_OUTPUT_TOKENS,
+    ANTHROPIC_ADVISOR_MODEL,
+    ANTHROPIC_ADVISOR_BETA_HEADER,
+    ANTHROPIC_ADVISOR_TOOL_TYPE,
   });
   initChatPanel({
     escapeHtml,
@@ -6327,6 +6343,10 @@ function onload({ extensionAPI }) {
     getBtProjectsCache: () => btProjectsCache,
     setBtProjectsCache: (v) => { btProjectsCache = v; },
     getResponseVerbosity,
+    isAdvisorEnabledInSettings,
+    isAdvisorEnabledForCall,
+    getLlmProvider,
+    getExtensionAPIRef: () => extensionAPIRef,
   });
   initDeterministicRouter({
     debugLog,

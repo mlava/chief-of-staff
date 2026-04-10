@@ -130,6 +130,38 @@ export function getModelCostRates(model) {
   return { inputPerM: 2.5, outputPerM: 10.0 };
 }
 
+// ── Anthropic advisor tool (beta) ───────────────────────────────────────────
+// Decides whether to inject the advisor server tool into a given Anthropic call.
+// Anthropic-only; off by default; capped at mini tier unless the user opts in.
+export function isAdvisorEnabledForCall(provider, tier) {
+  if (provider !== "anthropic") return false;
+  const ext = deps.extensionAPIRef;
+  if (!ext) return false;
+  if (!deps.getSettingBool(ext, deps.SETTINGS_KEYS.advisorEnabled, false)) return false;
+  // Top tier already runs Opus — no advisor to consult.
+  if (tier === "ludicrous") return false;
+  // Optionally restrict to mini tier only.
+  const miniOnly = deps.getSettingBool(ext, deps.SETTINGS_KEYS.advisorMiniOnly, true);
+  if (miniOnly && tier !== "mini") return false;
+  return true;
+}
+
+export function getAdvisorMaxUses() {
+  const ext = deps.extensionAPIRef;
+  const raw = ext ? deps.getSettingString(ext, deps.SETTINGS_KEYS.advisorMaxUses, "2") : "2";
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 && n <= 10 ? n : 2;
+}
+
+// True iff the advisor flag is on (regardless of provider/tier).
+// Used by system-prompt.js to decide whether to include the advisor instruction.
+// Cheaper than isAdvisorEnabledForCall because it doesn't need a tier value.
+export function isAdvisorEnabledInSettings() {
+  const ext = deps.extensionAPIRef;
+  if (!ext) return false;
+  return !!deps.getSettingBool(ext, deps.SETTINGS_KEYS.advisorEnabled, false);
+}
+
 // ── Retry & Error Classification ─────────────────────────────────────────────
 
 export function shouldRetryLlmStatus(status) {
@@ -350,29 +382,65 @@ export async function callAnthropic(apiKey, model, system, messages, tools, opti
   const scrubbed = isPiiScrubEnabled() ? scrubPiiFromMessages(messages, { tools }) : messages;
   const safeSystem = deps.sanitiseLlmPayloadText(isPiiScrubEnabled() ? scrubPiiFromText(system, { skipEmail }) : system);
   const safeMessages = deps.sanitiseLlmMessages(scrubbed);
+
+  // Advisor tool injection (Anthropic beta) — gated by setting + tier + non-empty
+  // tools array. An empty tools array means this is a deterministic single-shot
+  // scoring/classification call (eval judge, intent classifier), not an agentic
+  // loop — those calls don't benefit from the advisor and shouldn't pay Opus rates.
+  const tier = options.tier || "mini";
+  const useAdvisor = tools.length > 0 && isAdvisorEnabledForCall("anthropic", tier);
+  const advisorMaxUses = useAdvisor ? getAdvisorMaxUses() : 0;
+
+  const headers = {
+    "Content-Type": "application/json",
+    "x-api-key": apiKey,
+    "anthropic-version": "2023-06-01",
+    "anthropic-dangerous-direct-browser-access": "true"
+  };
+  if (useAdvisor) {
+    headers["anthropic-beta"] = deps.ANTHROPIC_ADVISOR_BETA_HEADER;
+  }
+
+  // Build tools array. Last NORMAL tool gets cache_control; advisor tool is appended after
+  // (it's a server-tool with a different shape and shouldn't carry cache_control).
+  const mappedTools = tools.map((tool, i) => ({
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.input_schema,
+    ...(i === tools.length - 1 ? { cache_control: { type: "ephemeral" } } : {})
+  }));
+  if (useAdvisor) {
+    mappedTools.push({
+      type: deps.ANTHROPIC_ADVISOR_TOOL_TYPE,
+      name: "advisor",
+      model: deps.ANTHROPIC_ADVISOR_MODEL,
+      max_uses: advisorMaxUses
+    });
+    deps.debugLog("[advisor] tool injected", {
+      tier,
+      advisorModel: deps.ANTHROPIC_ADVISOR_MODEL,
+      maxUses: advisorMaxUses
+    });
+  }
+
+  // Bump max_tokens when advisor is in use — executor produces two output phases
+  // (pre-advisor reasoning + post-advisor synthesis), so the default cap is too tight.
+  const baseMaxTokens = options.maxOutputTokens || deps.STANDARD_MAX_OUTPUT_TOKENS;
+  const effectiveMaxTokens = useAdvisor ? Math.max(baseMaxTokens, 2000) : baseMaxTokens;
+
   return fetchLlmJsonWithRetry(
     LLM_API_ENDPOINTS.anthropic,
     {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true"
-      },
+      headers,
       body: JSON.stringify({
         model,
-        max_tokens: options.maxOutputTokens || deps.STANDARD_MAX_OUTPUT_TOKENS,
+        max_tokens: effectiveMaxTokens,
         system: [
           { type: "text", text: safeSystem, cache_control: { type: "ephemeral" } }
         ],
         messages: safeMessages,
-        tools: tools.map((tool, i) => ({
-          name: tool.name,
-          description: tool.description,
-          input_schema: tool.input_schema,
-          ...(i === tools.length - 1 ? { cache_control: { type: "ephemeral" } } : {})
-        }))
+        tools: mappedTools
       })
     },
     "Anthropic",

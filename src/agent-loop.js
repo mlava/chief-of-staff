@@ -252,7 +252,7 @@ export async function runAgentLoop(userMessage, options = {}) {
   const readOnlyAddendum = readOnlyTools
     ? `\n\nIMPORTANT: You are running in read-only mode (triggered by an inbox item). You can search, read, and gather information, but you CANNOT create, update, move, or delete any blocks, send emails, or perform any mutating actions. Summarise your findings clearly. The human will review and act on your summary. Do not cite or reference individual block UIDs in your response — omit any "(uid: ...)" or "Source block:" references entirely.`
     : "";
-  const system = (systemPrompt || await buildDefaultSystemPrompt(userMessage)) + readOnlyAddendum;
+  const system = (systemPrompt || await buildDefaultSystemPrompt(userMessage, { provider, tier: effectiveTier })) + readOnlyAddendum;
 
   // Build messages array: use carried-over messages (failover) or build fresh
   let messages;
@@ -531,7 +531,7 @@ export async function runAgentLoop(userMessage, options = {}) {
           usage: streamResult.usage
         };
       } else {
-        response = await callLlm(provider, apiKey, model, system, messages, tools, { signal: activeAgentAbortController?.signal, maxOutputTokens });
+        response = await callLlm(provider, apiKey, model, system, messages, tools, { signal: activeAgentAbortController?.signal, maxOutputTokens, tier: effectiveTier });
         const usage = response?.usage;
         if (usage) {
           const inputTokens = usage.prompt_tokens || usage.input_tokens || 0;
@@ -552,6 +552,45 @@ export async function runAgentLoop(userMessage, options = {}) {
           accumulateSessionTokens(totalInputTokens, outputTokens, callCost, cacheReadTokens, cacheCreationTokens);
           recordCostEntry(model, totalInputTokens, outputTokens, callCost);
           trace.cost = (trace.cost || 0) + callCost;
+
+          // Advisor cost attribution (Anthropic beta) — walk usage.iterations for
+          // advisor_message turns. Top-level usage.input_tokens/output_tokens are
+          // executor-only; advisor tokens are only present in the iterations array.
+          // Verified empirically: top-level totals == sum of iterations[type==message].
+          const advisorIterations = Array.isArray(usage?.iterations) ? usage.iterations : [];
+          let advisorInput = 0;
+          let advisorOutput = 0;
+          let advisorModelUsed = null;
+          let advisorCallsThisTurn = 0;
+          for (const iter of advisorIterations) {
+            if (iter?.type === "advisor_message" && iter.model) {
+              advisorInput += iter.input_tokens || 0;
+              advisorOutput += iter.output_tokens || 0;
+              advisorModelUsed = iter.model;
+              advisorCallsThisTurn += 1;
+            }
+          }
+          if (advisorInput > 0 || advisorOutput > 0) {
+            const advisorRates = getModelCostRates(advisorModelUsed);
+            const advisorCost = (advisorInput / 1_000_000) * advisorRates.inputPerM
+                              + (advisorOutput / 1_000_000) * advisorRates.outputPerM;
+            accumulateSessionTokens(advisorInput, advisorOutput, advisorCost, 0, 0);
+            recordCostEntry(advisorModelUsed, advisorInput, advisorOutput, advisorCost);
+            trace.cost = (trace.cost || 0) + advisorCost;
+            trace.advisorCost = (trace.advisorCost || 0) + advisorCost;
+            trace.advisorCalls = (trace.advisorCalls || 0) + advisorCallsThisTurn;
+            trace.advisorInputTokens = (trace.advisorInputTokens || 0) + advisorInput;
+            trace.advisorOutputTokens = (trace.advisorOutputTokens || 0) + advisorOutput;
+            trace.advisorModel = advisorModelUsed;
+            deps.debugLog("[advisor] consultation accounted", {
+              advisorModel: advisorModelUsed,
+              inputTokens: advisorInput,
+              outputTokens: advisorOutput,
+              calls: advisorCallsThisTurn,
+              costCents: (advisorCost * 100).toFixed(3)
+            });
+          }
+
           const _stu2 = getSessionTokenUsage();
           deps.debugLog("[Chief flow] API usage:", {
             inputTokens, outputTokens,

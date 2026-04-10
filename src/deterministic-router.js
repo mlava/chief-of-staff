@@ -1044,7 +1044,26 @@ async function runDeterministicSkillInvocation(intent, options = {}) {
     deps.debugLog(`[Chief flow] Skill "${skill.title}" acceptance criteria: ${acceptance.length} items`);
   }
 
-  const systemPrompt = `${await buildDefaultSystemPrompt(skillPrompt)}
+  // Parse optional per-skill budget constraints (Budget:, Tier:, Iterations:).
+  // Hoisted above the systemPrompt build so the resolved tier can be passed
+  // to buildDefaultSystemPrompt for provider-/tier-gated sections (advisor).
+  const parsedBudget = parseSkillBudget(skill.content);
+  const skillTier = parsedBudget.tier || "power";
+  const skillPowerMode = skillTier !== "mini";
+
+  // Resolve the user's primary provider so provider-gated sections (e.g. the
+  // Anthropic advisor tool) are correctly included for skills. The tier is
+  // also passed so the system prompt's gating matches the tool injection
+  // gating in callAnthropic — they share the same isAdvisorEnabledForCall
+  // predicate. Note: if the skill failover handler later switches to a
+  // different provider mid-run, the pre-built system prompt won't reflect
+  // that. The worst case is a soft hallucination (model offers a tool that
+  // doesn't exist on the failover provider) — same compromise as other
+  // provider-specific prompt sections.
+  const skillExtensionAPI = deps.getExtensionAPIRef();
+  const skillProvider = skillExtensionAPI ? deps.getLlmProvider(skillExtensionAPI) : null;
+
+  const systemPrompt = `${await buildDefaultSystemPrompt(skillPrompt, { provider: skillProvider, tier: skillTier })}
 
 ## Active Skill (Explicitly Requested)
 ${wrapUntrustedWithInjectionScan("skill_content", skill.content)}
@@ -1054,11 +1073,6 @@ ${systemPromptSuffix}${mcpToolHintsSection}`;
   if (gatheringGuard) {
     deps.debugLog(`[Chief flow] Gathering guard active: ${expectedSources.length} expected sources for "${skill.title}"`);
   }
-
-  // Parse optional per-skill budget constraints (Budget:, Tier:, Iterations:)
-  const parsedBudget = parseSkillBudget(skill.content);
-  const skillTier = parsedBudget.tier || "power";
-  const skillPowerMode = skillTier !== "mini";
 
   // Iteration cap: explicit Iterations: field > source-based calculation > default
   const sourceBasedIterations = gatheringGuard

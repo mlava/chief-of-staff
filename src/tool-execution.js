@@ -1011,7 +1011,30 @@ export function isSuccessfulExternalToolResult(result) {
 
 export function formatAssistantMessage(provider, response) {
   if (provider === "anthropic") {
-    return { role: "assistant", content: response?.content || [] };
+    const raw = response?.content || [];
+    // Strip advisor consultation blocks before storing the assistant turn:
+    // they're already resolved server-side and don't need to round-trip to
+    // subsequent iterations. Keeping them would balloon context cost on every
+    // follow-up turn (~1k+ Opus output tokens per consultation).
+    let strippedAdvisorBlocks = 0;
+    const filtered = raw.filter((block) => {
+      if (!block || typeof block !== "object") return true;
+      if (block.type === "server_tool_use" && block.name === "advisor") {
+        strippedAdvisorBlocks += 1;
+        return false;
+      }
+      if (block.type === "advisor_tool_result") {
+        strippedAdvisorBlocks += 1;
+        return false;
+      }
+      return true;
+    });
+    if (strippedAdvisorBlocks > 0) {
+      deps.debugLog?.("[advisor] stripped consultation blocks from stored assistant turn", {
+        stripped: strippedAdvisorBlocks
+      });
+    }
+    return { role: "assistant", content: filtered };
   }
   if (deps.isOpenAICompatible(provider)) {
     const msg = response?.choices?.[0]?.message;
