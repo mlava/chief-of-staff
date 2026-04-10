@@ -12,7 +12,8 @@ https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 - **Multi-provider LLM support** — choose from Anthropic Claude, OpenAI GPT, Google Gemini, Mistral, or Groq as your primary provider. If one provider is unavailable, the assistant automatically fails over to the next available provider in the chain.
 - **Better Tasks integration** — search, create, and modify Better Tasks (TODO/DONE parent blocks with `BT_attr*` attribute children) directly from natural language. Supports filtering by due date, project, status, and free text.
 - **Persistent memory** — loads context from dedicated memory pages into the system prompt each run (see [Memory and learning](#memory-and-learning)).
-- **Skill routing** — reads `Chief of Staff/Skills`, injects a compact skill index into the prompt, and can apply a specific skill on request. A gathering completeness guard ensures the assistant calls all required data sources before writing.
+- **Skill routing** — reads `Chief of Staff/Skills`, injects a compact skill index into the prompt, and can apply a specific skill on request. A gathering completeness guard ensures the assistant calls all required data sources before writing. Skills can declare **pre-flight acceptance criteria** (an `Acceptance:` field) — binding pass/fail conditions injected into the system prompt before the skill runs, so the model knows exactly what its output must satisfy. Same criteria are also passed to the post-run eval-judge.
+- **Skill & cron staleness detection** — track when each skill and scheduled job was last reviewed via a `Last reviewed::` attribute. A configurable threshold (default 30 days) triggers a once-per-day startup warning toast when items drift past it, and `cos_review_skill` / `cos_review_cron` tools mark items as current. Ask "stale skills" or "staleness report" any time. Prevents the silent process calcification problem where automations keep running long after the underlying workflow has changed.
 - **Inbox as input channel** — drop blocks into `Chief of Staff/Inbox` and they are automatically processed in read-only mode (the assistant can search and read but cannot mutate your graph). Responses are nested under the inbox block and moved to your daily page. Works as a natural integration point for external automation — Make, Zapier, n8n, local agents, or any MCP-capable tool can write a pointer block to the inbox and COS will pick it up, read the linked output, and file a synthesis to your daily page.
 - **Composio tool connections** — connect Google Calendar, Gmail, Todoist, and hundreds of other apps via Composio MCP. The assistant discovers and executes tools on your behalf.
 - **Local MCP server integration** — connect to MCP servers running on your machine (e.g. Zotero, GitHub, custom tools). Servers with many tools use a two-stage routing system to keep token costs low. Connections retry automatically on failure.
@@ -93,6 +94,7 @@ Open **Settings > Chief of Staff** and fill in:
 - **Dry Run** — one-shot toggle that simulates the next mutating tool call without writing anything (auto-disables after one use)
 - **Ludicrous mode failover** — allow escalation to the most expensive models (Opus / GPT-5.2) when all power-tier providers fail
 - **Hide COS Pages from Linked References** — automatically filters Chief of Staff namespace pages out of linked references on all non-COS pages. Enabled by default.
+- **Staleness Warning Threshold (days)** — how long a skill or scheduled job can go without being reviewed before it's flagged. A startup toast (debounced to once per 24 hours) lists stale items, and `staleness report` returns the same list on demand. Default `30`. Set to `0` to disable the warnings entirely (the report still works).
 
 Default models by tier:
 
@@ -421,6 +423,8 @@ Many common tasks are handled by a **deterministic router** that matches your in
 | `what roam tools do you have` | Lists tools for a specific category |
 | `remember that X` | Saves to memory (no LLM needed) |
 | `run daily briefing` | Triggers a skill directly by name |
+| `staleness report` | Lists skills and scheduled jobs that haven't been reviewed within the configured threshold |
+| `stale skills` | Same — also matches `which jobs need review`, `review my scheduled tasks`, `unreviewed crons`, `outdated skills`, `staleness report` |
 
 All of the above work in both the chat panel and the command palette prompt. They respond in under 100ms since there's no network call to an LLM provider.
 
@@ -622,7 +626,9 @@ Skills support several optional fields that control tool access and cost. All ar
 | **Budget:** | Dollar amount, e.g. `$0.05` | No cap | Hard cost cap per skill run. The agent loop halts when the accumulated cost exceeds this amount. |
 | **Iterations:** | Integer, e.g. `4` | Source-based calculation or 20 | Maximum number of LLM calls per skill run. Minimum 2 (one for tool calls, one for synthesis). |
 | **Constraints:** | Four quadrants: Must Do, Must Not Do, Prefer, Escalate | None | Structured behavioural boundaries injected as binding system instructions. |
-| **Rubric:** | Checkable quality criteria, one per line | Standard eval only | Skill-specific pass/fail checks scored by the eval-judge after each run. Results appear in the Review Queue. |
+| **Acceptance:** | Binary pass/fail criteria, one per line | None | **Pre-flight** quality criteria injected into the system prompt *before* the skill runs, so the model knows what its output must satisfy. Header variants accepted: `Acceptance —`, `Acceptance Criteria —`, `Acceptance Tests:`, `Acceptance Checks —`. Also passed to the eval-judge post-run alongside any `Rubric:` items. |
+| **Rubric:** | Checkable quality criteria, one per line | Standard eval only | **Post-run** skill-specific pass/fail checks scored by the eval-judge after each run. Results appear in the Review Queue. Use `Acceptance:` if you want the model to know the criteria *during* the run; use `Rubric:` for criteria the judge evaluates from the output alone. |
+| **Last reviewed::** | `[[date page ref]]` | None | Optional staleness marker. Updated automatically by `cos_review_skill`. Skills without this attribute are subject to the staleness warning threshold. |
 | **Models:** | `+Mistral`, `-Gemini`, or comma-separated | All providers | Per-skill provider preference. `+Provider` prefers it; `-Provider` excludes it. Useful when a provider struggles with a specific skill's tool patterns. |
 
 **Tools vs Sources:** `Sources:` defines what the assistant *must* call (enforced by the gathering guard). `Tools:` defines what tools are *available* at all (enforced by filtering the tool set before the LLM sees it). Tools should be a superset of Sources — if a source tool is missing from the Tools list, it is auto-added with a warning.
@@ -684,6 +690,15 @@ Supported schedule types:
 Jobs are stored in extension settings and persist across reloads. If you have multiple Roam tabs open, only one tab executes scheduled jobs (via automatic leader election with heartbeat and cross-tab detection) to prevent duplicates.
 
 Run **Chief of Staff: Show Scheduled Jobs** from the command palette to inspect current jobs in the browser console.
+
+### Keeping jobs current
+
+Recurring jobs and skills can drift out of sync with how you actually work. Chief of Staff tracks a `lastReviewed` timestamp on each enabled `cron`/`interval` job (one-shot `once`/`reminder` jobs are excluded — they don't meaningfully drift) and a `Last reviewed::` attribute on each skill block. When items pass the configurable **Staleness Warning Threshold** (default 30 days, set in Settings), a once-per-day startup toast lists what needs attention. To mark something as current after reviewing it:
+
+- Skills: `cos_review_skill skill_name "Weekly Review"` — writes/updates a `Last reviewed:: [[today]]` block on the skill, walking the entire subtree to update an existing marker rather than creating a duplicate.
+- Cron jobs: `cos_review_cron with job_id <id>` — stamps the job's `lastReviewed` timestamp (find the ID via `cos_cron_list`).
+
+On first install after upgrading, existing skills and jobs are grandfathered for one full staleness window so you don't get a wall of warnings on day one.
 
 ---
 

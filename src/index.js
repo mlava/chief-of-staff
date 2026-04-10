@@ -82,6 +82,7 @@ import {
   getCronTools,
   buildCronJobsPromptSection,
   loadCronJobs,
+  getStaleCronJobs,
 } from "./cron-scheduler.js";
 import {
   initIdleScheduler,
@@ -90,6 +91,7 @@ import {
   registerIdleTask,
   unregisterIdleTask,
   getIdleSchedulerState,
+  getRegisteredIdleTasks,
 } from "./idle-scheduler.js";
 import {
   initSystemPrompt,
@@ -275,6 +277,8 @@ import {
   tryRunDeterministicAskIntent,
   parseSkillSources,
   parseSkillTools,
+  parseSkillLastReviewed,
+  parseSkillAcceptance,
   buildHelpSummary,
   getDoctorReport,
   formatDoctorReportAsMarkdown,
@@ -338,7 +342,10 @@ const SETTINGS_KEYS = {
   skillAutoresearchBudget: "skill-autoresearch-budget",
   skillAutoresearchToolCalling: "skill-autoresearch-tool-calling",
   skillAutoresearchToolCache: "skill-autoresearch-tool-cache",
-  skillAutoresearchPowerMutations: "skill-autoresearch-power-mutations"
+  skillAutoresearchPowerMutations: "skill-autoresearch-power-mutations",
+  skillStalenessDays: "skill-staleness-days",
+  stalenessToastLastShownAt: "staleness-toast-last-shown-at",
+  stalenessGrandfatherAt: "staleness-grandfather-at"
 };
 const TOOLS_SCHEMA_VERSION = 3;
 const AUTH_POLL_INTERVAL_MS = 9000;
@@ -464,6 +471,8 @@ const WRITE_TOOL_NAMES = new Set([
   "cos_cron_update",
   "cos_cron_delete",
   "cos_cron_delete_jobs",
+  "cos_review_cron",
+  "cos_review_skill",
   "roam_excalidraw_embed",
   "roam_mermaid_embed",
   "roam_upload_file"
@@ -3682,6 +3691,73 @@ function getCosIntegrationTools() {
       }
     },
     {
+      name: "cos_review_skill",
+      isMutating: true,
+      description: "Mark a skill as reviewed today by writing a 'Last reviewed::' attribute to its Roam block, resetting its staleness timer. Use after confirming a skill's instructions, sources, and constraints are still accurate.",
+      input_schema: {
+        type: "object",
+        properties: {
+          skill_name: { type: "string", description: "Name of the skill to mark as reviewed." }
+        },
+        required: ["skill_name"]
+      },
+      execute: async ({ skill_name } = {}) => {
+        const name = String(skill_name || "").trim();
+        if (!name) return { error: "skill_name is required." };
+        const entry = await findSkillEntryByName(name, { force: true });
+        if (!entry) return { error: `Skill "${name}" not found.` };
+        if (!entry.uid) return { error: `Skill "${entry.title}" has no UID — cannot update.` };
+
+        const roamDate = formatRoamDate(new Date());
+        const reviewBlock = `Last reviewed:: [[${roamDate}]]`;
+
+        // Recursively scan the entire skill subtree for an existing Last reviewed:: block.
+        // The skill block isn't a page, so we pull the block subtree directly with
+        // BLOCK_TREE_PULL_PATTERN (not getPageTreeByUidAsync, which only returns pages).
+        // Walk the raw datalog shape (`:block/string` / `:block/children`) so we don't
+        // depend on flattenBlockTree's field renames.
+        const api = window.roamAlphaAPI;
+        let existingReviewUid = null;
+        try {
+          const blockResult = api.pull(BLOCK_TREE_PULL_PATTERN, [":block/uid", entry.uid]);
+          const findReview = (node) => {
+            if (existingReviewUid || !node) return;
+            const text = String(node[":block/string"] ?? node.string ?? node.text ?? "");
+            if (/Last\s+reviewed\s*::/i.test(text)) {
+              existingReviewUid = String(node[":block/uid"] ?? node.uid ?? "");
+              return;
+            }
+            const children = node[":block/children"] ?? node.children ?? [];
+            if (Array.isArray(children)) {
+              for (const child of children) findReview(child);
+            }
+          };
+          // Don't match the skill block itself — only its descendants
+          const topChildren = blockResult?.[":block/children"] ?? [];
+          if (Array.isArray(topChildren)) {
+            for (const child of topChildren) findReview(child);
+          }
+          debugLog(`[cos_review_skill] Scan result for "${entry.title}": existingReviewUid=${existingReviewUid || "(none)"}`);
+        } catch (err) {
+          debugLog("[cos_review_skill] Subtree scan failed, will create top-level child:", err?.message);
+        }
+
+        if (existingReviewUid) {
+          await api.updateBlock({ block: { uid: existingReviewUid, string: reviewBlock } });
+        } else {
+          await api.createBlock({
+            location: { "parent-uid": entry.uid, order: "last" },
+            block: { string: reviewBlock }
+          });
+        }
+
+        // Bust skill cache so the updated content is picked up on next load
+        invalidateSkillsPromptCache();
+
+        return { success: true, message: `Skill "${entry.title}" marked as reviewed on ${roamDate}.` };
+      }
+    },
+    {
       name: "cos_doctor",
       isMutating: false,
       description: "Run a self-diagnostic health check. Validates API keys, MCP connections, memory pages, skills, cron jobs, Composio, and Extension Tools. Returns structured pass/warn/fail report with fix suggestions.",
@@ -4029,6 +4105,29 @@ function setChiefNamespaceGlobals() {
       state: () => getIdleSchedulerState(),
       register: (taskDef) => registerIdleTask(taskDef),
       unregister: (id) => unregisterIdleTask(id),
+      // Force a registered idle task to run synchronously to completion,
+      // bypassing the activity/coordinator gates. Returns the final state
+      // returned by the task's processChunk on its last iteration.
+      runNow: async (taskId, { maxIterations = 5000, deadlineMs = 60000 } = {}) => {
+        const registry = getRegisteredIdleTasks();
+        const task = registry.get(taskId);
+        if (!task) {
+          throw new Error(`runNow: no idle task registered with id "${taskId}". Registered: ${[...registry.keys()].join(", ")}`);
+        }
+        let state = task.init();
+        const fakeDeadline = { timeRemaining: () => deadlineMs };
+        let iterations = 0;
+        let lastResult = null;
+        while (iterations++ < maxIterations) {
+          lastResult = await task.processChunk(state, fakeDeadline);
+          state = lastResult?.state;
+          if (lastResult?.done) {
+            try { task.onComplete?.(state); } catch (err) { debugLog("[Idle runNow] onComplete error:", err?.message); }
+            return { iterations, state };
+          }
+        }
+        throw new Error(`runNow: task "${taskId}" did not complete within ${maxIterations} iterations`);
+      },
     },
     corrections: {
       tracked: () => getTrackedWrites(),
@@ -4192,8 +4291,8 @@ async function bootstrapSkillsPage({ silent = false } = {}) {
         "Guide the user through designing and writing a new COS skill from scratch. Produces a well-structured, production-ready skill definition — not a rough draft. Covers intent clarification, tool selection, source mapping, output specification, error handling, and trigger design. Complements Skill Auditor (which improves existing skills) and Suggest Workflows (which proposes skill ideas).",
         "Triggers: \"design a skill\", \"create a skill\", \"write a skill\", \"new skill\", \"help me build a skill\", \"skill from scratch\", \"I want a skill that…\"",
         "Sources: cos_get_tool_ecosystem — full inventory of available tools, grouped by source (Roam native, Extension Tools, Local MCP, Remote MCP, Composio). Essential for recommending which tools the skill should use. cos_get_skill(\"Skill Auditor\") — load the 10 structural principles so the new skill can be written to pass an audit from day one. [[Chief of Staff/Skills]] — scan existing skills for naming conventions, structural patterns, and the current skill index. [[Chief of Staff/Memory]] — user context, preferences, and working patterns to inform skill design.",
-        "Approach — Progressive Disclosure Interview: Phase 1 — Intent. Ask: \"What should this skill reliably produce? Describe the outcome, not the steps.\" Wait for response. If the answer describes steps instead of an outcome, ask: \"If this skill ran perfectly, what would you have afterward that you don't have now?\" Phase 2 — Data. Based on the stated intent, call cos_get_tool_ecosystem to see what's available. Propose which tools and data sources the skill needs. Present as a checklist: \"I recommend these sources — add, remove, or confirm.\" Also recommend a Tools: whitelist — list only the tools the skill actually needs, since fewer tools means lower token cost and a tighter security surface. Wait for confirmation. Phase 3 — Shape. Ask about output preferences and operational parameters: Where should the output go? (chat panel, DNP, specific page) What format? (brief vs. detailed, bullet vs. prose, sections) Which Tier? (mini for structured/clear-instructions tasks, power for multi-step reasoning, ludicrous for complex analysis or long-form output) What Budget feels right? (suggest ~1.5–2× the expected cost of a test run) How many Iterations to allow? (minimum 2; default is source count + 2) Any Constraints? Walk through the four quadrants: Must Do (non-negotiable requirements), Must Not Do (absolute prohibitions), Prefer (soft stylistic preferences), Escalate (conditions that should pause and ask the user). Keep total constraints to 3–8, each specific and observable. What Rubric criteria define a good run? Suggest 3–5 binary pass/fail checks — positive assertions, independently verifiable from the output. Wait for response. Phase 4 — Draft. Write the full skill definition following the Style Guide below. Present it to the user in chat for review before writing to the Skills page. Phase 5 — Refine. Ask: \"Want me to audit this against the 10 structural principles before we save it?\" If yes, run the Skill Auditor principles inline and revise. When the user confirms, write to [[Chief of Staff/Skills]] using cos_write_draft_skill (with \"(Draft)\" suffix) or cos_update_memory (without suffix, if they want it live immediately).",
-        "Skill Style Guide — Structure: every skill should have these sections in this order: Description (first child block) — one sentence: what the skill produces and when to use it. Triggers — at least 5 natural-language phrases covering variations. Include verb forms (\"run my…\", \"do a…\", \"show me…\") and noun forms (\"weekly review\", \"delegation check\"). Sources — explicit list of tool calls to make in the gathering phase. Use exact tool names from the ecosystem. For each source, note what data it provides and why the skill needs it. Tools — comma-separated list of tool names the skill actually calls. Restricts the agent's tool surface for this skill run — fewer tools means lower token cost per iteration and a smaller attack surface. Tier — mini, power, or ludicrous. Use mini for structured, clear-instructions tasks; power for multi-step reasoning or chained tool calls; ludicrous for complex analysis or long-form output. Budget — dollar amount hard cost cap per skill run. Set at ~1.5–2× the typical run cost observed in testing. Iterations — integer max LLM calls per run. Minimum 2; default is source count + 2. Constraints — structured guardrails in four quadrants: Must Do (non-negotiable requirements), Must Not Do (absolute prohibitions), Prefer (soft stylistic preferences), Escalate (conditions that should pause and ask the user). Keep total to 3–8, each specific and observable. Rubric — 3–5 binary pass/fail quality criteria. Positive assertions (\"output includes X\"), independently verifiable from the output alone. Instructions — step-by-step execution logic. Write for an LLM reader: be specific about what to do with the gathered data, not just \"analyse\" or \"synthesise\". Fallback — error handling: \"if [tool] fails or returns empty, [specific recovery action]\". Never silently skip — always surface a ⚠️ marker. Output specification — where it goes (chat/DNP/specific page), format (headings, sections), and what \"done\" looks like. Operating principles (optional) — skill-specific constraints: what NOT to do, tone, scope boundaries.",
+        "Approach — Progressive Disclosure Interview: Phase 1 — Intent. Ask: \"What should this skill reliably produce? Describe the outcome, not the steps.\" Wait for response. If the answer describes steps instead of an outcome, ask: \"If this skill ran perfectly, what would you have afterward that you don't have now?\" Phase 2 — Data. Based on the stated intent, call cos_get_tool_ecosystem to see what's available. Propose which tools and data sources the skill needs. Present as a checklist: \"I recommend these sources — add, remove, or confirm.\" Also recommend a Tools: whitelist — list only the tools the skill actually needs, since fewer tools means lower token cost and a tighter security surface. Wait for confirmation. Phase 3 — Shape. Ask about output preferences and operational parameters: Where should the output go? (chat panel, DNP, specific page) What format? (brief vs. detailed, bullet vs. prose, sections) Which Tier? (mini for structured/clear-instructions tasks, power for multi-step reasoning, ludicrous for complex analysis or long-form output) What Budget feels right? (suggest ~1.5–2× the expected cost of a test run) How many Iterations to allow? (minimum 2; default is source count + 2) Any Constraints? Walk through the four quadrants: Must Do (non-negotiable requirements), Must Not Do (absolute prohibitions), Prefer (soft stylistic preferences), Escalate (conditions that should pause and ask the user). Keep total constraints to 3–8, each specific and observable. What are the Acceptance criteria — 2–4 binary pass/fail conditions the agent must meet, injected into the prompt before the skill runs? These are \"write the tests before the agent runs the work\" — specific, verifiable statements like \"output includes a section for each open task\" or \"every source tool was called\". What Rubric criteria define a good run? Suggest 3–5 binary pass/fail checks for post-run quality assessment — positive assertions, independently verifiable from the output. Wait for response. Phase 4 — Draft. Write the full skill definition following the Style Guide below. Present it to the user in chat for review before writing to the Skills page. Phase 5 — Refine. Ask: \"Want me to audit this against the 10 structural principles before we save it?\" If yes, run the Skill Auditor principles inline and revise. When the user confirms, write to [[Chief of Staff/Skills]] using cos_write_draft_skill (with \"(Draft)\" suffix) or cos_update_memory (without suffix, if they want it live immediately).",
+        "Skill Style Guide — Structure: every skill should have these sections in this order: Description (first child block) — one sentence: what the skill produces and when to use it. Triggers — at least 5 natural-language phrases covering variations. Include verb forms (\"run my…\", \"do a…\", \"show me…\") and noun forms (\"weekly review\", \"delegation check\"). Sources — explicit list of tool calls to make in the gathering phase. Use exact tool names from the ecosystem. For each source, note what data it provides and why the skill needs it. Tools — comma-separated list of tool names the skill actually calls. Restricts the agent's tool surface for this skill run — fewer tools means lower token cost per iteration and a smaller attack surface. Tier — mini, power, or ludicrous. Use mini for structured, clear-instructions tasks; power for multi-step reasoning or chained tool calls; ludicrous for complex analysis or long-form output. Budget — dollar amount hard cost cap per skill run. Set at ~1.5–2× the typical run cost observed in testing. Iterations — integer max LLM calls per run. Minimum 2; default is source count + 2. Constraints — structured guardrails in four quadrants: Must Do (non-negotiable requirements), Must Not Do (absolute prohibitions), Prefer (soft stylistic preferences), Escalate (conditions that should pause and ask the user). Keep total to 3–8, each specific and observable. Acceptance — 2–4 binary pass/fail criteria injected into the system prompt BEFORE the skill runs, so the model knows exactly what it must produce. Write the tests before the agent runs the work. Example: \"Output includes a section for each open task.\" These are also checked by eval-judge post-run. Rubric — 3–5 binary pass/fail quality criteria evaluated post-run only. Positive assertions (\"output includes X\"), independently verifiable from the output alone. Instructions — step-by-step execution logic. Write for an LLM reader: be specific about what to do with the gathered data, not just \"analyse\" or \"synthesise\". Fallback — error handling: \"if [tool] fails or returns empty, [specific recovery action]\". Never silently skip — always surface a ⚠️ marker. Output specification — where it goes (chat/DNP/specific page), format (headings, sections), and what \"done\" looks like. Operating principles (optional) — skill-specific constraints: what NOT to do, tone, scope boundaries.",
         "Skill Style Guide — Tool Recommendations: Always specify a Tools: field — list only the tools the skill needs. Fewer tools means lower token cost per iteration and a smaller attack surface. Use discovery tools before action tools — e.g. bt_get_attributes before bt_create, list-events before creating events, ws_list before ws_open. Skills that assume structure break when structure changes. Prefer Roam-native tools for read/write operations on the graph. Use Extension Tools (BT, Deep Research) for domain-specific queries. Use Composio/MCP for external services. If the skill chains 3+ tool calls, note in its instructions that it may need power tier. If it chains 5+ or involves complex reasoning, note ludicrous tier. Never hardcode user-specific values (workspace names, project names, calendar IDs). Use discovery or ask the user. Batch Composio calls into COMPOSIO_MULTI_EXECUTE_TOOL where possible — reduces iteration count and cost.",
         "Skill Style Guide — Writing Style: Be imperative, not suggestive. \"Call bt_search with status: TODO\" not \"You might want to check tasks.\" Name failure modes explicitly. \"Do not fabricate activity. If tools return nothing, say 'Nothing found'.\" The model can't avoid what hasn't been specified. End cleanly. No meta-commentary (\"time to read\", \"need more detail?\", \"hope this helps\"). This causes markdown rendering issues in the chat panel. Distinguish facts from inferences. Instruct the skill to mark inferences with [INFERRED] and never present tool output and guesswork with equal confidence. Preserve the user's voice. If the skill processes user input (brain dump, notes), instruct it to keep original wording — don't rewrite their phrasing. Scope explicitly. Tell the skill what's out of bounds. Models expand scope by default — without boundaries, output bloats.",
         "Named Failure Modes: The Kitchen Sink — cramming every possible tool and data source into the skill because \"more data is better.\" Produces bloated, slow, expensive skills where the signal drowns in noise. A good skill uses the minimum tools needed for its stated intent. The Vague Verb — instructions that say \"analyse\", \"review\", or \"synthesise\" without specifying what to look for or how to structure the output. The model fills the gap with generic padding. Every verb should have an object and a format. The Happy Path Only — no fallback instructions for when tools fail, return empty, or the user's data doesn't match the expected shape. The skill works in demos and breaks in production. Every tool call needs a fallback. The Copycat — designing the skill by copying another skill's structure without adapting to the new intent. Weekly Review structure doesn't work for a Brain Dump. Start from intent, not from templates. The Over-Constrained — too many rigid Must Do / Must Not Do constraints combined with insufficient Iterations or Budget. The model spends its limited context and reasoning on compliance rather than content quality. A skill with six sources, three iterations, and twelve constraints will fail before it can synthesise. Keep constraints to 3–8 total and leave enough headroom in Iterations and Budget for the model to actually do the work."
@@ -5541,6 +5640,86 @@ function teardownPullWatches() {
   debugLog("[Chief flow] Pull watches: all removed");
 }
 
+/**
+ * Check skills and cron jobs for staleness (#112).
+ * Shows a sticky warning toast listing stale items.
+ * Runs once at startup (delayed) so skills/crons have time to initialise.
+ * Toast is debounced to once per 24h via the staleness-toast-last-shown-at setting
+ * so reloads within the same day don't spam the user.
+ *
+ * Grandfathering: on first run after upgrading to a version with staleness detection,
+ * we stamp staleness-grandfather-at = now. Existing items (which have no Last reviewed::
+ * marker) are given one full staleness window from that timestamp before being flagged.
+ * This avoids the "every existing skill is stale on day one" UX cliff.
+ */
+const STALENESS_TOAST_DEBOUNCE_MS = 24 * 60 * 60 * 1000;
+
+/** Returns the grandfather floor: items with no review date are treated as last-reviewed at this time. */
+function getStalenessGrandfatherAt() {
+  if (!extensionAPIRef) return 0;
+  const raw = extensionAPIRef.settings.get(SETTINGS_KEYS.stalenessGrandfatherAt);
+  const parsed = Number.isFinite(raw) ? raw : parseInt(raw || "0", 10) || 0;
+  if (parsed > 0) return parsed;
+  // First run: stamp now so existing items get a full grace window.
+  const now = Date.now();
+  try {
+    extensionAPIRef.settings.set(SETTINGS_KEYS.stalenessGrandfatherAt, now);
+  } catch (err) {
+    debugLog("[Chief flow] Failed to persist staleness grandfather timestamp:", err?.message);
+  }
+  return now;
+}
+
+async function checkSkillAndCronStaleness() {
+  if (!extensionAPIRef) return;
+  const rawDays = parseInt(getSettingString(extensionAPIRef, SETTINGS_KEYS.skillStalenessDays, "30"), 10);
+  if (rawDays === 0) return; // 0 = disabled
+  const stalenessDays = isNaN(rawDays) || rawDays < 1 ? 30 : rawDays;
+  const stalenessMs = stalenessDays * 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  const grandfatherAt = getStalenessGrandfatherAt();
+
+  // Per-day toast debounce
+  const lastShownRaw = extensionAPIRef.settings.get(SETTINGS_KEYS.stalenessToastLastShownAt);
+  const lastShown = Number.isFinite(lastShownRaw) ? lastShownRaw : parseInt(lastShownRaw || "0", 10) || 0;
+  if (lastShown && (now - lastShown) < STALENESS_TOAST_DEBOUNCE_MS) {
+    debugLog(`[Chief flow] Staleness check: toast suppressed (shown ${Math.round((now - lastShown) / 3600000)}h ago)`);
+    return;
+  }
+
+  const staleSkills = [];
+  try {
+    const entries = await getSkillEntries({ force: false });
+    for (const entry of entries) {
+      const lastReviewed = parseSkillLastReviewed(entry.content);
+      const reviewedAt = lastReviewed ? lastReviewed.getTime() : grandfatherAt;
+      if ((now - reviewedAt) > stalenessMs) {
+        staleSkills.push(entry.title);
+      }
+    }
+  } catch (err) {
+    debugLog("[Chief flow] Staleness check: skill scan error:", err?.message);
+  }
+
+  const staleCrons = getStaleCronJobs(stalenessDays, { grandfatherAt });
+
+  if (!staleSkills.length && !staleCrons.length) return;
+
+  const parts = [];
+  if (staleSkills.length) parts.push(`${staleSkills.length} skill${staleSkills.length > 1 ? "s" : ""}`);
+  if (staleCrons.length) parts.push(`${staleCrons.length} scheduled job${staleCrons.length > 1 ? "s" : ""}`);
+  showReminderToast(
+    "Review needed",
+    `${parts.join(" and ")} haven't been reviewed in ${stalenessDays} days. Ask COS to "show stale skills" for the full list, then use cos_review_skill / cos_review_cron to mark items as reviewed.`
+  );
+  try {
+    extensionAPIRef.settings.set(SETTINGS_KEYS.stalenessToastLastShownAt, now);
+  } catch (err) {
+    debugLog("[Chief flow] Staleness check: failed to persist last-shown timestamp:", err?.message);
+  }
+  debugLog(`[Chief flow] Staleness check: ${staleSkills.length} stale skill(s), ${staleCrons.length} stale cron job(s)`);
+}
+
 function onload({ extensionAPI }) {
   if (extensionAPIRef !== null) {
     console.warn("[Chief of Staff] onload called while already loaded — ignoring duplicate.");
@@ -5928,6 +6107,7 @@ function onload({ extensionAPI }) {
     getSkillEntries,
     findSkillEntryByName,
     invalidateSkillsPromptCache,
+    parseSkillAcceptance,
     debugLog,
     escapeHtml,
     BLOCK_TREE_PULL_PATTERN,
@@ -6189,6 +6369,7 @@ function onload({ extensionAPI }) {
     showOptimizationResultToast,
     getOrphanPagesResult,
     getStaleLinkResult,
+    getStaleCronJobs,
   });
   initAgentLoop({
     debugLog,
@@ -6366,6 +6547,14 @@ function onload({ extensionAPI }) {
   }
 
   startIdleScheduler();
+
+  // Staleness check: warn if skills or cron jobs haven't been reviewed recently (#112).
+  // Delayed 45s so skills/crons have time to fully initialise before scanning.
+  setTimeout(() => {
+    if (unloadInProgress || extensionAPIRef === null) return;
+    checkSkillAndCronStaleness().catch(err => debugLog("[Chief flow] Staleness check error:", err?.message));
+  }, 45000);
+
   scheduleRuntimeAibomRefresh(1200);
   // Restore chat panel if it was open before reload.
   // Blueprint.js overlays (used by Roam Settings / Depot) enforce a JavaScript focus trap — anything outside the overlay DOM is

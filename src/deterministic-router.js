@@ -720,6 +720,58 @@ export function parseSkillModels(skillContent) {
   return { exclude, prefer };
 }
 
+// ── Skill acceptance criteria & staleness ─────────────────────────────────────
+
+/**
+ * Parse optional Acceptance: section from skill content.
+ * Returns string[] (empty if no Acceptance: field).
+ * Criteria are injected into the system prompt as binding pre-flight requirements
+ * AND passed to eval-judge post-run as binary pass/fail checks.
+ */
+export function parseSkillAcceptance(skillContent) {
+  const lines = String(skillContent || "").split("\n");
+  // Accept "Acceptance —", "Acceptance:", "Acceptance Criteria —", "Acceptance Tests:", "Acceptance Checks —"
+  const headerRe = /^\s*-?\s*Acceptance(?:\s+(?:criteria|tests?|checks?))?\s*(?:—|:)/i;
+  const inlineRe = /Acceptance(?:\s+(?:criteria|tests?|checks?))?\s*(?:—|:)\s*(.+)/i;
+  let inAcceptance = false;
+  let acceptanceIndent = -1;
+  const items = [];
+  for (const line of lines) {
+    if (!inAcceptance) {
+      if (headerRe.test(line)) {
+        inAcceptance = true;
+        acceptanceIndent = (line.match(/^(\s*)/)?.[1] || "").length;
+        const inlineMatch = line.match(inlineRe);
+        if (inlineMatch && inlineMatch[1].trim()) {
+          items.push(inlineMatch[1].trim().replace(/^[-*•]\s*/, ""));
+        }
+      }
+      continue;
+    }
+    const indent = (line.match(/^(\s*)/)?.[1] || "").length;
+    if (indent > acceptanceIndent && line.trim()) {
+      items.push(line.trim().replace(/^[-*•]\s*/, ""));
+    } else if (line.trim()) {
+      break;
+    }
+  }
+  return items;
+}
+
+/**
+ * Parse optional Last reviewed:: [[date]] attribute from skill content.
+ * Returns a Date or null.
+ */
+export function parseSkillLastReviewed(skillContent) {
+  const text = String(skillContent || "");
+  const match = text.match(/Last\s+reviewed\s*::\s*\[\[([^\]]+)\]\]/i);
+  if (!match) return null;
+  // "April 9th, 2026" → "April 9, 2026"
+  const cleaned = match[1].replace(/(\d+)(?:st|nd|rd|th)/, "$1");
+  const d = new Date(cleaned);
+  return isNaN(d.getTime()) ? null : d;
+}
+
 /**
  * Resolve parsed tool names against the live tool registry and determine
  * which meta-tools (ROUTE/EXECUTE) need to be included for routed tools.
@@ -985,6 +1037,13 @@ async function runDeterministicSkillInvocation(intent, options = {}) {
     deps.debugLog(`[Chief flow] Skill "${skill.title}" constraints:`, constraints);
   }
 
+  // Parse and inject pre-flight acceptance criteria (#113)
+  const acceptance = parseSkillAcceptance(skill.content);
+  if (acceptance.length > 0) {
+    systemPromptSuffix += `\n\n## Pre-flight Acceptance Criteria (Required)\nYour output MUST satisfy ALL of the following before responding:\n${acceptance.map(a => `- ${a}`).join("\n")}`;
+    deps.debugLog(`[Chief flow] Skill "${skill.title}" acceptance criteria: ${acceptance.length} items`);
+  }
+
   const systemPrompt = `${await buildDefaultSystemPrompt(skillPrompt)}
 
 ## Active Skill (Explicitly Requested)
@@ -1108,10 +1167,12 @@ ${systemPromptSuffix}${mcpToolHintsSection}`;
     try {
       const evalTrace = typeof deps.getLastAgentRunTrace === "function" ? deps.getLastAgentRunTrace() : null;
       const rubric = parseSkillRubric(skill.content);
-      deps.debugLog("[Chief flow] Triggering skill eval:", skill.title, "rubric:", rubric.length, "trace:", !!evalTrace);
+      // Merge acceptance criteria (pre-flight) with rubric for post-run eval
+      const allChecks = [...acceptance, ...rubric];
+      deps.debugLog("[Chief flow] Triggering skill eval:", skill.title, "acceptance:", acceptance.length, "rubric:", rubric.length, "trace:", !!evalTrace);
       deps.evaluateAgentRun(evalTrace, skillPrompt, textForEval, {
         skillName: skill.title,
-        rubricChecks: rubric.length > 0 ? rubric : null
+        rubricChecks: allChecks.length > 0 ? allChecks : null
       }).catch(err => {
         deps.debugLog("[Chief flow] Skill eval error (non-fatal):", err?.message || err);
       });
@@ -1695,6 +1756,74 @@ export async function tryRunDeterministicAskIntent(prompt, context = {}) {
     }
     if (result.links.length > 30) lines.push(`\n…and ${result.links.length - 30} more. Use \`cos_get_stale_links\` for the full list.`);
     return deps.publishAskResponse(prompt, lines.join("\n"), assistantName, suppressToasts);
+  }
+
+  // ── Skill / cron staleness report ────────────────────────────────
+  // Covers "skills"/"jobs"/"crons"/"scheduled jobs"/"scheduled tasks" as the noun.
+  // Note: bare "tasks?" is intentionally excluded — it collides with the Better Tasks
+  // todo route below ("show my old tasks", "stale tasks"). Use "scheduled tasks" instead.
+  const stalenessNoun = "(?:skills?|jobs?|crons?|scheduled\\s+jobs?|scheduled\\s+tasks?)";
+  const stalenessLeader = "(?:which|what|any|show|list|get|do\\s+i\\s+have|find)";
+  // Form 1 (adjective): "stale skills", "show stale skills", "any overdue jobs"
+  const adjPattern = new RegExp(`^(?:${stalenessLeader}\\s+)?(?:stale|overdue|unreviewed|old|outdated)\\s+${stalenessNoun}\\s*[?.!]*$`, "i");
+  // Form 2 (need review): "jobs need review", "which jobs need review", "scheduled jobs needing review"
+  const needReviewPattern = new RegExp(`^(?:${stalenessLeader}\\s+)?${stalenessNoun}\\s+(?:need(?:ing)?|due\\s+for|that\\s+need)\\s+(?:review|reviewing|a\\s+review)\\s*[?.!]*$`, "i");
+  // Form 3 (review my): "review my skills", "review my scheduled tasks"
+  const reviewMyPattern = new RegExp(`^review\\s+(?:my\\s+)?${stalenessNoun}\\s*[?.!]*$`, "i");
+  // Form 4 (which X are Y): "which skills are stale", "which jobs are overdue"
+  const whichArePattern = new RegExp(`^(?:which|what)\\s+${stalenessNoun}\\s+are\\s+(?:stale|old|overdue|unreviewed|outdated)\\s*[?.!]*$`, "i");
+  // Form 5 (special phrases)
+  const specialPattern = /^(?:staleness\s+report|review\s+report|what\s+needs\s+review)\s*[?.!]*$/i;
+  const staleSkillsMatch = adjPattern.test(prompt)
+    || needReviewPattern.test(prompt)
+    || reviewMyPattern.test(prompt)
+    || whichArePattern.test(prompt)
+    || specialPattern.test(prompt);
+  if (staleSkillsMatch && typeof deps.getSkillEntries === "function" && typeof deps.getStaleCronJobs === "function") {
+    deps.debugLog("[Chief flow] Deterministic route matched: stale_skills");
+    try {
+      const entries = await deps.getSkillEntries({ force: false });
+      const now = Date.now();
+      const extApi = deps.getExtensionAPIRef();
+      const rawDays = parseInt(deps.getSettingString(extApi, deps.SETTINGS_KEYS?.skillStalenessDays, "30"), 10);
+      const stalenessDays = isNaN(rawDays) || rawDays < 1 ? 30 : rawDays;
+      const stalenessMs = stalenessDays * 24 * 60 * 60 * 1000;
+      // Grandfather floor: items with no review date fall back to upgrade-day timestamp
+      // so existing skills/crons get a full grace window before being flagged.
+      const grandfatherRaw = extApi?.settings?.get?.(deps.SETTINGS_KEYS?.stalenessGrandfatherAt);
+      const grandfatherAt = Number.isFinite(grandfatherRaw) ? grandfatherRaw : parseInt(grandfatherRaw || "0", 10) || 0;
+      const staleSkills = entries.filter(e => {
+        const d = parseSkillLastReviewed(e.content);
+        const reviewedAt = d ? d.getTime() : grandfatherAt;
+        return (now - reviewedAt) > stalenessMs;
+      });
+      const staleCrons = deps.getStaleCronJobs(stalenessDays, { grandfatherAt });
+
+      if (!staleSkills.length && !staleCrons.length) {
+        return deps.publishAskResponse(prompt, `All skills and scheduled jobs have been reviewed within the last ${stalenessDays} days. Nothing needs attention.`, assistantName, suppressToasts);
+      }
+      const lines = ["**Staleness Report**\n"];
+      if (staleSkills.length) {
+        lines.push(`**${staleSkills.length} skill${staleSkills.length > 1 ? "s" : ""} needing review:**`);
+        for (const s of staleSkills) {
+          const d = parseSkillLastReviewed(s.content);
+          const age = d ? `last reviewed ${Math.floor((now - d.getTime()) / 86400000)}d ago` : "never reviewed";
+          lines.push(`- ${s.title} (${age})`);
+        }
+      }
+      if (staleCrons.length) {
+        lines.push(`\n**${staleCrons.length} scheduled job${staleCrons.length > 1 ? "s" : ""} needing review:**`);
+        for (const j of staleCrons) {
+          const age = j.lastReviewed > 0 ? `last reviewed ${Math.floor((now - j.lastReviewed) / 86400000)}d ago` : "never reviewed";
+          lines.push(`- ${j.name} (${j.id}) — ${age}`);
+        }
+      }
+      lines.push(`\nUse \`cos_review_skill\` or \`cos_review_cron\` to mark items as reviewed after checking them.`);
+      return deps.publishAskResponse(prompt, lines.join("\n"), assistantName, suppressToasts);
+    } catch (err) {
+      deps.debugLog("[Chief flow] Staleness route error:", err?.message);
+      // Fall through to agent loop on error
+    }
   }
 
   // ── Deterministic search ─────────────────────────────────────────

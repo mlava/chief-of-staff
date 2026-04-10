@@ -73,7 +73,8 @@ function normaliseCronJob(input) {
     lastRun: Number.isFinite(input.lastRun) ? input.lastRun : 0,
     runCount: Number.isFinite(input.runCount) ? input.runCount : 0,
     runAt: (type === "once" || type === "reminder") && Number.isFinite(input.runAt) ? input.runAt : 0,
-    lastRunError: input.lastRunError ? String(input.lastRunError).slice(0, 200) : null
+    lastRunError: input.lastRunError ? String(input.lastRunError).slice(0, 200) : null,
+    lastReviewed: Number.isFinite(input.lastReviewed) ? input.lastReviewed : 0
   };
 }
 
@@ -509,6 +510,7 @@ export function getCronTools() {
               enabled: j.enabled,
               lastRun: j.lastRun ? new Date(j.lastRun).toISOString() : null,
               lastRunError: j.lastRunError || null,
+              lastReviewed: j.lastReviewed ? new Date(j.lastReviewed).toISOString() : null,
               nextRun,
               nextRunLocal: nextRun ? formatLocalTime(nextRun, j.timezone) : null,
               runCount: j.runCount
@@ -718,8 +720,51 @@ export function getCronTools() {
         saveCronJobs(jobs);
         return { deleted, notFound, remainingJobs: jobs.length };
       }
+    },
+    {
+      name: "cos_review_cron",
+      isMutating: true,
+      description: "Mark a scheduled job as reviewed today, resetting its staleness timer. Use after confirming the job's schedule and prompt are still correct and aligned with your current workflow.",
+      input_schema: {
+        type: "object",
+        properties: {
+          job_id: { type: "string", description: "ID of the job to mark as reviewed (from cos_cron_list)." }
+        },
+        required: ["job_id"]
+      },
+      execute: async ({ job_id } = {}) => {
+        const id = String(job_id || "").trim();
+        if (!id) return { error: "job_id is required." };
+        const jobs = loadCronJobs();
+        const idx = jobs.findIndex(j => j.id === id);
+        if (idx === -1) return { error: `Job "${id}" not found. Use cos_cron_list to see available job IDs.` };
+        jobs[idx].lastReviewed = Date.now();
+        saveCronJobs(jobs);
+        return { success: true, message: `Job "${jobs[idx].name}" marked as reviewed.` };
+      }
     }
   ];
+}
+
+/**
+ * Return cron jobs that haven't been reviewed within the given staleness window.
+ * Only enabled, recurring jobs are considered — disabled jobs and one-shot
+ * reminders/`once` jobs don't meaningfully drift and shouldn't be flagged.
+ *
+ * Jobs with lastReviewed === 0 fall back to options.grandfatherAt (a one-time
+ * upgrade-day timestamp) so existing jobs get a full grace window before being
+ * flagged on first install. Pass 0 (or omit) to disable grandfathering.
+ */
+export function getStaleCronJobs(stalenessDays = 30, options = {}) {
+  const stalenessMs = Math.max(1, stalenessDays) * 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  const grandfatherAt = Number.isFinite(options.grandfatherAt) ? options.grandfatherAt : 0;
+  return loadCronJobs().filter(j => {
+    if (!j.enabled) return false;
+    if (j.type === "once" || j.type === "reminder") return false;
+    const reviewedAt = j.lastReviewed || grandfatherAt;
+    return (now - reviewedAt) > stalenessMs;
+  });
 }
 
 // ─── Cron Scheduler: System Prompt Section ─────────────────────────────────────
@@ -755,7 +800,7 @@ export function buildCronJobsPromptSection() {
 
   return `## Scheduled Jobs
 
-You have access to cron job tools (cos_cron_list, cos_cron_create, cos_cron_update, cos_cron_delete, cos_cron_delete_jobs).
+You have access to cron job tools (cos_cron_list, cos_cron_create, cos_cron_update, cos_cron_delete, cos_cron_delete_jobs, cos_review_cron).
 Use type 'reminder' with cos_cron_create to set one-shot reminders — these show a persistent sticky toast at the specified time without running the agent loop.
 For time-windowed recurring jobs (e.g. "every 2 hours between 8am and 6pm"), always use type 'cron' with a range expression such as '0 8-18/2 * * *' — type 'interval' fires around the clock.
 The user currently has ${enabledJobs.length} active scheduled job(s):
