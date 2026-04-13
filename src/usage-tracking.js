@@ -388,6 +388,7 @@ function ensureTodayUsageStats() {
       evalRuns: 0, evalAvgScore: 0,
       intentClassifications: 0, intentSkipped: 0, intentAutoProceeded: 0,
       intentConfirmations: 0, intentClarifications: 0, intentUserOverrides: 0,
+      toolUsage: {}, scopeUsage: {},
       guardOutcomes: {
         claimedAction: { truePositive: 0, falsePositive: 0 },
         fabrication: { truePositive: 0, falsePositive: 0 },
@@ -396,7 +397,115 @@ function ensureTodayUsageStats() {
       }
     };
   }
-  return usageStats.days[key];
+  // Backfill for day records created before toolUsage/scopeUsage existed.
+  const day = usageStats.days[key];
+  if (!day.toolUsage) day.toolUsage = {};
+  if (!day.scopeUsage) day.scopeUsage = {};
+  return day;
+}
+
+// Cardinality caps for the new detailed tool/scope tracking.
+// toolUsage is naturally bounded by the tool catalogue; scopeUsage can fan out
+// per page UID, so it gets a larger budget.
+const TOOL_USAGE_MAX_KEYS = 200;
+const SCOPE_USAGE_MAX_KEYS = 300;
+const toolUsageCapWarned = new Set(); // one-shot debug log per day
+const scopeUsageCapWarned = new Set();
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function upsertScopeUsage(day, approvalKey, scopeType) {
+  if (!approvalKey) return null;
+  const safeKey = sanitiseKey(approvalKey);
+  let entry = day.scopeUsage[safeKey];
+  if (entry) {
+    entry.lastSeenAt = nowIso();
+    // Defensive: preserve scopeType if caller didn't supply one
+    if (!entry.scopeType && scopeType) entry.scopeType = scopeType;
+    return entry;
+  }
+  if (Object.keys(day.scopeUsage).length >= SCOPE_USAGE_MAX_KEYS) {
+    const capKey = todayDateKey();
+    if (!scopeUsageCapWarned.has(capKey)) {
+      scopeUsageCapWarned.add(capKey);
+      deps.debugLog?.("[Usage] scopeUsage cap reached; dropping new keys for", capKey);
+    }
+    return null;
+  }
+  entry = {
+    scopeType: scopeType || "tool",
+    granted: 0, denied: 0, cached: 0,
+    callsSuccess: 0, callsFailure: 0,
+    firstSeenAt: nowIso(), lastSeenAt: nowIso(),
+  };
+  day.scopeUsage[safeKey] = entry;
+  return entry;
+}
+
+/**
+ * Records per-call tool usage and per-scope approval events for roadmap #82
+ * Phase 1. Additive to the existing toolCalls/approvalsGranted counters.
+ *
+ * Accepts a discriminated union:
+ *   { kind: "scopeEvent", approvalKey, scopeType, event: "granted"|"denied"|"cached" }
+ *   { kind: "outcome", resolvedName, approvalKeys, scopeType, success, durationMs }
+ *
+ * Logging must never break dispatch — all paths swallow errors silently.
+ */
+export function recordToolUsage(entry) {
+  if (!entry || typeof entry !== "object") return;
+  try {
+    const day = ensureTodayUsageStats();
+    if (entry.kind === "scopeEvent") {
+      const { approvalKey, scopeType, event } = entry;
+      if (!approvalKey || !event) return;
+      const scope = upsertScopeUsage(day, approvalKey, scopeType);
+      if (!scope) { persistUsageStatsSettings(); return; }
+      if (event === "granted") scope.granted += 1;
+      else if (event === "denied") scope.denied += 1;
+      else if (event === "cached") scope.cached += 1;
+      persistUsageStatsSettings();
+      return;
+    }
+    if (entry.kind === "outcome") {
+      const { resolvedName, approvalKeys, scopeType, success, durationMs } = entry;
+      if (resolvedName) {
+        const safeName = sanitiseKey(resolvedName);
+        let bucket = day.toolUsage[safeName];
+        if (!bucket && Object.keys(day.toolUsage).length >= TOOL_USAGE_MAX_KEYS) {
+          const capKey = todayDateKey();
+          if (!toolUsageCapWarned.has(capKey)) {
+            toolUsageCapWarned.add(capKey);
+            deps.debugLog?.("[Usage] toolUsage cap reached; dropping new keys for", capKey);
+          }
+        } else {
+          if (!bucket) {
+            bucket = {
+              total: 0, success: 0, failure: 0, totalDurationMs: 0,
+              firstUsedAt: nowIso(), lastUsedAt: nowIso(),
+            };
+            day.toolUsage[safeName] = bucket;
+          }
+          bucket.total += 1;
+          if (success) bucket.success += 1; else bucket.failure += 1;
+          if (Number.isFinite(durationMs)) bucket.totalDurationMs += durationMs;
+          bucket.lastUsedAt = nowIso();
+        }
+      }
+      // Attribute the outcome to each scope key the call ran under.
+      if (scopeType && scopeType !== "none" && Array.isArray(approvalKeys)) {
+        for (const key of approvalKeys) {
+          const scope = upsertScopeUsage(day, key, scopeType);
+          if (!scope) continue;
+          if (success) scope.callsSuccess += 1;
+          else scope.callsFailure += 1;
+        }
+      }
+      persistUsageStatsSettings();
+    }
+  } catch (_) { /* never break dispatch */ }
 }
 
 export function recordUsageStat(stat, detail) {

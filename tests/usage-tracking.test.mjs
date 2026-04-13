@@ -21,6 +21,7 @@ import {
   isDailyCapExceeded,
   getCostHistorySummary,
   recordUsageStat,
+  recordToolUsage,
   flushUsageTracking,
   persistAuditLogEntry,
 } from "../src/usage-tracking.js";
@@ -574,4 +575,222 @@ test("cap enforcement works across multiple record calls", () => {
   recordCostEntry("m", 100, 50, 0.05);
   assert.equal(isDailyCapExceeded().exceeded, true);
   assert.ok(isDailyCapExceeded().spent >= 0.10);
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// recordToolUsage (roadmap #82 Phase 1 — per-tool + per-scope logging)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Build a mock extensionAPI + persist capture harness for recordToolUsage
+ * tests. Returns `{ api, persisted, today }`. Tests call `flushUsageTracking`
+ * to force the debounced persist, then inspect `persisted["usage-stats"]`.
+ */
+function makeUsageHarness() {
+  const persisted = {};
+  const api = {
+    settings: {
+      get: () => null,
+      set: (k, v) => { persisted[k] = v; },
+    },
+  };
+  initUsageTracking(makeDeps({ getExtensionAPIRef: () => api }));
+  loadUsageStats(api);
+  return { api, persisted, today: todayDateKey() };
+}
+
+test("recordToolUsage outcome: increments total, success, totalDurationMs", () => {
+  const { api, persisted, today } = makeUsageHarness();
+  recordToolUsage({
+    kind: "outcome",
+    resolvedName: "roam_search",
+    approvalKeys: [],
+    scopeType: "none",
+    success: true,
+    durationMs: 150,
+  });
+  recordToolUsage({
+    kind: "outcome",
+    resolvedName: "roam_search",
+    approvalKeys: [],
+    scopeType: "none",
+    success: true,
+    durationMs: 50,
+  });
+  flushUsageTracking(api);
+  const day = persisted["usage-stats"].days[today];
+  const bucket = day.toolUsage["roam_search"];
+  assert.equal(bucket.total, 2);
+  assert.equal(bucket.success, 2);
+  assert.equal(bucket.failure, 0);
+  assert.equal(bucket.totalDurationMs, 200);
+  assert.match(bucket.firstUsedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.match(bucket.lastUsedAt, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test("recordToolUsage outcome: failure increments failure counter", () => {
+  const { api, persisted, today } = makeUsageHarness();
+  recordToolUsage({
+    kind: "outcome",
+    resolvedName: "roam_update_block",
+    approvalKeys: ["roam_update_block"],
+    scopeType: "tool",
+    success: false,
+    durationMs: 42,
+  });
+  flushUsageTracking(api);
+  const day = persisted["usage-stats"].days[today];
+  assert.equal(day.toolUsage["roam_update_block"].total, 1);
+  assert.equal(day.toolUsage["roam_update_block"].failure, 1);
+  assert.equal(day.toolUsage["roam_update_block"].success, 0);
+});
+
+test("recordToolUsage outcome with page-fanout updates every scopeUsage entry", () => {
+  const { api, persisted, today } = makeUsageHarness();
+  recordToolUsage({
+    kind: "outcome",
+    resolvedName: "roam_create_blocks",
+    approvalKeys: ["page::pgA", "page::pgB"],
+    scopeType: "page",
+    success: true,
+    durationMs: 100,
+  });
+  flushUsageTracking(api);
+  const day = persisted["usage-stats"].days[today];
+  assert.equal(day.scopeUsage["page::pgA"].callsSuccess, 1);
+  assert.equal(day.scopeUsage["page::pgB"].callsSuccess, 1);
+  assert.equal(day.scopeUsage["page::pgA"].scopeType, "page");
+  assert.equal(day.scopeUsage["page::pgB"].callsFailure, 0);
+});
+
+test("recordToolUsage scopeEvent: granted/denied/cached counters increment correctly", () => {
+  const { api, persisted, today } = makeUsageHarness();
+  recordToolUsage({ kind: "scopeEvent", approvalKey: "roam_update_block", scopeType: "tool", event: "granted" });
+  recordToolUsage({ kind: "scopeEvent", approvalKey: "roam_update_block", scopeType: "tool", event: "cached" });
+  recordToolUsage({ kind: "scopeEvent", approvalKey: "roam_update_block", scopeType: "tool", event: "cached" });
+  recordToolUsage({ kind: "scopeEvent", approvalKey: "roam_update_block", scopeType: "tool", event: "denied" });
+  flushUsageTracking(api);
+  const scope = persisted["usage-stats"].days[today].scopeUsage["roam_update_block"];
+  assert.equal(scope.granted, 1);
+  assert.equal(scope.cached, 2);
+  assert.equal(scope.denied, 1);
+  assert.equal(scope.scopeType, "tool");
+  assert.ok(scope.firstSeenAt);
+  assert.ok(scope.lastSeenAt);
+});
+
+test("recordToolUsage: toolUsage cap at 200 distinct keys (existing keys still increment)", () => {
+  const { api, persisted, today } = makeUsageHarness();
+  // Fill to the cap
+  for (let i = 0; i < 200; i++) {
+    recordToolUsage({
+      kind: "outcome",
+      resolvedName: `tool_${i}`,
+      approvalKeys: [],
+      scopeType: "none",
+      success: true,
+      durationMs: 1,
+    });
+  }
+  // 201st distinct key should be dropped
+  recordToolUsage({
+    kind: "outcome",
+    resolvedName: "tool_overflow",
+    approvalKeys: [],
+    scopeType: "none",
+    success: true,
+    durationMs: 1,
+  });
+  // Existing key should still increment
+  recordToolUsage({
+    kind: "outcome",
+    resolvedName: "tool_0",
+    approvalKeys: [],
+    scopeType: "none",
+    success: true,
+    durationMs: 1,
+  });
+  flushUsageTracking(api);
+  const toolUsage = persisted["usage-stats"].days[today].toolUsage;
+  assert.equal(Object.keys(toolUsage).length, 200);
+  assert.equal(toolUsage["tool_overflow"], undefined);
+  assert.equal(toolUsage["tool_0"].total, 2);
+});
+
+test("recordToolUsage: scopeUsage cap at 300 distinct keys", () => {
+  const { api, persisted, today } = makeUsageHarness();
+  for (let i = 0; i < 300; i++) {
+    recordToolUsage({ kind: "scopeEvent", approvalKey: `page::pg${i}`, scopeType: "page", event: "granted" });
+  }
+  recordToolUsage({ kind: "scopeEvent", approvalKey: "page::overflow", scopeType: "page", event: "granted" });
+  recordToolUsage({ kind: "scopeEvent", approvalKey: "page::pg0", scopeType: "page", event: "cached" });
+  flushUsageTracking(api);
+  const scopeUsage = persisted["usage-stats"].days[today].scopeUsage;
+  assert.equal(Object.keys(scopeUsage).length, 300);
+  assert.equal(scopeUsage["page::overflow"], undefined);
+  assert.equal(scopeUsage["page::pg0"].granted, 1);
+  assert.equal(scopeUsage["page::pg0"].cached, 1);
+});
+
+test("recordToolUsage backfills toolUsage/scopeUsage for pre-upgrade day records", () => {
+  const today = todayDateKey();
+  const legacyDay = {
+    agentRuns: 3, toolCalls: { old: 5 }, approvalsGranted: 1, approvalsDenied: 0,
+    injectionWarnings: 0, claimedActionFires: 0, tierEscalations: 0, memoryWriteBlocks: 0,
+    evalRuns: 0, evalAvgScore: 0,
+  };
+  const persisted = {};
+  const api = {
+    settings: {
+      get: (k) => k === "usage-stats" ? { days: { [today]: legacyDay } } : null,
+      set: (k, v) => { persisted[k] = v; },
+    },
+  };
+  initUsageTracking(makeDeps({ getExtensionAPIRef: () => api }));
+  loadUsageStats(api);
+  recordToolUsage({
+    kind: "outcome",
+    resolvedName: "new_tool",
+    approvalKeys: [],
+    scopeType: "none",
+    success: true,
+    durationMs: 10,
+  });
+  flushUsageTracking(api);
+  const day = persisted["usage-stats"].days[today];
+  // Legacy counters survive
+  assert.equal(day.agentRuns, 3);
+  assert.equal(day.toolCalls.old, 5);
+  // New fields backfilled and populated
+  assert.deepEqual(Object.keys(day.toolUsage), ["new_tool"]);
+  assert.equal(day.scopeUsage && typeof day.scopeUsage, "object");
+});
+
+test("recordToolUsage: ignores malformed input without throwing", () => {
+  const { api } = makeUsageHarness();
+  // None of these should throw
+  recordToolUsage(null);
+  recordToolUsage(undefined);
+  recordToolUsage({});
+  recordToolUsage({ kind: "unknown" });
+  recordToolUsage({ kind: "scopeEvent" }); // missing approvalKey
+  recordToolUsage({ kind: "outcome" }); // missing everything
+  flushUsageTracking(api);
+  assert.ok(true);
+});
+
+test("recordToolUsage: scopeType 'none' with empty approvalKeys skips scopeUsage", () => {
+  const { api, persisted, today } = makeUsageHarness();
+  recordToolUsage({
+    kind: "outcome",
+    resolvedName: "roam_search",
+    approvalKeys: [],
+    scopeType: "none",
+    success: true,
+    durationMs: 5,
+  });
+  flushUsageTracking(api);
+  const day = persisted["usage-stats"].days[today];
+  assert.equal(day.toolUsage["roam_search"].total, 1);
+  assert.deepEqual(Object.keys(day.scopeUsage), []);
 });

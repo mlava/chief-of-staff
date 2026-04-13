@@ -19,7 +19,7 @@ import {
   formatToolResults, extractComposioSessionIdFromToolResult,
   withComposioSessionArgs, convertMessagesForProvider,
   detectWrittenBlocksInMessages, detectSuccessfulWriteToolCallsInMessages,
-  isLikelyLiveDataReadIntent
+  isLikelyLiveDataReadIntent, computeToolCallScope
 } from "./tool-execution.js";
 
 import {
@@ -44,7 +44,7 @@ import {
 import {
   isDailyCapExceeded, accumulateSessionTokens, recordCostEntry,
   getSessionTokenUsage, recordUsageStat, recordToolTokenSnapshot,
-  checkBudgetThresholds
+  recordToolUsage, checkBudgetThresholds
 } from "./usage-tracking.js";
 
 import { buildDefaultSystemPrompt } from "./system-prompt.js";
@@ -1039,6 +1039,24 @@ export async function runAgentLoop(userMessage, options = {}) {
         iterToolExecutionCount++;
         toolCallCounts.set(rateLimitKey, (toolCallCounts.get(rateLimitKey) || 0) + 1);
         if (!cacheHit) recordUsageStat("toolCall", toolCall.name);
+        // Detailed per-call tool + scope usage logging (roadmap #82 Phase 1).
+        // Skip cache hits and dry-run simulations so neither inflates frequency.
+        // Known limitation: LOCAL_MCP_EXECUTE re-dispatch into an inner tool
+        // records scope events for the inner tool but the outer-call outcome
+        // here keys on LOCAL_MCP_EXECUTE — correlation requires per-session joins.
+        if (!cacheHit && !result?.dry_run) {
+          try {
+            const scope = computeToolCallScope(toolCall.name, toolArgs);
+            recordToolUsage({
+              kind: "outcome",
+              resolvedName: scope.resolvedName,
+              approvalKeys: scope.approvalKeys,
+              scopeType: scope.scopeType,
+              success: !errorMessage && !result?.error,
+              durationMs,
+            });
+          } catch (_) { /* logging must never break dispatch */ }
+        }
         deps.debugLog(cacheHit ? "[Chief flow] tool cache HIT:" : "[Chief flow] tool result:", {
           tool: toolCall.name,
           durationMs,

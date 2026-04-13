@@ -199,6 +199,7 @@ import {
   isDailyCapExceeded,
   persistAuditLogEntry,
   recordUsageStat,
+  recordToolUsage,
   persistUsageStatsPage,
   getCostHistorySummary,
   flushUsageTracking,
@@ -6320,6 +6321,7 @@ function onload({ extensionAPI }) {
     getServerKeyForTool,
     getRemoteServerKeyForTool,
     recordUsageStat,
+    recordToolUsage,
   });
   initSystemPrompt({
     getAllMemoryContent,

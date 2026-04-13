@@ -313,6 +313,89 @@ const SCOPED_PAGE_APPROVAL_TOOLS = new Set([
   "roam_create_block", "roam_create_blocks", "roam_batch_write"
 ]);
 
+// ── Approval-scope key helpers ──────────────────────────────────────────────
+// Shared between the approval gate and computeToolCallScope so the logging
+// pipeline keys on the exact string used for session approval lookup.
+// MUST stay in sync with the approval-gate branches in executeToolCall() below.
+
+function buildToolScopeKey(toolName, args) {
+  if (toolName === "COMPOSIO_MULTI_EXECUTE_TOOL") {
+    const slugs = (Array.isArray(args?.tools) ? args.tools : [])
+      .map((t) => t?.tool_slug || "")
+      .filter(Boolean)
+      .sort();
+    return `${toolName}::${slugs.join(",")}`;
+  }
+  if (toolName === "LOCAL_MCP_EXECUTE") {
+    return `LOCAL_MCP_EXECUTE::${args?.tool_name || ""}`;
+  }
+  return toolName;
+}
+
+function resolveMetaToolInnerName(toolName, args) {
+  if (toolName === "COMPOSIO_MULTI_EXECUTE_TOOL") {
+    const slugs = (Array.isArray(args?.tools) ? args.tools : [])
+      .map((t) => t?.tool_slug || "")
+      .filter(Boolean)
+      .sort();
+    return slugs.length ? slugs.join(",") : toolName;
+  }
+  if (toolName === "LOCAL_MCP_EXECUTE"
+    || toolName === "REMOTE_MCP_EXECUTE"
+    || toolName === "EXT_EXECUTE"
+    || toolName === "ROAM_EXECUTE") {
+    return args?.tool_name || toolName;
+  }
+  return toolName;
+}
+
+/**
+ * Compute the approval scope for a tool call so downstream logging can key on
+ * the same scope the approval gate uses. Returns:
+ *   - resolvedName: meta-tools are unwrapped to the inner tool name
+ *   - scopeType: "page" | "tool" | "none" (non-mutating)
+ *   - approvalKeys: array of scope keys. Page-scoped tools fan out one key per
+ *     target page UID (prefix "page::"). Tool-scoped tools return a single key.
+ *
+ * Must stay in sync with the approval-gate branches in executeToolCall()
+ * (see SCOPED_PAGE_APPROVAL_TOOLS handling + buildToolScopeKey()).
+ */
+export function computeToolCallScope(toolName, args) {
+  const name = String(toolName || "");
+  const safeArgs = args || {};
+  const resolvedName = resolveMetaToolInnerName(name, safeArgs);
+
+  const resolvedTool = resolveToolByName(name);
+  const isMutating = isPotentiallyMutatingTool(name, safeArgs, resolvedTool);
+  if (!isMutating) {
+    return { resolvedName, scopeType: "none", approvalKeys: [] };
+  }
+
+  if (SCOPED_PAGE_APPROVAL_TOOLS.has(name)) {
+    const pageUids = extractTargetPageUids(name, safeArgs);
+    const approvalKeys = pageUids
+      .filter(Boolean)
+      .map((uid) => `page::${uid}`)
+      .sort();
+    return { resolvedName, scopeType: "page", approvalKeys };
+  }
+
+  return {
+    resolvedName,
+    scopeType: "tool",
+    approvalKeys: [buildToolScopeKey(name, safeArgs)],
+  };
+}
+
+// Record a single scope event via the injected usage tracker. Safe no-op if
+// the dep isn't wired.
+function emitScopeEvent(approvalKey, scopeType, event) {
+  if (typeof deps.recordToolUsage !== "function") return;
+  try {
+    deps.recordToolUsage({ kind: "scopeEvent", approvalKey, scopeType, event });
+  } catch (_) { /* logging must never break dispatch */ }
+}
+
 function resolvePageUidForBlock(blockUid) {
   // Given a UID, return the page-level UID it belongs to.
   // If the UID itself is a page, return it directly.
@@ -531,11 +614,7 @@ export async function executeToolCall(toolName, args, { readOnly = false, skipAp
 
   // For meta-tools, key approval on the specific inner tool/slug
   // so approving e.g. GMAIL_SEND doesn't silently approve GOOGLECALENDAR_DELETE.
-  const approvalKey = toolName === "COMPOSIO_MULTI_EXECUTE_TOOL"
-    ? `${toolName}::${(Array.isArray(effectiveArgs?.tools) ? effectiveArgs.tools : []).map(t => t?.tool_slug || "").filter(Boolean).sort().join(",")}`
-    : toolName === "LOCAL_MCP_EXECUTE"
-      ? `LOCAL_MCP_EXECUTE::${effectiveArgs?.tool_name || ""}`
-      : toolName;
+  const approvalKey = buildToolScopeKey(toolName, effectiveArgs);
   const now = Date.now();
   if (isMutating && !skipApproval) {
     // Scoped page approval for block-creation tools: approve once per page,
@@ -547,24 +626,44 @@ export async function executeToolCall(toolName, args, { readOnly = false, skipAp
         const approved = await deps.promptToolExecutionApproval(toolName, effectiveArgs);
         if (!approved) {
           if (deps.recordUsageStat) deps.recordUsageStat("approvalsDenied");
+          for (const uid of targetPageUids) {
+            emitScopeEvent(`page::${uid}`, "page", "denied");
+          }
           throw new Error(`User denied execution for ${toolName}`);
         }
         if (deps.recordUsageStat) deps.recordUsageStat("approvalsGranted");
         // Approve all target pages (including already-approved ones, to refresh TTL)
         rememberPageWriteApproval(targetPageUids, Date.now());
+        // Fresh grant for unapproved pages; cached for any already-approved pages
+        // that happened to be in the same call (mixed batch).
+        const unapprovedSet = new Set(unapprovedPages);
+        for (const uid of targetPageUids) {
+          emitScopeEvent(
+            `page::${uid}`,
+            "page",
+            unapprovedSet.has(uid) ? "granted" : "cached"
+          );
+        }
         deps.debugLog("[Chief flow] Page write approved for UIDs (15m TTL):", targetPageUids.join(", "));
       } else {
+        for (const uid of targetPageUids) {
+          emitScopeEvent(`page::${uid}`, "page", "cached");
+        }
         deps.debugLog("[Chief flow] Page write auto-approved (previously approved pages):", targetPageUids.join(", "));
       }
     } else if (!hasValidToolApproval(approvalKey, now)) {
       const approved = await deps.promptToolExecutionApproval(toolName, effectiveArgs);
       if (!approved) {
         if (deps.recordUsageStat) deps.recordUsageStat("approvalsDenied");
+        emitScopeEvent(approvalKey, "tool", "denied");
         throw new Error(`User denied execution for ${toolName}`);
       }
       if (deps.recordUsageStat) deps.recordUsageStat("approvalsGranted");
       rememberToolApproval(approvalKey, Date.now());
+      emitScopeEvent(approvalKey, "tool", "granted");
       deps.debugLog("[Chief flow] Tool approved and whitelisted for session (15m TTL):", approvalKey);
+    } else {
+      emitScopeEvent(approvalKey, "tool", "cached");
     }
   }
 

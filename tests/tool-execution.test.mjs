@@ -7,6 +7,7 @@ import {
   extractToolCalls,
   convertMessagesForProvider,
   detectSuccessfulWriteToolCallsInMessages,
+  computeToolCallScope,
 } from "../src/tool-execution.js";
 
 // ── Shared mock deps ────────────────────────────────────────────────────────
@@ -523,4 +524,102 @@ test("detectSuccessfulWriteToolCallsInMessages: multiple writes across formats",
   ];
   const writes = detectSuccessfulWriteToolCallsInMessages(messages);
   assert.equal(writes.length, 2);
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// computeToolCallScope (roadmap #82 Phase 1 tool/scope logging)
+// ═════════════════════════════════════════════════════════════════════════════
+
+function makeScopeDeps(overrides = {}) {
+  // Mock Roam API for page-uid resolution tests. Returns a title (truthy) for
+  // any UID query so resolvePageUidForBlock short-circuits and treats input
+  // UIDs as already being page UIDs.
+  return makeDeps({
+    getRoamAlphaApi: () => ({ q: () => "Mock Page" }),
+    escapeForDatalog: (s) => String(s).replace(/"/g, '\\"'),
+    ...overrides,
+  });
+}
+
+test("computeToolCallScope: plain mutating Roam tool → tool scope", () => {
+  initToolExecution(makeScopeDeps({
+    getRoamNativeTools: () => [{ name: "roam_update_block", isMutating: true }],
+  }));
+  const scope = computeToolCallScope("roam_update_block", { uid: "abc" });
+  assert.equal(scope.resolvedName, "roam_update_block");
+  assert.equal(scope.scopeType, "tool");
+  assert.deepEqual(scope.approvalKeys, ["roam_update_block"]);
+});
+
+test("computeToolCallScope: non-mutating tool → scopeType none, empty keys", () => {
+  initToolExecution(makeScopeDeps({
+    getRoamNativeTools: () => [{ name: "roam_search", isMutating: false }],
+  }));
+  const scope = computeToolCallScope("roam_search", { query: "x" });
+  assert.equal(scope.scopeType, "none");
+  assert.deepEqual(scope.approvalKeys, []);
+  assert.equal(scope.resolvedName, "roam_search");
+});
+
+test("computeToolCallScope: COMPOSIO_MULTI_EXECUTE_TOOL → sorted-composite key", () => {
+  initToolExecution(makeScopeDeps());
+  const scope = computeToolCallScope("COMPOSIO_MULTI_EXECUTE_TOOL", {
+    tools: [
+      { tool_slug: "GMAIL_SEND" },
+      { tool_slug: "GOOGLECAL_CREATE" },
+    ],
+  });
+  assert.equal(scope.scopeType, "tool");
+  // Slugs are sorted for stable keys
+  assert.deepEqual(
+    scope.approvalKeys,
+    ["COMPOSIO_MULTI_EXECUTE_TOOL::GMAIL_SEND,GOOGLECAL_CREATE"]
+  );
+  assert.equal(scope.resolvedName, "GMAIL_SEND,GOOGLECAL_CREATE");
+});
+
+test("computeToolCallScope: LOCAL_MCP_EXECUTE unwraps inner tool name", () => {
+  initToolExecution(makeScopeDeps({
+    getLocalMcpToolsCache: () => [
+      { name: "zotero_create_item", isMutating: true },
+    ],
+  }));
+  const scope = computeToolCallScope("LOCAL_MCP_EXECUTE", {
+    tool_name: "zotero_create_item",
+    arguments: {},
+  });
+  assert.equal(scope.scopeType, "tool");
+  assert.deepEqual(scope.approvalKeys, ["LOCAL_MCP_EXECUTE::zotero_create_item"]);
+  assert.equal(scope.resolvedName, "zotero_create_item");
+});
+
+test("computeToolCallScope: roam_create_blocks with multi-batches fans out per page UID", () => {
+  initToolExecution(makeScopeDeps({
+    getRoamNativeTools: () => [{ name: "roam_create_blocks", isMutating: true }],
+  }));
+  const scope = computeToolCallScope("roam_create_blocks", {
+    batches: [
+      { parent_uid: "pgB", blocks: [{ string: "x" }] },
+      { parent_uid: "pgA", blocks: [{ string: "y" }] },
+    ],
+  });
+  assert.equal(scope.scopeType, "page");
+  // Page keys are sorted for stable ordering
+  assert.deepEqual(scope.approvalKeys, ["page::pgA", "page::pgB"]);
+  assert.equal(scope.resolvedName, "roam_create_blocks");
+});
+
+test("computeToolCallScope: roam_create_block single parent_uid → single page key", () => {
+  initToolExecution(makeScopeDeps({
+    getRoamNativeTools: () => [{ name: "roam_create_block", isMutating: true }],
+  }));
+  const scope = computeToolCallScope("roam_create_block", { parent_uid: "pg1" });
+  assert.equal(scope.scopeType, "page");
+  assert.deepEqual(scope.approvalKeys, ["page::pg1"]);
+});
+
+test("computeToolCallScope: unknown/empty tool returns none scope", () => {
+  initToolExecution(makeScopeDeps());
+  assert.equal(computeToolCallScope("", {}).scopeType, "none");
+  assert.equal(computeToolCallScope(null, null).scopeType, "none");
 });
