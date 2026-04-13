@@ -4505,9 +4505,9 @@ async function askChiefOfStaff(userMessage, options = {}) {
   // /ludicrous implies power mode; determine effective tier
   const effectiveTier = ludicrousFlag ? "ludicrous" : powerFlag ? "power" : "mini";
 
-  // Reset per-prompt approval state so prior approvals don't carry over to unrelated requests
-  clearToolApprovals();
-  // Reset per-prompt MCP flag so prior MCP usage doesn't force escalation on unrelated prompts
+  // Approvals persist across prompts via the 15-minute TTL in tool-execution.js
+  // (matches the documented design in security/ai-agent-security-reference-compliance.md A4).
+  // Reset per-prompt MCP flag so prior MCP usage doesn't force escalation on unrelated prompts.
   setSessionUsedLocalMcp(false);
 
   debugLog("[Chief flow] askChiefOfStaff start:", {
