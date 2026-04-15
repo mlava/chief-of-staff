@@ -10,6 +10,7 @@ import {
   sanitiseMarkdownHref,
   detectInjectionPatterns,
   detectMemoryInjection,
+  detectHomoglyphAttack,
   canonicaliseSchemaForHash,
 } from "../src/security-core.js";
 
@@ -423,3 +424,96 @@ test("canonicaliseSchemaForHash preserves combiners (oneOf, anyOf, allOf)", () =
   assert.equal(result.oneOf.length, 2);
   assert.equal(result.oneOf[0].type, "string");
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// detectHomoglyphAttack — roadmap #120
+// ═══════════════════════════════════════════════════════════════════════════════
+
+test("detectHomoglyphAttack: ASCII fast path returns unflagged", () => {
+  const r = detectHomoglyphAttack("Plain English text with no funny characters.");
+  assert.equal(r.flagged, false);
+  assert.deepEqual(r.patterns, []);
+  assert.deepEqual(r.suspiciousTokens, []);
+});
+
+test("detectHomoglyphAttack: flags roadmap attack vector (Cyrillic U+0456 in github)", () => {
+  // "gіthub" where і is Cyrillic U+0456
+  const r = detectHomoglyphAttack("Please visit g\u0456thub.com/anthropics");
+  assert.equal(r.flagged, true);
+  assert.ok(r.patterns.includes("homoglyph_mixed_script"));
+  assert.ok(r.suspiciousTokens.some(t => t.includes("\u0456")));
+});
+
+test("detectHomoglyphAttack: flags uppercase Cyrillic confusable", () => {
+  // "РayPal" where Р is Cyrillic U+0420
+  const r = detectHomoglyphAttack("Visit \u0420ayPal.com today");
+  assert.equal(r.flagged, true);
+  assert.ok(r.patterns.includes("homoglyph_mixed_script"));
+});
+
+test("detectHomoglyphAttack: flags Cyrillic 'a' confusable in Latin word", () => {
+  // "pаypal" where а is Cyrillic U+0430
+  const r = detectHomoglyphAttack("Login at p\u0430ypal.com now");
+  assert.equal(r.flagged, true);
+  assert.ok(r.patterns.includes("homoglyph_mixed_script"));
+});
+
+test("detectHomoglyphAttack: flags Greek confusable in Latin word", () => {
+  // "pаypаl" using Greek alpha U+03B1
+  const r = detectHomoglyphAttack("Go to p\u03B1ypal.com");
+  assert.equal(r.flagged, true);
+  assert.ok(r.patterns.includes("homoglyph_mixed_script"));
+});
+
+test("detectHomoglyphAttack: flags invisible zero-width characters", () => {
+  const r = detectHomoglyphAttack("hello\u200Bworld sneaky payload here");
+  assert.equal(r.flagged, true);
+  assert.ok(r.patterns.includes("homoglyph_invisible_chars"));
+});
+
+test("detectHomoglyphAttack: flags bidi override characters", () => {
+  const r = detectHomoglyphAttack("reverse this \u202Etxet");
+  assert.equal(r.flagged, true);
+  assert.ok(r.patterns.includes("homoglyph_invisible_chars"));
+});
+
+test("detectHomoglyphAttack: does NOT flag scientific units (μm, Ω)", () => {
+  const r = detectHomoglyphAttack("The beam width is 5 \u03BCm across and 3 \u03A9 resistance");
+  assert.equal(r.flagged, false);
+  assert.deepEqual(r.patterns, []);
+});
+
+test("detectHomoglyphAttack: does NOT flag whole-word Cyrillic content", () => {
+  // "Статья о безопасности" — pure Cyrillic, no mixing
+  const r = detectHomoglyphAttack("\u0421\u0442\u0430\u0442\u044C\u044F \u043E \u0431\u0435\u0437\u043E\u043F\u0430\u0441\u043D\u043E\u0441\u0442\u0438");
+  assert.equal(r.flagged, false);
+  assert.deepEqual(r.patterns, []);
+});
+
+test("detectHomoglyphAttack: does NOT flag accented Latin (café, naïve, résumé)", () => {
+  const r = detectHomoglyphAttack("café naïve résumé piñata");
+  assert.equal(r.flagged, false);
+  assert.deepEqual(r.patterns, []);
+});
+
+test("detectHomoglyphAttack: handles empty, null, undefined, and non-string input", () => {
+  assert.deepEqual(detectHomoglyphAttack(""), { flagged: false, patterns: [], suspiciousTokens: [] });
+  assert.deepEqual(detectHomoglyphAttack(null), { flagged: false, patterns: [], suspiciousTokens: [] });
+  assert.deepEqual(detectHomoglyphAttack(undefined), { flagged: false, patterns: [], suspiciousTokens: [] });
+  assert.deepEqual(detectHomoglyphAttack(42), { flagged: false, patterns: [], suspiciousTokens: [] });
+});
+
+test("detectHomoglyphAttack: NFKC normalises full-width Latin (not a homoglyph attack)", () => {
+  // Full-width "github" — NFKC collapses to plain ASCII, should not flag.
+  const r = detectHomoglyphAttack("\uFF47\uFF49\uFF54\uFF48\uFF55\uFF42");
+  assert.equal(r.flagged, false);
+});
+
+test("detectHomoglyphAttack: caps suspiciousTokens at 8 entries", () => {
+  // Ten mixed-script words in one payload.
+  const attack = Array.from({ length: 10 }, (_, i) => `g\u0456thub${i}`).join(" ");
+  const r = detectHomoglyphAttack(attack);
+  assert.equal(r.flagged, true);
+  assert.ok(r.suspiciousTokens.length <= 8);
+});
+

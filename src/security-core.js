@@ -58,6 +58,60 @@ export function detectInjectionPatterns(text) {
   return { flagged: matched.length > 0, patterns: matched };
 }
 
+// ── Unicode homoglyph detection (roadmap #120) ───────────────────────────────
+// Catches mixed-script tokens (Latin + Cyrillic/Greek confusable) and invisible
+// control characters in untrusted content — e.g. `gіthub.com` with Cyrillic
+// U+0456 substituted for Latin `i`, or a zero-width space hiding a payload.
+
+const HOMOGLYPH_ASCII_RE = /^[\x00-\x7F]*$/;
+const HOMOGLYPH_INVISIBLE_RE = /[\u200B-\u200D\u2060\uFEFF\u202A-\u202E\u2066-\u2069]|[\u{E0000}-\u{E007F}]/u;
+const HOMOGLYPH_TOKEN_RE = /[\p{L}\p{M}]+/gu;
+const HOMOGLYPH_LATIN_RE = /[A-Za-zÀ-ÖØ-öø-ÿ]/;
+// Cyrillic letters visually indistinguishable from Latin (the real attack surface)
+const HOMOGLYPH_CONFUSABLE_CYRILLIC = /[\u0430\u0435\u0456\u0458\u043E\u0440\u0441\u0443\u0445\u0455\u0410\u0412\u0415\u041A\u041C\u041D\u041E\u0420\u0421\u0422\u0425\u04AE]/;
+// Greek letters visually indistinguishable from Latin
+const HOMOGLYPH_CONFUSABLE_GREEK = /[\u03B1\u03B2\u03B5\u03B9\u03BF\u03C1\u03C5\u0391\u0392\u0395\u0396\u0397\u0399\u039A\u039C\u039D\u039F\u03A1\u03A4\u03A5\u03A7]/;
+const HOMOGLYPH_MIN_TOKEN_LEN = 4;
+const HOMOGLYPH_MAX_SUSPICIOUS_TOKENS = 8;
+
+export function detectHomoglyphAttack(text) {
+  if (!text || typeof text !== "string") return { flagged: false, patterns: [], suspiciousTokens: [] };
+  // Fast path: pure ASCII — the common case for almost all MCP results.
+  if (HOMOGLYPH_ASCII_RE.test(text)) return { flagged: false, patterns: [], suspiciousTokens: [] };
+
+  const patterns = [];
+  const suspiciousTokens = [];
+
+  // Invisible/bidi scan runs on the raw text — NFKC would strip some of these.
+  if (HOMOGLYPH_INVISIBLE_RE.test(text)) {
+    patterns.push("homoglyph_invisible_chars");
+  }
+
+  // NFKC collapses compatibility confusables (full-width Latin, ligatures) so
+  // only true cross-script lookalikes remain.
+  const normalised = text.normalize("NFKC");
+  const seenTokens = new Set();
+  let mixedScriptFlagged = false;
+
+  for (const match of normalised.matchAll(HOMOGLYPH_TOKEN_RE)) {
+    const token = match[0];
+    if (token.length < HOMOGLYPH_MIN_TOKEN_LEN) continue;
+    if (!HOMOGLYPH_LATIN_RE.test(token)) continue;
+    if (!HOMOGLYPH_CONFUSABLE_CYRILLIC.test(token) && !HOMOGLYPH_CONFUSABLE_GREEK.test(token)) continue;
+
+    if (!mixedScriptFlagged) {
+      patterns.push("homoglyph_mixed_script");
+      mixedScriptFlagged = true;
+    }
+    if (!seenTokens.has(token) && suspiciousTokens.length < HOMOGLYPH_MAX_SUSPICIOUS_TOKENS) {
+      seenTokens.add(token);
+      suspiciousTokens.push(token);
+    }
+  }
+
+  return { flagged: patterns.length > 0, patterns, suspiciousTokens };
+}
+
 export const MEMORY_INJECTION_PATTERNS = [
   { name: "always_directive", re: /\b(always|must\s+always|you\s+(?:should|must)\s+always)\s+(do|perform|execute|run|call|use|send|skip|ignore|bypass|include|respond|start|begin|prefix|prepend|append|add|insert|output|reply|answer|return|generate|produce|write|format)\b/i },
   { name: "never_directive", re: /\b(never|must\s+never|you\s+(?:should|must)\s+never|do\s+not\s+ever)\s+(ask|require|request|check|verify|confirm|validate|show|display|mention|refuse|use|call|invoke|run|execute|trigger|access|report|log|record|flag|warn|alert|block|deny|reject)\b/i },
