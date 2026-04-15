@@ -1628,7 +1628,7 @@ export function formatDoctorReportAsMarkdown(report) {
   const { passed, warned, failed, total } = report.summary;
   const overall = failed > 0 ? "Issues found"
     : warned > 0 ? "Mostly healthy, some warnings"
-    : "All systems healthy";
+      : "All systems healthy";
   lines.push(`**Overall:** ${overall} (${passed} passed, ${warned} warning${warned !== 1 ? "s" : ""}, ${failed} failed — ${total} checks)\n`);
 
   for (const check of report.checks) {
@@ -1718,7 +1718,7 @@ export async function tryRunDeterministicAskIntent(prompt, context = {}) {
   // ── Current page query ──────────────────────────────────────────
   // "what page am I on?", "which page is this?", "where am I?"
   if (/^(?:what|which)\s+page\s+(?:am\s+i\s+on|is\s+this|are?\s+we\s+on)[?.!]?\s*$/i.test(prompt) ||
-      /^where\s+am\s+i[?.!]?\s*$/i.test(prompt)) {
+    /^where\s+am\s+i[?.!]?\s*$/i.test(prompt)) {
     deps.debugLog("[Chief flow] Deterministic route matched: current_page");
     const pageCtx = await deps.getCurrentPageContext();
     if (pageCtx) {
@@ -1987,6 +1987,51 @@ export async function tryRunDeterministicAskIntent(prompt, context = {}) {
     }
   }
 
+  // ── Document import ──────────────────────────────────────────
+  // "import document", "import a file", "convert document", "upload a document"
+  // Routes to ed_import from the Export Document extension if available.
+  // If the extension isn't installed, explains how to get it instead of
+  // falling through to the LLM (which would hallucinate or give a generic
+  // "I don't have that tool" answer).
+  const importDocMatch = /^(?:please\s+)?(?:import|convert|upload|bring\s+in|ingest)\s+(?:a\s+|my\s+|the\s+)?(?:document|file|docx|word\s+doc|\.?docx|markdown\s+file|html\s+file|epub)\s*[?.!]*$/i.test(prompt);
+  if (importDocMatch) {
+    deps.debugLog("[Chief flow] Deterministic route matched: import_document");
+    const extTools = deps.getExternalExtensionTools() || [];
+    const importTool = extTools.find(t => t.name === "ed_import");
+    if (!importTool || typeof importTool.execute !== "function") {
+      return deps.publishAskResponse(
+        prompt,
+        "Document import requires the **Export Document** extension. Install it from Roam Depot and reload — once it's active you'll be able to import `.docx`, `.odt`, `.rtf`, `.epub`, `.html`, and `.md` files directly into your graph.",
+        assistantName,
+        suppressToasts
+      );
+    }
+    try {
+      const result = await importTool.execute({});
+      const errText = typeof result?.error === "string" ? result.error : "";
+      if (result?.cancelled || /no file selected|cancel/i.test(errText)) {
+        return deps.publishAskResponse(prompt, "No file selected. Import cancelled.", assistantName, suppressToasts);
+      }
+      if (/programmatic import|requires permission|security alert/i.test(errText)) {
+        return deps.publishAskResponse(
+          prompt,
+          "Document import needs your permission first. Open **Export & Import Documents** in Roam Depot settings and enable **'Allow programmatic imports'** — or run an interactive import once and accept the security alert. Then ask me to import again.",
+          assistantName,
+          suppressToasts
+        );
+      }
+      if (!result?.success) {
+        const msg = errText || "Import failed for an unknown reason.";
+        return deps.publishAskResponse(prompt, `Import failed: ${msg}`, assistantName, suppressToasts);
+      }
+      const { pageTitle, blocksCreated, filename } = result;
+      const summary = `Imported **[[${pageTitle}]]** from \`${filename}\` — ${blocksCreated} block${blocksCreated === 1 ? "" : "s"} created.`;
+      return deps.publishAskResponse(prompt, summary, assistantName, suppressToasts);
+    } catch (e) {
+      return deps.publishAskResponse(prompt, `Import failed: ${e?.message || "Unknown error"}`, assistantName, suppressToasts);
+    }
+  }
+
   // ── Today's page content ───────────────────────────────────────
   // "what's on today's page", "show today's page content", "today's notes", "what did I write today"
   // NOTE: "what's on today?" must NOT match — that's a calendar/schedule question.
@@ -2111,13 +2156,13 @@ export async function tryRunDeterministicAskIntent(prompt, context = {}) {
   // ── UI panel shortcuts ─────────────────────────────────────────
   // "open roam depot", "open graph overview", "open all pages", "open settings", "open help", "open graph view", "share link"
   const uiPanelRoutes = [
-    { pattern: /^(?:open|show)\s+(?:the\s+)?(?:roam\s+)?depot\s*[.!?]*$/i,       tool: "roam_open_depot",          label: "Roam Depot" },
-    { pattern: /^(?:open|show)\s+(?:the\s+)?graph(?:\s+overview)?\s*[.!?]*$/i,    tool: "roam_open_graph_overview", label: "Graph Overview" },
-    { pattern: /^(?:open|show|list)\s+(?:the\s+)?all\s+pages?\s*[.!?]*$/i,        tool: "roam_open_all_pages",      label: "All Pages" },
-    { pattern: /^(?:open|show)\s+(?:the\s+)?(?:roam\s+)?settings?\s*[.!?]*$/i,    tool: "roam_open_settings",       label: "Settings" },
-    { pattern: /^(?:open|show)\s+(?:the\s+)?graph\s+view\s*[.!?]*$/i,            tool: "roam_open_graph_view",     label: "Graph View" },
-    { pattern: /^(?:share|copy)\s+(?:the\s+)?(?:page\s+)?link\s*[.!?]*$/i,       tool: "roam_share_link",          label: "Share Link" },
-    { pattern: /^(?:open|show)\s+(?:the\s+)?(?:roam\s+)?help(?:\s+menu)?\s*[.!?]*$/i, tool: "roam_open_help",       label: "Help" },
+    { pattern: /^(?:open|show)\s+(?:the\s+)?(?:roam\s+)?depot\s*[.!?]*$/i, tool: "roam_open_depot", label: "Roam Depot" },
+    { pattern: /^(?:open|show)\s+(?:the\s+)?graph(?:\s+overview)?\s*[.!?]*$/i, tool: "roam_open_graph_overview", label: "Graph Overview" },
+    { pattern: /^(?:open|show|list)\s+(?:the\s+)?all\s+pages?\s*[.!?]*$/i, tool: "roam_open_all_pages", label: "All Pages" },
+    { pattern: /^(?:open|show)\s+(?:the\s+)?(?:roam\s+)?settings?\s*[.!?]*$/i, tool: "roam_open_settings", label: "Settings" },
+    { pattern: /^(?:open|show)\s+(?:the\s+)?graph\s+view\s*[.!?]*$/i, tool: "roam_open_graph_view", label: "Graph View" },
+    { pattern: /^(?:share|copy)\s+(?:the\s+)?(?:page\s+)?link\s*[.!?]*$/i, tool: "roam_share_link", label: "Share Link" },
+    { pattern: /^(?:open|show)\s+(?:the\s+)?(?:roam\s+)?help(?:\s+menu)?\s*[.!?]*$/i, tool: "roam_open_help", label: "Help" },
   ];
   for (const route of uiPanelRoutes) {
     if (route.pattern.test(prompt)) {
