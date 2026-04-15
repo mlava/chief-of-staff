@@ -1,10 +1,10 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:69e4a3ef-dc61-4af2-b2c6-59343627cb8e",
+  "serialNumber": "urn:uuid:54ac54e6-07c4-4937-a4a0-ed337a710936",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-03-01T04:46:20.351Z",
+    "timestamp": "2026-04-15T15:16:13.994Z",
     "tools": [
       {
         "vendor": "chief-of-staff",
@@ -28,7 +28,7 @@
       },
       {
         "name": "chief:aibom:ai-component-count",
-        "value": "16"
+        "value": "20"
       }
     ]
   },
@@ -3630,6 +3630,25 @@
       ]
     },
     {
+      "type": "service",
+      "name": "llm-endpoint/groq",
+      "version": "runtime-config",
+      "description": "https://api.groq.com/openai/v1/chat/completions",
+      "endpoints": [
+        "https://api.groq.com/openai/v1/chat/completions"
+      ],
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-endpoint"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "groq"
+        }
+      ]
+    },
+    {
       "type": "machine-learning-model",
       "name": "llm-model/anthropic/mini",
       "version": "claude-haiku-4-5-20251001",
@@ -3651,7 +3670,7 @@
     {
       "type": "machine-learning-model",
       "name": "llm-model/openai/mini",
-      "version": "gpt-5-mini",
+      "version": "gpt-5.4-mini",
       "properties": [
         {
           "name": "chief:aibom:component-class",
@@ -3670,7 +3689,7 @@
     {
       "type": "machine-learning-model",
       "name": "llm-model/gemini/mini",
-      "version": "gemini-2.5-flash",
+      "version": "gemini-3.1-flash-lite-preview",
       "properties": [
         {
           "name": "chief:aibom:component-class",
@@ -3698,6 +3717,25 @@
         {
           "name": "chief:aibom:provider",
           "value": "mistral"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "mini"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/groq/mini",
+      "version": "llama-3.3-70b-versatile",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "groq"
         },
         {
           "name": "chief:aibom:tier",
@@ -3783,6 +3821,25 @@
     },
     {
       "type": "machine-learning-model",
+      "name": "llm-model/groq/power",
+      "version": "llama-3.3-70b-versatile",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "groq"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "power"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
       "name": "llm-model/mistral/ludicrous",
       "version": "mistral-large-2512",
       "properties": [
@@ -3850,6 +3907,25 @@
         {
           "name": "chief:aibom:provider",
           "value": "anthropic"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "ludicrous"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/groq/ludicrous",
+      "version": "llama-3.3-70b-versatile",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "groq"
         },
         {
           "name": "chief:aibom:tier",

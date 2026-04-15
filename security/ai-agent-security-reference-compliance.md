@@ -34,6 +34,8 @@ The new detector runs NFKC normalisation, tokenises via Unicode `\p{L}`, skips t
 
 **Router fix bundled with this work (separate commit).** `deterministic-router.js` `add_to_today` fallback regex was hardened so prompts with an explicit `to/into/onto <destination>` phrase no longer hijack Open Brain / memory capture intents into the daily page. Not security per se but discovered while testing the homoglyph guard end-to-end.
 
+**What changed — CI pipeline hardening (roadmap #121, April 16).** `.github/workflows/ci.yml` already existed since 2026-03-01, contrary to the roadmap's framing of "add a new workflow", but lacked two top-level blocks worth adding in the same OWASP ASI04 / supply-chain hardening spirit. Added `concurrency.group: ci-${{ github.workflow }}-${{ github.ref }}` with `cancel-in-progress: true` so new pushes to a branch cancel any in-progress CI run on that branch — prevents agent-driven pushes from burning minutes on stale runs while keeping `main` isolated from feature-branch cancellations. Added `permissions: contents: read` locking the default `GITHUB_TOKEN` to the minimum sufficient scope for the current steps (checkout reads; `upload-artifact@v4` uses a separate internal `ACTIONS_RUNTIME_TOKEN`, not `GITHUB_TOKEN`, so artifact upload still works). See the updated inline CI snippet below for the full file. Impact: **C8 (vet supply chain continuously)** strengthened by a smaller default token scope; **B1 (runtime policy engine)** unchanged in behaviour but the CI gate itself now runs under tighter defaults.
+
 ---
 
 ## Executive Summary
@@ -439,6 +441,11 @@ name: CI
 on:
   pull_request:
   push:
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
 jobs:
   build-secure:
     name: Security Tests + Build + AIBOM
@@ -458,9 +465,11 @@ jobs:
             artifacts/aibom-static.baseline.json
 ```
 
-The `build:secure` script chain: `npm run test:security && npm run build && npm run aibom:generate`
+The `build:secure` script chain: `npm test && npm run build && npm run aibom:generate` — runs the full 26-suite test suite (not just `test:security`), then webpack, then the static AIBOM generator.
 
-This means every push and PR must pass security tests, build successfully, and produce fresh AIBOM artifacts.
+**Pass 4 hardening (roadmap #121, 2026-04-16):** added top-level `concurrency` and `permissions` blocks. Concurrency group `ci-${{ github.workflow }}-${{ github.ref }}` with `cancel-in-progress: true` means a new push to a branch cancels any in-progress CI run for that branch, preventing agent-driven pushes from burning minutes on stale runs while `main` stays isolated from feature-branch cancellations. `permissions: contents: read` locks the default `GITHUB_TOKEN` scope to the minimum sufficient set for the current steps (checkout needs `contents: read`; `upload-artifact` uses the separate `ACTIONS_RUNTIME_TOKEN` internally, not `GITHUB_TOKEN`). OWASP ASI04 supply-chain hardening.
+
+This means every push and PR must pass the full test suite, build successfully, and produce fresh AIBOM artifacts — and stale runs get cancelled automatically.
 
 ### GitHub Branch Protection Rulesets (Verified)
 
