@@ -4,6 +4,13 @@ on:
   pull_request:
   push:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   build-secure:
     name: Security Tests + Build + AIBOM
