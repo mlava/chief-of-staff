@@ -1,14 +1,44 @@
-# AI Agent Security — Compliance Audit (Pass 3)
+# AI Agent Security — Compliance Audit (Pass 4)
 
-**Audited:** 2026-03-01
-**Reference:** `docs/ai-agent-security-reference.md` (OWASP, Google, NIST, MITRE synthesis)
+**Audited:** 2026-04-15 (Pass 4 delta update; Pass 3 baseline 2026-03-01)
+**Reference:** `security/ai-agent-security-reference.md` (OWASP, Google, NIST, MITRE synthesis)
 **Codebase version:** Current HEAD
+
+---
+
+## Pass 4 Update — April 2026
+
+Delta since the 2026-03-01 Pass 3 audit. Full Pass 3 body follows unchanged below this section except for pattern-count corrections and targeted homoglyph layer annotations.
+
+**What changed — Unicode homoglyph detection (roadmap #120, April 15).** A new pure function `detectHomoglyphAttack()` was added to `security-core.js` to close a confirmed gap in `INJECTION_PATTERNS`: the existing 15 semantic patterns catch linguistic/instruction attacks but have no mixed-script or confusable-character coverage. The attack vector is a malicious MCP tool result containing a Cyrillic/Greek lookalike in a URL or identifier (e.g. `gіthub.com` with Cyrillic і U+0456) that flows into a subsequent tool call against a typosquatted host.
+
+The new detector runs NFKC normalisation, tokenises via Unicode `\p{L}`, skips tokens under 4 characters (suppresses scientific-unit false positives like `μm`), and flags tokens that mix Latin letters with any character from a curated Cyrillic/Greek confusables allowlist. Invisible zero-width and bidi-override characters are detected separately (before normalisation, since NFKC strips some of them). Returns `{ flagged, patterns, suspiciousTokens }` matching the existing detector contract.
+
+**Where it plugs in:**
+
+1. **MCP tool results (soft warning):** `wrapUntrustedWithInjectionScan` in `security.js` now calls `detectHomoglyphAttack` alongside `detectInjectionPatterns` and merges both results into the same `⚠️ INJECTION WARNING` banner and `injectionWarnings` usage stat. The model sees a single warning in context and is instructed to treat the content as data.
+
+2. **User chat input (hard-stop):** `scanUserInputHomoglyphs` in `security.js` and a pre-LLM gate in `askChiefOfStaff` (`index.js`) hard-stop the request before any LLM call if mixed-script tokens are detected, publishing a direct chat warning asking the user to retype or bypass. A soft prompt annotation was tried and found insufficient: real-world testing showed the intent classifier rated homoglyph content as low/medium risk and proceeded anyway, and downstream LLM turns were observed hallucinating *new* homoglyphs (different Cyrillic characters at different positions) into outbound tool arguments — a class of drift not covered by pattern-matching on the input alone. A `/allow-homoglyph` slash flag bypasses the hard-stop for deliberate use (testing, phishing investigation, referencing a non-English identifier). The flag is deliberately kept out of the user-facing README so most users never reach for it; power users can discover it from the warning text itself. Bypass still logs and increments the usage stat.
+
+**Testing added.** 12 new cases in `tests/security-core.test.mjs` cover the roadmap attack vector, uppercase Cyrillic, Greek confusables, invisible/bidi characters, NFKC normalisation of full-width Latin, and three explicit false-positive suppression cases (scientific units, whole-word Cyrillic, accented Latin). Full suite: 672/672 green.
+
+**Impact on posture and controls:**
+
+- **A2 — Map trust boundaries:** strengthened with a new Unicode-layer detector complementing the 15 semantic patterns. See updated entry below.
+- **B1 — Runtime policy engine:** new pre-LLM deterministic hard-stop on user chat input (zero LLM tokens spent when triggered).
+- **B2 — Reasoning-based defences:** unchanged — the new detector is deterministic, not model-based.
+- **D1 — Red team for prompt injection:** coverage extended to mixed-script and confusable-character attack variants.
+- **Persistent Risk Surfaces → 1. Prompt Injection (Indirect):** the recommendation to add a complementary detector alongside regex patterns has been partially addressed — the homoglyph detector is a second deterministic method that fires on a disjoint attack class. A classifier-based layer is still valid future work.
+
+**Source:** Paul Hoekstra, "Agentic Engineering Part 4: Keeping Agents on a Leash" (April 2026).
+
+**Router fix bundled with this work (separate commit).** `deterministic-router.js` `add_to_today` fallback regex was hardened so prompts with an explicit `to/into/onto <destination>` phrase no longer hijack Open Brain / memory capture intents into the daily page. Not security per se but discovered while testing the homoglyph guard end-to-end.
 
 ---
 
 ## Executive Summary
 
-Chief of Staff (COS) demonstrates **strong alignment** with the seven-framework reference across all four implementation phases. Three prior hardening passes have built a layered, defence-in-depth architecture that covers the majority of the 30+ controls in the checklist. This audit maps each control to its concrete implementation, flags **persistent risk surfaces** that cannot be fully eliminated by design, and identifies **remaining gaps** with recommended mitigations.
+Chief of Staff (COS) demonstrates **strong alignment** with the seven-framework reference across all four implementation phases. Four prior hardening passes have built a layered, defence-in-depth architecture that covers the majority of the 30+ controls in the checklist. This audit maps each control to its concrete implementation, flags **persistent risk surfaces** that cannot be fully eliminated by design, and identifies **remaining gaps** with recommended mitigations.
 
 **Overall posture:** 27 of 30 checklist controls are implemented or substantially addressed. Three controls are partially addressed with known residual risk. No controls are completely absent.
 
@@ -29,8 +59,10 @@ Chief of Staff (COS) demonstrates **strong alignment** with the seven-framework 
 
 - **System vs user vs untrusted data:** `sanitiseUserContentForPrompt()` in `security-core.js` replaces prompt boundary tags (`<system>`, `<assistant>`, `<user>`) with fullwidth Unicode equivalents, preventing tag injection.
 - **Untrusted wrapper:** `wrapUntrustedWithInjectionScan(source, content)` wraps memory, skill content, Composio schemas, and MCP tool results in `<untrusted source="...">` tags with an injection warning prefix.
-- **Injection detection at boundary:** 13 `INJECTION_PATTERNS` in `security-core.js` scan all untrusted content for prompt injection attempts (role impersonation, instruction override, system prompt extraction, delimiter abuse, encoding attacks).
-- Memory has a separate 12-pattern `MEMORY_INJECTION_PATTERNS` set targeting persistent poisoning vectors.
+- **Semantic injection detection at boundary:** 15 `INJECTION_PATTERNS` in `security-core.js` scan all untrusted content for prompt injection attempts (role impersonation, instruction override, system prompt extraction, delimiter abuse, encoding attacks, explicit tool invocation).
+- **Unicode homoglyph detection at boundary (Pass 4, roadmap #120):** `detectHomoglyphAttack()` runs alongside the semantic patterns and flags mixed-script tokens (Latin + Cyrillic/Greek confusable) and invisible/bidi characters. Merged into the same `⚠️ INJECTION WARNING` banner and `injectionWarnings` usage stat so the model sees a unified warning in context.
+- **User-input hard-stop (Pass 4):** `scanUserInputHomoglyphs()` runs in `askChiefOfStaff` before any LLM call. If flagged and not bypassed via `/allow-homoglyph`, the request is terminated and a warning is published directly to the chat, asking the user to verify the exact string. Zero LLM tokens are spent on flagged inputs.
+- Memory has a separate 13-pattern `MEMORY_INJECTION_PATTERNS` set targeting persistent poisoning vectors.
 
 ### ☑ A3 — Enumerate all tools and actions
 **Status: Implemented — runtime catalogue**
@@ -141,7 +173,7 @@ Deterministic controls enforced regardless of model reasoning:
 ### ☑ B6 — Protect agent memory
 **Status: Implemented — dedicated memory injection guard**
 
-- `guardMemoryWriteCore()` in `security-core.js` scans all memory writes against 12 `MEMORY_INJECTION_PATTERNS` targeting: instruction injection, approval bypass, identity override, behaviour modification, hidden instructions, and privilege escalation.
+- `guardMemoryWriteCore()` in `security-core.js` scans all memory writes against 13 `MEMORY_INJECTION_PATTERNS` targeting: instruction injection, approval bypass, identity override, behaviour modification, hidden instructions, and privilege escalation.
 - Blocked writes are logged with `memoryWriteBlocks` usage stat.
 - Memory content is wrapped in `<untrusted source="memory">` tags when injected into the system prompt.
 - Memory pages are capped at 3,000 chars each.
@@ -256,9 +288,10 @@ Deterministic controls enforced regardless of model reasoning:
 ### ☑ D1 — Red team for prompt injection
 **Status: Implemented**
 
-- 13 injection patterns in `INJECTION_PATTERNS` cover: role impersonation, instruction override, system prompt extraction, delimiter abuse, encoding bypass, base64/rot13 obfuscation.
-- 12 `MEMORY_INJECTION_PATTERNS` specifically target persistent injection via memory.
-- `security-core.test.mjs` includes unit tests for injection detection, memory guard, leakage detection, sanitisation, and schema pinning.
+- 15 injection patterns in `INJECTION_PATTERNS` cover: role impersonation, instruction override, system prompt extraction, delimiter abuse, encoding bypass, base64/rot13 obfuscation, explicit tool invocation.
+- 13 `MEMORY_INJECTION_PATTERNS` specifically target persistent injection via memory.
+- **Unicode homoglyph detection (Pass 4, roadmap #120):** `detectHomoglyphAttack()` covers mixed-script tokens (Latin + Cyrillic/Greek confusable) and invisible/bidi characters — a detection class the regex pattern sets cannot express. Applied to MCP tool results (warning banner) and user chat input (hard-stop before LLM).
+- `security-core.test.mjs` includes unit tests for injection detection, memory guard, leakage detection, sanitisation, schema pinning, and homoglyph detection (12 cases covering the roadmap attack vector, uppercase/lowercase Cyrillic and Greek confusables, invisible/bidi chars, NFKC normalisation, and three false-positive suppression classes).
 - Claimed-action 3-layer defence developed through adversarial testing.
 
 ### ☑ D2 — Test memory poisoning paths
@@ -319,11 +352,11 @@ These risks are inherent to the architecture and cannot be fully eliminated. The
 
 **Risk:** Content processed by the agent (Roam pages, emails, calendar events, MCP tool results) may contain adversarial instructions.
 
-**Current mitigations:** Untrusted wrapping, injection pattern scanning, input separation, system prompt instructions.
+**Current mitigations:** Untrusted wrapping, semantic injection pattern scanning, Unicode homoglyph detection (mixed-script + invisible/bidi characters, added Pass 4), input separation, system prompt instructions. On user chat input, the homoglyph layer hard-stops before any LLM call — the first fully deterministic, zero-token pre-LLM gate in the stack.
 
-**Residual risk:** Pattern-based detection cannot guarantee 100% coverage against novel injection techniques. Sophisticated attacks using semantic manipulation (rather than syntactic patterns) may bypass regex-based guards.
+**Residual risk:** Pattern-based and rule-based detection cannot guarantee 100% coverage against novel injection techniques. Sophisticated attacks using semantic manipulation (rather than syntactic patterns or known confusable characters) may still bypass the deterministic guards. The Pass 4 MCP tool-result path revealed a related drift class worth recording: downstream LLM turns have been observed hallucinating *new* homoglyphs into outbound tool arguments (a different Cyrillic character at a different position than the one in the source). The curated confusables allowlist catches this because the drift stays within the same visual-collision set, but a novel character outside the allowlist would not be caught.
 
-**Recommendation:** Consider integrating a classifier-based injection detector as a complement to regex patterns. Monitor OWASP and MITRE updates for new injection techniques and update patterns accordingly.
+**Recommendation:** The Pass 3 recommendation ("integrate a classifier-based injection detector as a complement to regex patterns") is partially addressed by the Pass 4 homoglyph layer, which is a second deterministic method firing on a disjoint attack class. A true classifier-based layer remains valid future work. Monitor OWASP and MITRE updates for new injection techniques and update patterns accordingly.
 
 ### 2. Model Hallucination / Claimed Actions
 
@@ -373,7 +406,8 @@ The following table summarises where prior hardening work has aligned COS with t
 
 | Hardening Area | Framework Alignment | Key Implementation |
 |---------------|--------------------|--------------------|
-| **Prompt injection detection** | OWASP ASI01, MITRE ATLAS | 13 injection patterns + 12 memory patterns in `security-core.js` |
+| **Prompt injection detection** | OWASP ASI01, MITRE ATLAS | 15 injection patterns + 13 memory patterns in `security-core.js` |
+| **Unicode homoglyph detection** (Pass 4) | OWASP ASI01, MITRE ATLAS | `detectHomoglyphAttack` — NFKC normalisation, Cyrillic/Greek confusables allowlist, invisible/bidi scan. Warning banner on MCP tool results; hard-stop pre-LLM gate on user chat input |
 | **Memory injection guard** | OWASP ASI06 | `guardMemoryWriteCore()` with blocking + usage stats |
 | **Approval gating** | Google P1, P2 (human oversight, least privilege) | `tool-execution.js` — TTL-based, scoped page approval |
 | **MCP supply chain hardening** | OWASP ASI04 | Schema pinning, drift suspension, tool description scanning, MCP BOM |
@@ -461,7 +495,7 @@ This means every push and PR must pass security tests, build successfully, and p
 
 | Priority | Recommendation | Framework Reference |
 |----------|---------------|---------------------|
-| **Medium** | Add classifier-based injection detection alongside regex patterns | OWASP ASI01, MITRE |
+| **Medium** | Add classifier-based injection detection alongside regex patterns — *partially addressed Pass 4 by Unicode homoglyph detection, which is a second deterministic method on a disjoint attack class. Classifier-based layer remains future work* | OWASP ASI01, MITRE |
 | **Medium** | Implement adversarial prompt fuzzer in CI | OWASP D5 variant analysis |
 | **Low** | Add trust exploitation scenario tests | OWASP ASI09 |
 | **Low** | Add agent session replay capability | OWASP ASI08 |
