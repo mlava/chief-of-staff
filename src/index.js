@@ -172,6 +172,7 @@ import {
   detectInjectionPatterns,
   guardMemoryWrite,
   wrapUntrustedWithInjectionScan,
+  scanUserInputHomoglyphs,
   scanToolDescriptions,
   canonicaliseSchemaForHash,
   sanitiseUserContentForPrompt,
@@ -4476,11 +4477,17 @@ async function askChiefOfStaff(userMessage, options = {}) {
   // Detect /lesson flag — records lessons from the conversation
   const lessonFlag = /(?:^|\s)\/lesson(?:\s|$)/i.test(rawPrompt);
 
+  // Detect /allow-homoglyph flag — bypasses the hard-stop homoglyph guard for
+  // deliberate use (testing, capturing a homoglyph as data, investigating a
+  // phishing payload). The guard still logs and records the usage stat.
+  const allowHomoglyphFlag = /(?:^|\s)\/allow-homoglyph(?:\s|$)/i.test(rawPrompt);
+
   let prompt = rawPrompt
     .replace(/(?:^|\s)\/ludicrous(?:\s|$)/i, " ")
     .replace(/(?:^|\s)\/power(?:\s|$)/i, " ")
     .replace(/(?:^|\s)\/(claude|gemini|openai|mistral|groq)(?:\s|$)/gi, " ")
     .replace(/(?:^|\s)\/lesson(?:\s|$)/i, " ")
+    .replace(/(?:^|\s)\/allow-homoglyph(?:\s|$)/i, " ")
     .trim();
 
   // /lesson — inject lesson-extraction prompt (valid even when prompt is otherwise empty)
@@ -4495,6 +4502,28 @@ async function askChiefOfStaff(userMessage, options = {}) {
   }
 
   if (!prompt) return;
+
+  // Homoglyph scan on user input — hard-stop BEFORE any LLM call if mixed-script
+  // tokens are present. A soft notice appended to the prompt is not enough: the
+  // model's intent classifier rates homoglyph content as low/medium risk and
+  // proceeds through it, and downstream LLM steps have been observed to
+  // hallucinate NEW homoglyphs in outbound tool call arguments. Users must
+  // explicitly confirm via retyping, or bypass with /allow-homoglyph.
+  const homoglyphScan = scanUserInputHomoglyphs(prompt);
+  if (homoglyphScan.flagged && allowHomoglyphFlag) {
+    debugLog("[Chief flow] Homoglyph guard bypassed via /allow-homoglyph flag.");
+  }
+  if (homoglyphScan.flagged && !allowHomoglyphFlag) {
+    const tokenList = homoglyphScan.suspiciousTokens.slice(0, 3).map(t => `\`${t}\``).join(", ") || "(unknown)";
+    const warning =
+      `⚠️ **Homoglyph warning** — your message contains ${tokenList}, where one or more letters are Cyrillic or Greek characters that look like Latin ones. This is commonly used in phishing, typosquatting, and prompt-injection attacks.\n\n` +
+      `I have stopped before taking any action so you can verify the exact string. Please either:\n\n` +
+      `• **Retype** your request with the corrected spelling, or\n` +
+      `• **Re-send** with \`/allow-homoglyph\` appended if you genuinely want to use the character as-is (e.g. testing, capturing a phishing payload, referencing a non-English identifier).`;
+    const assistantNameEarly = getAssistantDisplayName();
+    debugLog("[Chief flow] askChiefOfStaff hard-stopped: homoglyph in user input.");
+    return publishAskResponse(prompt, warning, assistantNameEarly, suppressToasts);
+  }
 
   // Validate API key for forced provider before any work
   if (providerOverride && extensionAPIRef && !getApiKeyForProvider(extensionAPIRef, providerOverride)) {
