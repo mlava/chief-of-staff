@@ -442,6 +442,7 @@ Many common tasks are handled by a **deterministic router** that matches your in
 | `what roam tools do you have` | Lists tools for a specific category |
 | `remember that X` | Saves to memory (no LLM needed) |
 | `run daily briefing` | Triggers a skill directly by name |
+| `import a document` | Opens a file picker and imports a document (docx, odt, rtf, epub, html, md) as a new Roam page — requires the Export Document extension, which handles pandoc conversion and consent |
 | `staleness report` | Lists skills and scheduled jobs that haven't been reviewed within the configured threshold |
 | `stale skills` | Same — also matches `which jobs need review`, `review my scheduled tasks`, `unreviewed crons`, `outdated skills`, `staleness report` |
 
