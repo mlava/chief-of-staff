@@ -2062,8 +2062,17 @@ export async function tryRunDeterministicAskIntent(prompt, context = {}) {
   // This is a WRITE operation — uses roam_create_block (isMutating: true).
   // Approval gating is enforced here to match the published security contract
   // ("every mutating operation requires explicit approval").
+  //
+  // The second alternative is a bare-shorthand fallback ("capture X", "note X")
+  // with no destination suffix. It is guarded by a negative check for " to <X>"
+  // so prompts like "Capture X to Open Brain" do NOT get hijacked into the DNP —
+  // they fall through to the agent loop, which can resolve the explicit
+  // destination. Without this guard the fallback would greedily swallow the
+  // whole sentence including its real destination as blockText.
+  const hasExplicitOtherDestination = /\b(?:to|into|onto)\s+\S+/i.test(prompt);
   const addTodayMatch = prompt.match(/^(?:add|put|write|note|log|jot(?:\s+down)?|capture)\s+(?:(?:"|')(.+?)(?:"|')|(.+?))\s+(?:to|on|in)\s+(?:my\s+)?(?:today(?:'s)?(?:\s+(?:daily\s*)?(?:page|note))?|the\s+daily\s*(?:page|note)?|DNP)\s*[.!?]*$/i)
-    || prompt.match(/^(?:note|log|jot(?:\s+down)?|capture)\s+(?:(?:"|')(.+?)(?:"|')|(.+?))\s*[.!?]*$/i);
+    || (!hasExplicitOtherDestination
+        && prompt.match(/^(?:note|log|jot(?:\s+down)?|capture)\s+(?:(?:"|')(.+?)(?:"|')|(.+?))\s*[.!?]*$/i));
   if (addTodayMatch) {
     const blockText = (addTodayMatch[1] || addTodayMatch[2] || "").trim();
     if (blockText && blockText.length >= 2) {
