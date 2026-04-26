@@ -312,8 +312,10 @@ async function persistOrphanSummary(orphans, totalOrphans, totalPages) {
 
   await removePreviousEntries(pageUid, "**Orphan Pages**");
 
-  const dateStr = deps.formatRoamDate?.(new Date()) || new Date().toISOString().slice(0, 10);
-  const headerText = `[[${dateStr}]] **Orphan Pages** — ${totalOrphans} page${totalOrphans === 1 ? "" : "s"} with zero incoming references (of ${totalPages} scanned)`;
+  const dateRef = deps.formatLogDateRef
+    ? deps.formatLogDateRef(new Date())
+    : `[[${deps.formatRoamDate?.(new Date()) || new Date().toISOString().slice(0, 10)}]]`;
+  const headerText = `${dateRef} **Orphan Pages** — ${totalOrphans} page${totalOrphans === 1 ? "" : "s"} with zero incoming references (of ${totalPages} scanned)`;
   const insertOrder = deps.getFirstContentOrder ? deps.getFirstContentOrder(pageUid) : 0;
   const headerUid = await deps.createRoamBlock?.(pageUid, headerText, insertOrder);
   if (!headerUid) return;
@@ -338,8 +340,10 @@ async function persistStaleLinkSummary(staleLinks, totalBlocks) {
 
   await removePreviousEntries(pageUid, "**Stale Links**");
 
-  const dateStr = deps.formatRoamDate?.(new Date()) || new Date().toISOString().slice(0, 10);
-  const headerText = `[[${dateStr}]] **Stale Links** — ${staleLinks.length} broken reference${staleLinks.length === 1 ? "" : "s"} (${totalBlocks} blocks scanned)`;
+  const dateRef = deps.formatLogDateRef
+    ? deps.formatLogDateRef(new Date())
+    : `[[${deps.formatRoamDate?.(new Date()) || new Date().toISOString().slice(0, 10)}]]`;
+  const headerText = `${dateRef} **Stale Links** — ${staleLinks.length} broken reference${staleLinks.length === 1 ? "" : "s"} (${totalBlocks} blocks scanned)`;
   const insertOrder = deps.getFirstContentOrder ? deps.getFirstContentOrder(pageUid) : 0;
   const headerUid = await deps.createRoamBlock?.(pageUid, headerText, insertOrder);
   if (!headerUid) return;

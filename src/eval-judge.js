@@ -325,7 +325,9 @@ async function persistEvalLogEntry(trace, scores, evalCost, options = {}) {
     const pageUid = await deps.ensurePageUidByTitle(pageTitle);
     if (!pageUid) return;
 
-    const dateStr = deps.formatRoamDate(new Date(trace.startedAt || Date.now()));
+    const dateRef = deps.formatLogDateRef
+      ? deps.formatLogDateRef(new Date(trace.startedAt || Date.now()))
+      : `[[${deps.formatRoamDate(new Date(trace.startedAt || Date.now()))}]]`;
     const toolCount = (trace.toolCalls || []).length;
     const costStr = typeof evalCost === "number" ? `$${evalCost.toFixed(4)}` : "";
 
@@ -342,7 +344,7 @@ async function persistEvalLogEntry(trace, scores, evalCost, options = {}) {
       ? ` [${scores.rubric.filter(r => r.pass).length}/${scores.rubric.length} rubric]`
       : "";
 
-    const block = `[[${dateStr}]] **${trace.model || "unknown"}**${skillTag} `
+    const block = `${dateRef} **${trace.model || "unknown"}**${skillTag} `
       + `TC:${scores.task_completion} FG:${scores.factual_grounding} S:${scores.safety}${checkSummary}${rubricSummary} `
       + `(${toolCount} tools, ${trace.iterations || 0} iter${costStr ? ", " + costStr : ""})`;
 
@@ -364,7 +366,9 @@ async function persistReviewQueueEntry(trace, scores, userPrompt, options = {}) 
     const pageUid = await deps.ensurePageUidByTitle(pageTitle);
     if (!pageUid) return;
 
-    const dateStr = deps.formatRoamDate(new Date(trace.startedAt || Date.now()));
+    const dateRef = deps.formatLogDateRef
+      ? deps.formatLogDateRef(new Date(trace.startedAt || Date.now()))
+      : `[[${deps.formatRoamDate(new Date(trace.startedAt || Date.now()))}]]`;
     const toolCount = (trace.toolCalls || []).length;
     const guardsList = (trace.guardsFired || []).join(", ") || "none";
     const concern = scores.concern || "";
@@ -377,7 +381,7 @@ async function persistReviewQueueEntry(trace, scores, userPrompt, options = {}) 
       .replace(/\[\[/g, "⟦").replace(/\]\]/g, "⟧");
 
     const skillTag = skillName ? ` **Skill: ${skillName}**` : "";
-    const headerBlock = `[[${dateStr}]]${skillTag} TC:${scores.task_completion} FG:${scores.factual_grounding} S:${scores.safety}`
+    const headerBlock = `${dateRef}${skillTag} TC:${scores.task_completion} FG:${scores.factual_grounding} S:${scores.safety}`
       + ` | ${trace.model || "unknown"} | ${toolCount} tools, ${trace.iterations || 0} iter`;
 
     const insertOrder = deps.getFirstContentOrder ? deps.getFirstContentOrder(pageUid) : 0;

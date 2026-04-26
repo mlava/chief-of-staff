@@ -95,6 +95,7 @@ Open **Settings > Chief of Staff** and fill in:
 - **Dry Run** — one-shot toggle that simulates the next mutating tool call without writing anything (auto-disables after one use)
 - **Ludicrous mode failover** — allow escalation to the most expensive models (Opus / GPT-5.2) when all power-tier providers fail
 - **Hide COS Pages from Linked References** — automatically filters Chief of Staff namespace pages out of linked references on all non-COS pages. Enabled by default.
+- **Use Linked Dates in CoS Logs** — when enabled, internal CoS log entries (audit log, usage stats, eval scores, corrections, graph hygiene, skill-optimize) prefix each line with a `[[Linked Date]]`. Disable to write plain dates instead — keeps Daily Notes pages from accumulating linked references on mobile. Enabled by default.
 - **Staleness Warning Threshold (days)** — how long a skill or scheduled job can go without being reviewed before it's flagged. A startup toast (debounced to once per 24 hours) lists stale items, and `staleness report` returns the same list on demand. Default `30`. Set to `0` to disable the warnings entirely (the report still works).
 
 Default models by tier:

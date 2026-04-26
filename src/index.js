@@ -338,6 +338,7 @@ const SETTINGS_KEYS = {
   evalSampleRate: "eval-sample-rate",
   evalReviewThreshold: "eval-review-threshold",
   cosLinkedRefsFilter: "cos-linked-refs-filter",
+  logUseLinkedDates: "log-use-linked-dates",
   intentGateEnabled: "intent-gate-enabled",
   correctionCaptureEnabled: "correction-capture-enabled",
   graphHygieneOrphansEnabled: "graph-hygiene-orphans-enabled",
@@ -1762,6 +1763,17 @@ function formatRoamDate(date) {
         ? "rd"
         : "th";
   return `${months[date.getMonth()]} ${day}${suffix}, ${date.getFullYear()}`;
+}
+
+// Returns a date reference for internal CoS log entries (audit log, usage stats,
+// eval scores, corrections, graph hygiene, skill-optimize). When the
+// log-use-linked-dates setting is disabled, returns a plain date instead of a
+// [[linked date]] — keeps Daily Notes Pages from accumulating linked refs from
+// extension bookkeeping. Default: linked (preserves prior behaviour).
+function formatLogDateRef(date) {
+  const plain = formatRoamDate(date);
+  const useLinked = getSettingBool(extensionAPIRef, SETTINGS_KEYS.logUseLinkedDates, true);
+  return useLinked ? `[[${plain}]]` : plain;
 }
 
 function flattenBlockTree(block, depth = 0) {
@@ -5782,6 +5794,9 @@ function onload({ extensionAPI }) {
   if (extensionAPI?.settings?.get?.(SETTINGS_KEYS.advisorMiniOnly) === undefined) {
     extensionAPI.settings.set(SETTINGS_KEYS.advisorMiniOnly, true);
   }
+  if (extensionAPI?.settings?.get?.(SETTINGS_KEYS.logUseLinkedDates) === undefined) {
+    extensionAPI.settings.set(SETTINGS_KEYS.logUseLinkedDates, true);
+  }
 
   initUsageTracking({
     SETTINGS_KEYS,
@@ -5791,6 +5806,7 @@ function onload({ extensionAPI }) {
     createRoamBlock,
     getFirstContentOrder,
     formatRoamDate,
+    formatLogDateRef,
     queryRoamDatalog,
     escapeForDatalog,
     getRoamAlphaApi: () => window.roamAlphaAPI,
@@ -5808,6 +5824,7 @@ function onload({ extensionAPI }) {
     createRoamBlock,
     getFirstContentOrder,
     formatRoamDate,
+    formatLogDateRef,
     debugLog,
     getSettingString,
     getSettingBool,
@@ -5861,6 +5878,7 @@ function onload({ extensionAPI }) {
     createRoamBlock,
     getFirstContentOrder,
     formatRoamDate,
+    formatLogDateRef,
     showOptimizationResultToast,
     showProgressToast: (title, message) => showInfoToast(title, message),
     appendChatPanelMessage,
@@ -6550,6 +6568,7 @@ function onload({ extensionAPI }) {
     createRoamBlock: (parentUid, text, order) => createRoamBlock(parentUid, text, order),
     getFirstContentOrder,
     formatRoamDate,
+    formatLogDateRef,
     SETTINGS_KEYS,
   });
   if (getSettingBool(extensionAPIRef, SETTINGS_KEYS.correctionCaptureEnabled, false)) {
@@ -6573,6 +6592,7 @@ function onload({ extensionAPI }) {
     createRoamBlock: (parentUid, text, order) => createRoamBlock(parentUid, text, order),
     getFirstContentOrder,
     formatRoamDate,
+    formatLogDateRef,
   });
   if (getSettingBool(extensionAPIRef, SETTINGS_KEYS.graphHygieneOrphansEnabled, false)) {
     registerIdleTask({

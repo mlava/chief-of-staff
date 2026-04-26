@@ -873,13 +873,16 @@ export function shouldStop(state, budgetUsd) {
 async function persistDebriefResults(state) {
   try {
     const dateStr = deps.formatRoamDate(new Date());
+    const logDateRef = deps.formatLogDateRef
+      ? deps.formatLogDateRef(new Date())
+      : `[[${dateStr}]]`;
 
     // Eval Log entry
     const evalPageUid = await deps.ensurePageUidByTitle("Chief of Staff/Eval Log");
     if (evalPageUid) {
       const baselinePct = Math.round(state.baselinePassRate * 100);
       const finalPct = Math.round(state.currentBestPassRate * 100);
-      const logLine = `[[${dateStr}]] **skill-optimize** [${state.skillName}] `
+      const logLine = `${logDateRef} **skill-optimize** [${state.skillName}] `
         + `baseline:${baselinePct}% \u2192 final:${finalPct}% `
         + `(${state.testCases.length} tests, ${state.evalCriteria.length} criteria, `
         + `${state.mutationsAccepted.length + state.mutationsDiscarded.length} mutations tried, `

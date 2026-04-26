@@ -503,6 +503,15 @@ export function buildSettingsConfig(extensionAPI) {
         }
       },
       {
+        id: deps.SETTINGS_KEYS.logUseLinkedDates,
+        name: "Use Linked Dates in CoS Logs",
+        description: "When enabled, internal CoS log entries (audit log, usage stats, eval scores, corrections, graph hygiene, skill-optimize) prefix each line with a [[Linked Date]]. Disable to write plain dates instead — keeps Daily Notes pages from accumulating linked references on mobile.",
+        action: {
+          type: "switch",
+          value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.logUseLinkedDates, true)
+        }
+      },
+      {
         id: deps.SETTINGS_KEYS.auditLogRetentionDays,
         name: "Audit Log Retention (days)",
         description: "Automatically trim audit log entries older than this many days. Runs after each agent interaction. Leave blank or 0 to keep all entries indefinitely.",
