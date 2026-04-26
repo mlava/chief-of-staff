@@ -222,7 +222,9 @@ export async function persistAuditLogEntry(trace, userPrompt, options = {}) {
 
     const { skillName = null } = options;
 
-    const dateStr = deps.formatRoamDate(new Date(trace.startedAt));
+    const dateRef = deps.formatLogDateRef
+      ? deps.formatLogDateRef(new Date(trace.startedAt))
+      : `[[${deps.formatRoamDate(new Date(trace.startedAt))}]]`;
     const durationSec = trace.finishedAt
       ? ((trace.finishedAt - trace.startedAt) / 1000).toFixed(1)
       : "?";
@@ -256,7 +258,7 @@ export async function persistAuditLogEntry(trace, userPrompt, options = {}) {
       .replace(/\(\(/g, "⦅⦅").replace(/\)\)/g, "⦆⦆");
 
     const skillLine = skillName ? `\nSkill: ${String(skillName).slice(0, 60)}` : "";
-    const block = `[[${dateStr}]] **${modelLabel}** `
+    const block = `${dateRef} **${modelLabel}** `
       + `(${trace.iterations || 0} iter, ${durationSec}s, ${tokens} tok${cost ? ", " + cost : ""}) `
       + `— ${outcome}`
       + skillLine
@@ -304,12 +306,13 @@ async function trimAuditLog() {
     cutoff.setDate(cutoff.getDate() - retentionDays);
     cutoff.setHours(0, 0, 0, 0);
 
-    // Parse "[[Month Dayth, Year]]" from the start of block text
+    // Parse "[[Month Dayth, Year]]" or plain "Month Dayth, Year" from the start
+    // of block text. Brackets are optional so trim works under either setting.
     const MONTHS = {
       january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
       july: 6, august: 7, september: 8, october: 9, november: 10, december: 11
     };
-    const dateRefRe = /^\[\[(\w+)\s+(\d+)\w{0,2},\s*(\d{4})\]\]/;
+    const dateRefRe = /^(?:\[\[)?(\w+)\s+(\d+)\w{0,2},\s*(\d{4})(?:\]\])?/;
 
     // First pass: collect UIDs to delete (no API calls)
     const toDelete = [];
@@ -615,6 +618,9 @@ export async function persistUsageStatsPage() {
     if (!pageUid) return;
 
     const dateStr = deps.formatRoamDate(new Date());
+    const dateRef = deps.formatLogDateRef
+      ? deps.formatLogDateRef(new Date())
+      : `[[${dateStr}]]`;
     const totalToolCalls = Object.values(day.toolCalls).reduce((s, c) => s + c, 0);
     const topTools = Object.entries(day.toolCalls)
       .sort(([, a], [, b]) => b - a)
@@ -638,7 +644,7 @@ export async function persistUsageStatsPage() {
       ? ` | tools: avg ${Math.round(day.toolTokens.avgChars / 1000)}k chars (${day.toolTokens.avgPct}% of input), ${day.toolTokens.avgToolCount} tools`
       : "";
 
-    const block = `[[${dateStr}]] — ${day.agentRuns} runs | ${totalToolCalls} tool calls`
+    const block = `${dateRef} — ${day.agentRuns} runs | ${totalToolCalls} tool calls`
       + ` | approvals ${approvalStr}`
       + ` | ${day.injectionWarnings} injection warn`
       + ` | ${day.claimedActionFires} claimed-action`
@@ -647,10 +653,12 @@ export async function persistUsageStatsPage() {
       + evalStr + guardStr + toolTokenStr
       + (topTools ? ` | Top: ${topTools}` : "");
 
-    // Find existing block for today — update in place to avoid duplicates
-    const safeDateRef = deps.escapeForDatalog(`[[${dateStr}]]`);
+    // Find existing block for today — update in place to avoid duplicates.
+    // Substring match on the bare date so legacy "[[date]]" entries and new
+    // plain "date" entries are both discoverable after a setting flip.
+    const safeDateStr = deps.escapeForDatalog(dateStr);
     const existingUid = await deps.queryRoamDatalog(
-      `[:find ?uid . :where [?p :node/title "${deps.escapeForDatalog(pageTitle)}"] [?b :block/page ?p] [?b :block/string ?s] [(clojure.string/includes? ?s "${safeDateRef}")] [?b :block/uid ?uid]]`
+      `[:find ?uid . :where [?p :node/title "${deps.escapeForDatalog(pageTitle)}"] [?b :block/page ?p] [?b :block/string ?s] [(clojure.string/includes? ?s "${safeDateStr}")] [?b :block/uid ?uid]]`
     );
     const api = deps.getRoamAlphaApi();
     if (existingUid) {

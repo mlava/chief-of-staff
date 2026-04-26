@@ -257,7 +257,9 @@ async function persistCorrections(corrections) {
     bySource.get(key).push(c);
   }
 
-  const dateStr = deps.formatRoamDate?.(new Date()) || new Date().toISOString().slice(0, 10);
+  const dateRef = deps.formatLogDateRef
+    ? deps.formatLogDateRef(new Date())
+    : `[[${deps.formatRoamDate?.(new Date()) || new Date().toISOString().slice(0, 10)}]]`;
 
   for (const [source, corrs] of bySource) {
     const editCount = corrs.filter(c => c.type === "edited").length;
@@ -271,7 +273,7 @@ async function persistCorrections(corrections) {
       .replace(/\[\[/g, "\u27E6").replace(/\]\]/g, "\u27E7")
       .replace(/\{\{/g, "\u2983").replace(/\}\}/g, "\u2984");
 
-    const headerText = `[[${dateStr}]] **${sanitise(source)}** — ${parts.join(", ")}`;
+    const headerText = `${dateRef} **${sanitise(source)}** — ${parts.join(", ")}`;
     const insertOrder = deps.getFirstContentOrder ? deps.getFirstContentOrder(pageUid) : 0;
     const headerUid = await deps.createRoamBlock?.(pageUid, headerText, insertOrder);
     if (!headerUid) continue;
@@ -309,7 +311,9 @@ export async function trackDismissedSuggestion({ type, originalPrompt, classifie
     const pageUid = await deps.ensurePageUidByTitle?.(CORRECTIONS_PAGE_TITLE);
     if (!pageUid) return;
 
-    const dateStr = deps.formatRoamDate?.(new Date()) || new Date().toISOString().slice(0, 10);
+    const dateRef = deps.formatLogDateRef
+      ? deps.formatLogDateRef(new Date())
+      : `[[${deps.formatRoamDate?.(new Date()) || new Date().toISOString().slice(0, 10)}]]`;
     const sanitise = (text) => String(text || "")
       .replace(/\[\[/g, "\u27E6").replace(/\]\]/g, "\u27E7")
       .replace(/\{\{/g, "\u2983").replace(/\}\}/g, "\u2984");
@@ -317,7 +321,7 @@ export async function trackDismissedSuggestion({ type, originalPrompt, classifie
     const prompt = sanitise(String(originalPrompt || "").slice(0, 120));
     const intent = sanitise(String(classifiedIntent || "").slice(0, 120));
 
-    let line = `[[${dateStr}]] **intent-${type}**: "${prompt}"`;
+    let line = `${dateRef} **intent-${type}**: "${prompt}"`;
     if (classifiedIntent) line += ` — classified as: "${intent}"`;
     if (userOverride) line += ` → user said: "${sanitise(String(userOverride).slice(0, 120))}"`;
 
