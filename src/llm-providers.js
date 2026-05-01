@@ -28,15 +28,125 @@ const providerCooldowns = {}; // { provider: expiryTimestampMs } — bounded at 
 
 // ── Provider Selection & Model Mapping ───────────────────────────────────────
 
-export const VALID_LLM_PROVIDERS = ["anthropic", "openai", "gemini", "mistral", "groq"];
+// Built-in providers — fixed at compile time. Custom providers
+// (LM Studio, Ollama, OpenAI-compatible servers) are configured at runtime
+// via custom-llm-${n}-* settings; see listCustomProviderIds below.
+export const BUILTIN_LLM_PROVIDERS = ["anthropic", "openai", "gemini", "mistral", "groq"];
+
+// Kept for back-compat: index.js uses this for the autoresearch judge,
+// which intentionally selects from built-in providers only.
+export const VALID_LLM_PROVIDERS = BUILTIN_LLM_PROVIDERS;
+
+// Mirrors remote-mcp-count semantics. Bumping this is safe and additive.
+const CUSTOM_LLM_SLOT_CAP = 3;
+
+// Local URLs that bypass the Roam CORS proxy (browser secure-context exception
+// for loopback addresses).
+const LOCALHOST_URL_RE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i;
+
+export function isLocalhostUrl(url) {
+  return LOCALHOST_URL_RE.test(String(url || "").trim());
+}
+
+export function isCustomProvider(provider) {
+  return typeof provider === "string" && provider.startsWith("custom-");
+}
+
+export function listCustomProviderIds(extensionAPI) {
+  if (!extensionAPI?.settings?.get) return [];
+  const raw = extensionAPI.settings.get("custom-llm-count");
+  const count = Math.min(CUSTOM_LLM_SLOT_CAP, Math.max(0, parseInt(raw, 10) || 0));
+  const ids = [];
+  for (let i = 1; i <= count; i++) {
+    const baseUrl = deps.getSettingString(extensionAPI, `custom-llm-${i}-base-url`, "").trim();
+    if (baseUrl) ids.push(`custom-${i}`);
+  }
+  return ids;
+}
+
+export function getCustomProviderConfig(extensionAPI, provider) {
+  if (!isCustomProvider(provider) || !extensionAPI) return null;
+  const slot = parseInt(provider.slice("custom-".length), 10);
+  if (!Number.isFinite(slot) || slot < 1 || slot > CUSTOM_LLM_SLOT_CAP) return null;
+  const baseUrl = deps.getSettingString(extensionAPI, `custom-llm-${slot}-base-url`, "").trim();
+  if (!baseUrl) return null;
+  const miniModel = deps.getSettingString(extensionAPI, `custom-llm-${slot}-mini-model`, "").trim();
+  const powerModel = deps.getSettingString(extensionAPI, `custom-llm-${slot}-power-model`, "").trim();
+  const ludicrousModel = deps.getSettingString(extensionAPI, `custom-llm-${slot}-ludicrous-model`, "").trim();
+  return {
+    slot,
+    name: deps.getSettingString(extensionAPI, `custom-llm-${slot}-name`, "").trim() || `Custom ${slot}`,
+    baseUrl,
+    apiKey: deps.getSettingString(extensionAPI, `custom-llm-${slot}-api-key`, "").trim(),
+    miniModel,
+    powerModel: powerModel || miniModel,
+    ludicrousModel: ludicrousModel || powerModel || miniModel || null,
+    includeInFailover: deps.getSettingBool(extensionAPI, `custom-llm-${slot}-include-in-failover`, false),
+    noFailover: deps.getSettingBool(extensionAPI, `custom-llm-${slot}-no-failover`, false),
+    useProxy: deps.getSettingBool(extensionAPI, `custom-llm-${slot}-use-proxy`, false),
+    disableToolCalling: deps.getSettingBool(extensionAPI, `custom-llm-${slot}-disable-tool-calling`, false)
+  };
+}
+
+// True when the request to this provider should omit the `tools` field entirely.
+// Used for OpenRouter free models or small local models that don't support tool
+// calling — sending an empty or non-empty `tools` list still makes them 404.
+export function shouldOmitToolsForProvider(provider) {
+  if (!isCustomProvider(provider)) return false;
+  const cfg = getCustomProviderConfig(deps.extensionAPIRef, provider);
+  return !!cfg?.disableToolCalling;
+}
+
+export function getValidProviders(extensionAPI) {
+  return [...BUILTIN_LLM_PROVIDERS, ...listCustomProviderIds(extensionAPI)];
+}
+
+// Resolves the OpenAI-format chat completions endpoint for a given provider.
+// Custom providers honour the per-slot base URL and useProxy flag; built-ins
+// use the fixed LLM_API_ENDPOINTS table behind the Roam CORS proxy.
+export function resolveOpenAIEndpoint(provider) {
+  if (isCustomProvider(provider)) {
+    const cfg = getCustomProviderConfig(deps.extensionAPIRef, provider);
+    if (!cfg) throw new Error(`Custom LLM provider ${provider} is not configured`);
+    const direct = `${cfg.baseUrl.replace(/\/+$/, "")}/chat/completions`;
+    // Local servers always bypass the proxy. Remote servers go direct unless
+    // the user opts into the proxy (escape hatch for restrictive CORS).
+    if (cfg.useProxy && !isLocalhostUrl(cfg.baseUrl)) return deps.getProxiedLlmUrl(direct);
+    return direct;
+  }
+  return deps.getProxiedLlmUrl(LLM_API_ENDPOINTS[provider] || LLM_API_ENDPOINTS.openai);
+}
+
+// Returns the failover chain for a tier with opted-in custom providers
+// appended. Built-in chain order is preserved.
+export function buildEffectiveFailoverChain(extensionAPI, tier) {
+  const base = deps.FAILOVER_CHAINS[tier] || deps.FAILOVER_CHAINS.mini;
+  if (!extensionAPI) return [...base];
+  const customs = listCustomProviderIds(extensionAPI).filter(id => {
+    const cfg = getCustomProviderConfig(extensionAPI, id);
+    return cfg?.includeInFailover === true;
+  });
+  return [...base, ...customs];
+}
 
 export function isOpenAICompatible(provider) {
-  return provider === "openai" || provider === "gemini" || provider === "mistral" || provider === "groq";
+  return provider === "openai" || provider === "gemini" || provider === "mistral" || provider === "groq"
+    || isCustomProvider(provider);
 }
 
 export function getLlmProvider(extensionAPI) {
-  const raw = deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.llmProvider, deps.DEFAULT_LLM_PROVIDER).toLowerCase();
-  return VALID_LLM_PROVIDERS.includes(raw) ? raw : "anthropic";
+  const stored = deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.llmProvider, deps.DEFAULT_LLM_PROVIDER);
+  // The settings dropdown may store a compound label like "custom-1 — LM Studio"
+  // so the user sees the friendly name. Extract the canonical slot ID prefix.
+  const slotMatch = stored.match(/^(custom-\d+)\b/i);
+  const raw = slotMatch ? slotMatch[1].toLowerCase() : stored.toLowerCase();
+  if (BUILTIN_LLM_PROVIDERS.includes(raw)) return raw;
+  if (isCustomProvider(raw) && getCustomProviderConfig(extensionAPI, raw)) return raw;
+  // Saved primary may have been a custom slot the user later removed.
+  if (isCustomProvider(raw)) {
+    deps.debugLog("[Chief flow] Saved custom provider", raw, "no longer configured; falling back to anthropic");
+  }
+  return "anthropic";
 }
 
 /**
@@ -55,6 +165,12 @@ export function sanitizeHeaderValue(value) {
 }
 
 export function getApiKeyForProvider(extensionAPI, provider) {
+  if (isCustomProvider(provider)) {
+    const cfg = getCustomProviderConfig(extensionAPI, provider);
+    // OpenAI client convention requires a non-empty Bearer header value;
+    // LM Studio and Ollama ignore it. Real keys are sent verbatim.
+    return sanitizeHeaderValue(cfg?.apiKey || "lm-studio-no-auth");
+  }
   const keyMap = {
     openai: deps.SETTINGS_KEYS.openaiApiKey,
     anthropic: deps.SETTINGS_KEYS.anthropicApiKey,
@@ -85,14 +201,23 @@ export function getOpenAiApiKey(extensionAPI) {
 }
 
 export function getLlmModel(extensionAPI, provider) {
+  if (isCustomProvider(provider)) {
+    return getCustomProviderConfig(extensionAPI, provider)?.miniModel || "";
+  }
   return DEFAULT_LLM_MODELS[provider] || DEFAULT_LLM_MODELS.anthropic;
 }
 
-export function getPowerModel(provider) {
+export function getPowerModel(extensionAPI, provider) {
+  if (isCustomProvider(provider)) {
+    return getCustomProviderConfig(extensionAPI, provider)?.powerModel || "";
+  }
   return POWER_LLM_MODELS[provider] || POWER_LLM_MODELS.anthropic;
 }
 
-export function getLudicrousModel(provider) {
+export function getLudicrousModel(extensionAPI, provider) {
+  if (isCustomProvider(provider)) {
+    return getCustomProviderConfig(extensionAPI, provider)?.ludicrousModel || null;
+  }
   return LUDICROUS_LLM_MODELS[provider] || null;
 }
 
@@ -115,7 +240,13 @@ export function setProviderCooldown(provider) {
 }
 
 export function getFailoverProviders(primaryProvider, extensionAPI, tier = "mini") {
-  const chain = deps.FAILOVER_CHAINS[tier] || deps.FAILOVER_CHAINS.mini;
+  // Privacy mode: when the primary is a custom slot with no-failover ON,
+  // do not fall over to any other provider — surface the error to the user.
+  if (isCustomProvider(primaryProvider)) {
+    const primaryCfg = getCustomProviderConfig(extensionAPI, primaryProvider);
+    if (primaryCfg?.noFailover) return [];
+  }
+  const chain = buildEffectiveFailoverChain(extensionAPI, tier);
   const startIdx = chain.indexOf(primaryProvider);
   const rotated = startIdx >= 0
     ? [...chain.slice(startIdx + 1), ...chain.slice(0, startIdx)]
@@ -123,7 +254,11 @@ export function getFailoverProviders(primaryProvider, extensionAPI, tier = "mini
   return rotated.filter(p => !!getApiKeyForProvider(extensionAPI, p) && !isProviderCoolingDown(p));
 }
 
-export function getModelCostRates(model) {
+export function getModelCostRates(model, provider) {
+  // Custom providers (LM Studio, Ollama, OpenAI-compatible servers) are
+  // zero-cost by default. Avoids the mid-range fallback below silently
+  // billing local models against the user's daily spending cap.
+  if (isCustomProvider(provider)) return { inputPerM: 0, outputPerM: 0 };
   const rates = deps.LLM_MODEL_COSTS[model];
   if (rates) return { inputPerM: rates[0], outputPerM: rates[1] };
   // Fallback: assume mid-range pricing
@@ -181,7 +316,12 @@ export function isFailoverEligibleError(error) {
     || msg.includes("error 504")
     || msg.includes("timeout")
     || msg.includes("service_tier_capacity_exceeded")
-    || msg.includes("overloaded");
+    || msg.includes("overloaded")
+    // Local server unreachable (LM Studio off, Ollama not running) — let the
+    // chain rotate to the next provider rather than dead-ending here.
+    || msg.includes("failed to fetch")
+    || msg.includes("err_connection_refused")
+    || msg.includes("networkerror");
 }
 
 export async function fetchLlmJsonWithRetry(url, init, providerLabel, options = {}) {
@@ -523,27 +663,31 @@ export async function callOpenAI(apiKey, model, system, messages, tools, options
   const tokenParam = provider === "openai"
     ? { max_completion_tokens: maxTokens }
     : { max_tokens: maxTokens };
+  const omitTools = shouldOmitToolsForProvider(provider);
+  const requestBody = {
+    model,
+    messages: [{ role: "system", content: safeSystem }, ...safeMessages],
+    ...tokenParam
+  };
+  if (!omitTools) {
+    requestBody.tools = tools.map((tool) => ({
+      type: "function",
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: sanitiseToolSchema(tool.input_schema)
+      }
+    }));
+  }
   return fetchLlmJsonWithRetry(
-    deps.getProxiedLlmUrl(LLM_API_ENDPOINTS[provider] || LLM_API_ENDPOINTS.openai),
+    resolveOpenAIEndpoint(provider),
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`
       },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: "system", content: safeSystem }, ...safeMessages],
-        tools: tools.map((tool) => ({
-          type: "function",
-          function: {
-            name: tool.name,
-            description: tool.description,
-            parameters: sanitiseToolSchema(tool.input_schema)
-          }
-        })),
-        ...tokenParam
-      })
+      body: JSON.stringify(requestBody)
     },
     provider,
     { signal: options.signal }
@@ -580,30 +724,34 @@ export async function callOpenAIStreaming(apiKey, model, system, messages, tools
   const streamFetchSignal = options.signal
     ? AbortSignal.any([options.signal, connectAbort.signal])
     : connectAbort.signal;
+  const omitTools = shouldOmitToolsForProvider(provider);
+  const requestBody = {
+    model,
+    messages: [{ role: "system", content: safeSystem }, ...safeMessages],
+    ...tokenParam,
+    stream: true,
+    stream_options: { include_usage: true }
+  };
+  if (!omitTools) {
+    requestBody.tools = tools.map((tool) => ({
+      type: "function",
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: sanitiseToolSchema(tool.input_schema)
+      }
+    }));
+  }
   let response;
   try {
-    response = await fetch(deps.getProxiedLlmUrl(LLM_API_ENDPOINTS[provider] || LLM_API_ENDPOINTS.openai), {
+    response = await fetch(resolveOpenAIEndpoint(provider), {
       signal: streamFetchSignal,
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`
       },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: "system", content: safeSystem }, ...safeMessages],
-        tools: tools.map((tool) => ({
-          type: "function",
-          function: {
-            name: tool.name,
-            description: tool.description,
-            parameters: sanitiseToolSchema(tool.input_schema)
-          }
-        })),
-        ...tokenParam,
-        stream: true,
-        stream_options: { include_usage: true }
-      })
+      body: JSON.stringify(requestBody)
     });
   } finally {
     clearTimeout(connectTimeoutId); // Connection established (or failed) — disarm connect timeout
@@ -611,6 +759,27 @@ export async function callOpenAIStreaming(apiKey, model, system, messages, tools
 
   if (!response.ok) {
     const errorText = (await response.text()).slice(0, 800);
+    // Common OpenRouter / restricted-provider failure: model has no tool-capable
+    // backend. Surface a hint about the per-slot toggle so the user isn't stuck
+    // grepping the error text.
+    if (response.status === 404 && /No endpoints found that support tool use/i.test(errorText)) {
+      throw new Error(
+        `${provider} streaming error 404: this model has no tool-capable provider. `
+        + `Either pick a model that supports tools (filter at https://openrouter.ai/models?supported_parameters=tools) `
+        + `or enable "Disable tool calling" on this slot in settings. Original error: ${errorText}`
+      );
+    }
+    // OpenRouter free models have aggressive rate limits — ~20 RPM and ~50/day
+    // by default, lifted to 1000/day after buying $10 credit. Surface this
+    // because the per-minute retry won't help if it's the daily cap.
+    if (response.status === 429 && isCustomProvider(provider)) {
+      const retryAfter = response.headers.get("retry-after");
+      const retryHint = retryAfter ? ` Retry-After: ${retryAfter}s.` : "";
+      throw new Error(
+        `${provider} rate limit (HTTP 429).${retryHint} If using OpenRouter free models, this is likely the per-day cap (~50/day default, 1000/day with $10 credit purchased). `
+        + `Either wait, switch to a less-popular free model, buy credit, or run the query through a local slot. Original error: ${errorText}`
+      );
+    }
     throw new Error(`${provider} streaming error ${response.status}: ${errorText}`);
   }
 

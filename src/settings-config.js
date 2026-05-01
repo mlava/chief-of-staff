@@ -52,6 +52,34 @@ function getComposioSettingOrBlank(extensionAPI, key) {
   return val;
 }
 
+// Build the LLM Provider select items: built-ins plus any configured custom slots.
+// Custom slots use a compound label "custom-N — Display Name" so the user sees
+// the friendly name in the dropdown. The canonical slot ID stays as a prefix so
+// `getLlmProvider` can recover it after a rename without losing the selection.
+function buildCustomProviderLabel(extensionAPI, id) {
+  if (!deps.getCustomProviderConfig) return id;
+  const cfg = deps.getCustomProviderConfig(extensionAPI, id);
+  if (!cfg) return id;
+  const isDefaultName = cfg.name === `Custom ${cfg.slot}`;
+  return cfg.name && !isDefaultName ? `${id} — ${cfg.name}` : id;
+}
+
+function buildProviderSelectItems(extensionAPI) {
+  const builtins = ["anthropic", "openai", "gemini", "mistral", "groq"];
+  const customs = (deps.listCustomProviderIds ? deps.listCustomProviderIds(extensionAPI) : [])
+    .map(id => buildCustomProviderLabel(extensionAPI, id));
+  return [...builtins, ...customs];
+}
+
+// Resolve the dropdown's current `value` to match what's in `items`.
+// `getLlmProvider` returns the canonical slot ID; we must reconstruct the
+// compound label so Roam's select widget shows the right item as selected.
+function buildProviderSelectValue(extensionAPI) {
+  const canonical = deps.getLlmProvider(extensionAPI);
+  if (!canonical.startsWith("custom-")) return canonical;
+  return buildCustomProviderLabel(extensionAPI, canonical);
+}
+
 // ── Main config builder ─────────────────────────────────────────────────────
 
 export function buildSettingsConfig(extensionAPI) {
@@ -84,11 +112,11 @@ export function buildSettingsConfig(extensionAPI) {
     {
       id: deps.SETTINGS_KEYS.llmProvider,
       name: "LLM Provider",
-      description: "Primary AI provider. If this provider fails, Chief of Staff automatically falls back to other providers you have keys for.",
+      description: "Primary AI provider. If this provider fails, Chief of Staff automatically falls back to other providers you have keys for. Custom providers (LM Studio, Ollama, etc.) appear here once configured below — with their display name if set.",
       action: {
         type: "select",
-        items: ["anthropic", "openai", "gemini", "mistral", "groq"],
-        value: deps.getLlmProvider(extensionAPI)
+        items: buildProviderSelectItems(extensionAPI),
+        value: buildProviderSelectValue(extensionAPI)
       }
     },
     {
@@ -360,6 +388,188 @@ export function buildSettingsConfig(extensionAPI) {
         }
       }
     );
+
+    // ── Custom LLM providers (LM Studio, Ollama, OpenAI-compatible) ──────────
+    // Count select reveals per-slot URL / model / auth fields. Mirrors the
+    // remote-mcp-count pattern above.
+    const MAX_CUSTOM_LLM_SLOTS = 3;
+    const rawCustomCount = extensionAPI.settings.get(deps.SETTINGS_KEYS.customLlmCount);
+    const customLlmCount = Math.min(MAX_CUSTOM_LLM_SLOTS, Math.max(0, parseInt(rawCustomCount, 10) || 0));
+
+    settings.push({
+      id: deps.SETTINGS_KEYS.customLlmCount,
+      name: "Custom LLM Providers",
+      description: "Number of custom OpenAI-compatible LLM endpoints (LM Studio, Ollama, OpenRouter, vLLM, etc.). Each slot's base URL, model IDs, and optional API key are configured below.",
+      action: {
+        type: "select",
+        items: Array.from({ length: MAX_CUSTOM_LLM_SLOTS + 1 }, (_, i) => String(i)),
+        value: String(customLlmCount),
+        onChange: (value) => {
+          const next = Math.min(MAX_CUSTOM_LLM_SLOTS, Math.max(0, parseInt(value, 10) || 0));
+          try { extensionAPI.settings.set(deps.SETTINGS_KEYS.customLlmCount, next); } catch { }
+          rebuildSettingsPanel(extensionAPI);
+        }
+      }
+    });
+
+    for (let i = 1; i <= customLlmCount; i++) {
+      settings.push({
+        id: `custom-llm-${i}-name`,
+        name: `Custom Provider ${i} — Display name`,
+        description: "Optional friendly label, shown in the LLM Provider dropdown above and in toasts. Examples: \"LM Studio\", \"Ollama\", \"OpenRouter\". After renaming, close and re-open settings to see the dropdown update — Roam's select widget doesn't refresh its displayed selection in-place.",
+        action: {
+          type: "input",
+          value: deps.getSettingString(extensionAPI, `custom-llm-${i}-name`, ""),
+          placeholder: "e.g. LM Studio",
+          onChange: (evt) => {
+            const v = String(evt?.target?.value ?? evt ?? "").trim();
+            try { extensionAPI.settings.set(`custom-llm-${i}-name`, v); } catch { }
+            // If this slot is the saved primary, update llm-provider to the new
+            // compound label so the dropdown matches on next settings open.
+            try {
+              const saved = String(extensionAPI.settings.get(deps.SETTINGS_KEYS.llmProvider) || "").toLowerCase();
+              const isThisSlot = saved === `custom-${i}` || saved.startsWith(`custom-${i} `) || saved.startsWith(`custom-${i}—`);
+              if (isThisSlot) {
+                const newLabel = v ? `custom-${i} — ${v}` : `custom-${i}`;
+                extensionAPI.settings.set(deps.SETTINGS_KEYS.llmProvider, newLabel);
+              }
+            } catch { /* ignore */ }
+            // No rebuild — Roam's select widget caches its displayed selection
+            // across panel.create() rebuilds, so the dropdown only refreshes on
+            // close+reopen. The migration in onload handles the sync on reload.
+          }
+        }
+      });
+      settings.push({
+        id: `custom-llm-${i}-base-url`,
+        name: `Custom Provider ${i} — Base URL`,
+        description: "Server base URL ending at /v1 (or equivalent). The /chat/completions path is appended automatically. Local servers must enable CORS themselves: LM Studio → Developer tab → \"Enable CORS\" → restart server; Ollama → run with OLLAMA_ORIGINS=https://roamresearch.com. Remote servers usually work directly; if they have restrictive CORS, enable \"Route through proxy\" below (does NOT work for localhost). Examples: http://localhost:1234/v1 (LM Studio), http://localhost:11434/v1 (Ollama), https://openrouter.ai/api/v1.",
+        action: {
+          type: "input",
+          value: deps.getSettingString(extensionAPI, `custom-llm-${i}-base-url`, ""),
+          placeholder: "http://localhost:1234/v1",
+          onChange: (evt) => {
+            const v = String(evt?.target?.value ?? evt ?? "").trim();
+            try { extensionAPI.settings.set(`custom-llm-${i}-base-url`, v); } catch { }
+            rebuildSettingsPanel(extensionAPI);
+          }
+        }
+      });
+      settings.push({
+        id: `custom-llm-${i}-api-key`,
+        name: `Custom Provider ${i} — API key (optional)`,
+        description: "Bearer token sent in the Authorization header. Leave blank for local servers (LM Studio, Ollama) that ignore auth. Required for remote services like OpenRouter.",
+        action: {
+          type: "input",
+          value: deps.getSettingString(extensionAPI, `custom-llm-${i}-api-key`, ""),
+          placeholder: "sk-... (leave blank for local servers)",
+          onChange: (evt) => {
+            const v = String(evt?.target?.value ?? evt ?? "").trim();
+            try { extensionAPI.settings.set(`custom-llm-${i}-api-key`, v); } catch { }
+          }
+        }
+      });
+      settings.push({
+        id: `custom-llm-${i}-mini-model`,
+        name: `Custom Provider ${i} — Model (mini tier)`,
+        description: "Model ID used for the default mini tier. Required. Look up the exact ID from the server's /v1/models endpoint or the provider's docs.",
+        action: {
+          type: "input",
+          value: deps.getSettingString(extensionAPI, `custom-llm-${i}-mini-model`, ""),
+          placeholder: "e.g. llama3.2 or meta-llama/llama-3.2-3b-instruct",
+          onChange: (evt) => {
+            const v = String(evt?.target?.value ?? evt ?? "").trim();
+            try { extensionAPI.settings.set(`custom-llm-${i}-mini-model`, v); } catch { }
+          }
+        }
+      });
+      settings.push({
+        id: `custom-llm-${i}-power-model`,
+        name: `Custom Provider ${i} — Model (power tier)`,
+        description: "Model ID used for the power tier (skill execution, complex reasoning). Falls back to the mini model if blank.",
+        action: {
+          type: "input",
+          value: deps.getSettingString(extensionAPI, `custom-llm-${i}-power-model`, ""),
+          placeholder: "Leave blank to use mini model",
+          onChange: (evt) => {
+            const v = String(evt?.target?.value ?? evt ?? "").trim();
+            try { extensionAPI.settings.set(`custom-llm-${i}-power-model`, v); } catch { }
+          }
+        }
+      });
+      settings.push({
+        id: `custom-llm-${i}-ludicrous-model`,
+        name: `Custom Provider ${i} — Model (ludicrous tier)`,
+        description: "Model ID used when ludicrous mode is enabled. Falls back to the power model if blank.",
+        action: {
+          type: "input",
+          value: deps.getSettingString(extensionAPI, `custom-llm-${i}-ludicrous-model`, ""),
+          placeholder: "Leave blank to use power model",
+          onChange: (evt) => {
+            const v = String(evt?.target?.value ?? evt ?? "").trim();
+            try { extensionAPI.settings.set(`custom-llm-${i}-ludicrous-model`, v); } catch { }
+          }
+        }
+      });
+      // Switch defaults: seed false on first render so Roam's switch UI matches
+      // the in-code default (per the earned rule about switch state in CLAUDE.md).
+      const failoverKey = `custom-llm-${i}-include-in-failover`;
+      if (extensionAPI.settings.get(failoverKey) === undefined) {
+        try { extensionAPI.settings.set(failoverKey, false); } catch { }
+      }
+      settings.push({
+        id: failoverKey,
+        name: `Custom Provider ${i} — Include in failover`,
+        description: "When ON, this slot is appended to the end of every failover chain. When OFF (default), it is only used when explicitly selected as the primary provider.",
+        action: {
+          type: "switch",
+          value: ensureSettingBool(extensionAPI, failoverKey, false),
+          onChange: () => { /* auto-persisted */ }
+        }
+      });
+      const noFailoverKey = `custom-llm-${i}-no-failover`;
+      if (extensionAPI.settings.get(noFailoverKey) === undefined) {
+        try { extensionAPI.settings.set(noFailoverKey, false); } catch { }
+      }
+      settings.push({
+        id: noFailoverKey,
+        name: `Custom Provider ${i} — Privacy mode (no failover)`,
+        description: "When this slot is the primary provider and a request fails, surface the error instead of falling over to another provider. Use this if you want to keep all traffic local.",
+        action: {
+          type: "switch",
+          value: ensureSettingBool(extensionAPI, noFailoverKey, false),
+          onChange: () => { /* auto-persisted */ }
+        }
+      });
+      const useProxyKey = `custom-llm-${i}-use-proxy`;
+      if (extensionAPI.settings.get(useProxyKey) === undefined) {
+        try { extensionAPI.settings.set(useProxyKey, false); } catch { }
+      }
+      settings.push({
+        id: useProxyKey,
+        name: `Custom Provider ${i} — Route through Roam CORS proxy`,
+        description: "Escape hatch for remote (https://) endpoints with restrictive CORS. Does NOT work for localhost — the proxy runs on Cloudflare and cannot reach your machine; for local servers you must enable CORS on the server itself. Local URLs (localhost, 127.0.0.1) always go direct regardless of this setting.",
+        action: {
+          type: "switch",
+          value: ensureSettingBool(extensionAPI, useProxyKey, false),
+          onChange: () => { /* auto-persisted */ }
+        }
+      });
+      const disableToolsKey = `custom-llm-${i}-disable-tool-calling`;
+      if (extensionAPI.settings.get(disableToolsKey) === undefined) {
+        try { extensionAPI.settings.set(disableToolsKey, false); } catch { }
+      }
+      settings.push({
+        id: disableToolsKey,
+        name: `Custom Provider ${i} — Disable tool calling`,
+        description: "Required for some free OpenRouter models and small local models that don't support tool calling — they 404 when 'tools' is in the request body. With this ON the agent works in chat-only mode (no Roam reads/writes, no MCP). Off by default; most modern models support tools. OpenRouter filter for tools-capable models: https://openrouter.ai/models?supported_parameters=tools",
+        action: {
+          type: "switch",
+          value: ensureSettingBool(extensionAPI, disableToolsKey, false),
+          onChange: () => { /* auto-persisted */ }
+        }
+      });
+    }
   }
 
   // --- Tier 2.5 toggle: Extension Tools --------------------------------------
@@ -703,6 +913,15 @@ export function buildSettingsConfig(extensionAPI) {
         action: {
           type: "switch",
           value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.skillAutoresearchPowerMutations, false)
+        }
+      },
+      {
+        id: deps.SETTINGS_KEYS.skillAutoresearchTokenGuard,
+        name: "Token-Growth Guard",
+        description: "Reject refinement mutations that grow the skill text by 25% or more, even when the score improves. Stops the optimiser from stacking instructions indefinitely. Mutations that add a missing Rubric, Constraints, or Sources section are exempt — growth is the point. Default: on.",
+        action: {
+          type: "switch",
+          value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.skillAutoresearchTokenGuard, true)
         }
       }
     );

@@ -1,6 +1,6 @@
 # Chief of Staff
 
-An AI assistant embedded in Roam Research. Chief of Staff connects your Roam graph to large language models (Anthropic, OpenAI, Google Gemini, Mistral, or Groq) and to external tools via [Composio](https://composio.dev), letting you ask questions, search and manage tasks, and orchestrate actions across your connected apps — all without leaving Roam.
+An AI assistant embedded in Roam Research. Chief of Staff connects your Roam graph to large language models — Anthropic, OpenAI, Google Gemini, Mistral, Groq, or any OpenAI-compatible endpoint (LM Studio, Ollama, OpenRouter, vLLM, …) — and to external tools via [Composio](https://composio.dev), letting you ask questions, search and manage tasks, and orchestrate actions across your connected apps — all without leaving Roam.
 
 https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 
@@ -9,7 +9,7 @@ https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 ## What it does
 
 - **Ask anything** via the command palette or a persistent floating chat panel. The assistant can read your graph, create blocks, and call external tools — with your approval before any write operation. Common queries (task searches, memory saves, tool lists) are handled instantly without an LLM call.
-- **Multi-provider LLM support** — choose from Anthropic Claude, OpenAI GPT, Google Gemini, Mistral, or Groq as your primary provider. If one provider is unavailable, the assistant automatically fails over to the next available provider in the chain.
+- **Multi-provider LLM support** — choose from Anthropic Claude, OpenAI GPT, Google Gemini, Mistral, Groq, or up to three **custom OpenAI-compatible endpoints** (LM Studio, Ollama, OpenRouter, vLLM, self-hosted, etc.) as your primary provider. If one provider is unavailable, the assistant automatically fails over to the next available provider in the chain. Custom local slots support a privacy mode that disables fallback to cloud providers — failed requests surface as errors instead of silently routing to a remote API.
 - **Better Tasks integration** — search, create, and modify Better Tasks (TODO/DONE parent blocks with `BT_attr*` attribute children) directly from natural language. Supports filtering by due date, project, status, and free text.
 - **Persistent memory** — loads context from dedicated memory pages into the system prompt each run (see [Memory and learning](#memory-and-learning)).
 - **Skill routing** — reads `Chief of Staff/Skills`, injects a compact skill index into the prompt, and can apply a specific skill on request. A gathering completeness guard ensures the assistant calls all required data sources before writing. Skills can declare **pre-flight acceptance criteria** (an `Acceptance:` field) — binding pass/fail conditions injected into the system prompt before the skill runs, so the model knows exactly what its output must satisfy. Same criteria are also passed to the post-run eval-judge.
@@ -44,7 +44,7 @@ Chief of Staff runs entirely inside your Roam browser tab — there's no server,
 
 Here's what crosses the network when something does run:
 
-**LLM calls** — Your prompt and supporting context are sent to whichever LLM provider you've configured (Anthropic, OpenAI, Google, Mistral, Groq). The context sent alongside your message includes conversation history (up to 12 prior turns), your COS memory pages, active project list, any active skill instructions, and tool results gathered during the current run (e.g. Roam search results, calendar events). Anthropic calls go direct from your browser; other providers route through Roam's built-in CORS proxy (the same one all Roam extensions use). An optional PII scrubbing setting can strip emails, phone numbers, and other sensitive patterns before anything is sent.
+**LLM calls** — Your prompt and supporting context are sent to whichever LLM provider you've configured (Anthropic, OpenAI, Google, Mistral, Groq, or a custom OpenAI-compatible endpoint of your choice). The context sent alongside your message includes conversation history (up to 12 prior turns), your COS memory pages, active project list, any active skill instructions, and tool results gathered during the current run (e.g. Roam search results, calendar events). Anthropic calls go direct from your browser; other built-in providers route through Roam's built-in CORS proxy. Custom slots pointing at `localhost` go direct (browser secure-context exception); custom slots pointing at remote URLs go direct by default and can opt into the proxy. An optional PII scrubbing setting can strip emails, phone numbers, and other sensitive patterns before anything is sent.
 
 **Composio integrations** — If you optionally connect external services (Gmail, Calendar, GitHub, etc.) through Composio, those tool calls go through Composio's API via a CORS proxy. Entirely opt-in — nothing connects unless you explicitly set it up and authenticate.
 
@@ -68,7 +68,7 @@ For full technical details on security measures, injection defences, and credent
 
 | Requirement | Notes |
 |---|---|
-| At least one LLM API key (Anthropic, OpenAI, Gemini, Mistral, or Groq) | Direct browser fetch — incurs API costs at your provider's rates. Groq requires a paid plan (Dev tier or above) — the free tier's token-per-minute limit is too low. |
+| At least one LLM API key (Anthropic, OpenAI, Gemini, Mistral, Groq) **or** a custom OpenAI-compatible endpoint (LM Studio, Ollama, OpenRouter, vLLM, …) | Direct browser fetch — incurs API costs at your provider's rates. Groq requires a paid plan (Dev tier or above) — the free tier's token-per-minute limit is too low. Local servers (LM Studio, Ollama) cost nothing and run offline. |
 | Composio account + API key | Only required for external tool integrations. Graph and task features work without it. |
 | [Better Tasks](https://github.com/mlava/recurring-tasks) extension | Only required for Better Tasks integration. Plain TODO search works without it. |
 
@@ -82,7 +82,7 @@ Open **Settings > Chief of Staff** and fill in:
 
 - **Your Name** — how Chief of Staff addresses you
 - **Assistant Name** — display-only label used in chat header and toasts (default: `Chief of Staff`)
-- **LLM Provider** — `anthropic` (default), `openai`, `gemini`, `mistral`, or `groq`
+- **LLM Provider** — `anthropic` (default), `openai`, `gemini`, `mistral`, `groq`, or one of your configured custom slots (see [Custom OpenAI-compatible providers](#custom-openai-compatible-providers-lm-studio-ollama-openrouter-vllm-) below).
 - **API Keys** — separate fields for each provider. Only the key for your selected provider is required; configure additional keys to enable automatic failover.
   - Anthropic API Key (`sk-ant-...`)
   - OpenAI API Key (`sk-...`)
@@ -106,6 +106,33 @@ Default models by tier:
 | Power (`/power`) | claude-sonnet-4-6 | gpt-4.1 | gemini-3-flash-preview | mistral-medium | llama-3.3-70b-versatile |
 | Ludicrous (`/ludicrous`) | claude-opus-4-6 | gpt-5.4 | gemini-3.1-pro-preview-customtools | mistral-large | llama-3.3-70b-versatile |
 
+#### Custom OpenAI-compatible providers (LM Studio, Ollama, OpenRouter, vLLM, …)
+
+In addition to the five built-in providers above, you can configure up to three custom slots pointing at any OpenAI-compatible `/v1/chat/completions` endpoint — local servers like LM Studio or Ollama, or remote services like OpenRouter, Together AI, or self-hosted vLLM. Settings live under **Show Integration Settings → Custom LLM Providers**.
+
+**Per-slot fields:**
+
+- **Display name** (optional) — friendly label that appears in the LLM Provider dropdown above (e.g. `custom-1 — LM Studio`).
+- **Base URL** — endpoint base ending at `/v1`. The `/chat/completions` path is appended automatically.
+- **API key** (optional) — Bearer token. Leave blank for local servers that ignore auth (LM Studio, Ollama).
+- **Model IDs** — separate fields for mini, power, and ludicrous tiers. Mini is required; power falls back to mini if blank, ludicrous falls back to power.
+- **Include in failover** — append this slot to the end of every failover chain (default off; only used when explicitly selected as primary).
+- **Privacy mode (no failover)** — when this slot is the primary provider and a request fails, surface the error instead of falling over to another provider. Use this to keep all traffic local with no cloud spillover.
+- **Disable tool calling** — required for some free OpenRouter models and small local models that 404 on tool-bearing requests. Agent runs in chat-only mode (no Roam reads/writes, no MCP) when on.
+- **Route through Roam CORS proxy** — escape hatch for remote endpoints with restrictive CORS. Does NOT work for localhost — local servers must enable CORS themselves.
+
+**Quick start — LM Studio:** open the **Developer** tab, toggle **Enable CORS** ON, then start the server with a model loaded. Set base URL to `http://localhost:1234/v1` and copy the model ID from `http://localhost:1234/v1/models`. Without the CORS toggle, the browser blocks the request at preflight with `No 'Access-Control-Allow-Origin' header is present`.
+
+**Quick start — Ollama:** Ollama enforces CORS via the `OLLAMA_ORIGINS` env var. Run `OLLAMA_ORIGINS=https://roamresearch.com ollama serve`, then `ollama pull llama3.2`. Set base URL to `http://localhost:11434/v1` and model `llama3.2`.
+
+**Quick start — OpenRouter:** sign up at [openrouter.ai](https://openrouter.ai), copy your API key, set base URL to `https://openrouter.ai/api/v1`. Pick any model from the [tools-capable models filter](https://openrouter.ai/models?supported_parameters=tools). Free models have aggressive per-account rate limits (~50/day default, lifted to 1000/day after $10 credit purchase) and several have no tool-capable provider — if a model 404s with *"No endpoints found that support tool use"*, either pick a different model or toggle "Disable tool calling" on the slot.
+
+**Cost tracking note.** Custom-provider models accrue zero cost in Chief of Staff's session/daily totals — the extension can't reliably price arbitrary endpoints. For paid services like OpenRouter, check spend on the provider's own dashboard.
+
+**CORS rules summary.** Local URLs (`http://localhost`, `127.0.0.1`, `[::1]`) always bypass the Roam CORS proxy and go direct (browser secure-context exception for loopback). Remote URLs go direct by default; if the remote service has restrictive CORS, enable "Route through proxy" on that slot. The proxy escape hatch does not work for localhost — the proxy is a Cloudflare Worker on the edge and cannot reach your machine.
+
+**Renaming caveat.** When you rename a slot's display name, Roam's settings select widget caches its displayed selection across rebuilds — close and re-open the settings panel to see the new label in the LLM Provider dropdown. The change takes effect immediately for routing; only the display lags.
+
 #### How tiers work
 
 By default, requests go to the **mini** tier — fast and cheap. You can force a higher tier by appending `/power` or `/ludicrous` to your message in the chat panel (e.g. "summarise my week /power"). You can also force a specific provider by appending `/claude`, `/gemini`, `/openai`, `/mistral`, or `/groq` (e.g. "summarise my week /claude /power"). Provider and tier commands are orthogonal and can be combined freely. All command suffixes are stripped before the message reaches the LLM. When a provider is forced, automatic failover is disabled — if that provider fails, you see the error rather than a silent switch to another provider.
@@ -115,6 +142,8 @@ Most of the time, you don't need to think about tiers. A composite scoring syste
 #### Automatic failover
 
 If your primary provider is unavailable or returns an error, the assistant automatically tries the next available provider in the chain. Each failed provider enters a 60-second cooldown before being retried. If all power-tier providers fail and you have **Ludicrous mode failover** enabled in settings, the assistant escalates to the most capable (and most expensive) models as a last resort. This means configuring API keys for multiple providers gives you resilience — the assistant keeps working even if one provider has an outage.
+
+Custom OpenAI-compatible slots are NOT in any failover chain by default — they only run when explicitly selected as the primary provider. Toggle **Include in failover** per slot to opt in (the slot is appended to the end of every tier's chain so built-ins are tried first). For local-only / privacy use, toggle **Privacy mode (no failover)** on the slot — when that slot is the primary provider, a failed call surfaces the error instead of falling over to a cloud provider.
 
 #### Anthropic advisor tool
 
@@ -767,7 +796,7 @@ All LLM processing happens via direct API calls from your browser to your config
 
 **Remote MCP servers.** Tool call payloads are sent directly to the remote server's URL (via Roam's built-in CORS proxy when available). Auth tokens are included in request headers and are stored locally in Roam Depot — they are never sent to any other service.
 
-**What is never sent.** Your full graph is never transmitted. The assistant reads specific blocks via Roam's local API and includes only the relevant results in the LLM context. Your API keys are sent only to their respective provider endpoints, never to Composio or the CORS proxy.
+**What is never sent.** Your full graph is never transmitted. The assistant reads specific blocks via Roam's local API and includes only the relevant results in the LLM context. Your API keys are sent only to their respective provider endpoints (built-in providers, custom OpenAI-compatible endpoints you've configured, MCP servers, Composio), never to any other party. Custom-endpoint base URLs are user-controlled — if you set a custom slot's base URL to your own server, only your server receives those requests.
 
 ### What the extension does not protect against
 

@@ -141,7 +141,11 @@ import {
   getPromotedServerNames,
   VALID_LLM_PROVIDERS,
   isAdvisorEnabledInSettings,
-  isAdvisorEnabledForCall
+  isAdvisorEnabledForCall,
+  isCustomProvider,
+  listCustomProviderIds,
+  getCustomProviderConfig,
+  getValidProviders
 } from "./llm-providers.js";
 import {
   initConversation,
@@ -324,6 +328,7 @@ const SETTINGS_KEYS = {
   ludicrousModeEnabled: "ludicrous-mode-enabled",
   localMcpPorts: "local-mcp-ports",
   remoteMcpCount: "remote-mcp-count",
+  customLlmCount: "custom-llm-count",
   piiScrubEnabled: "pii-scrub-enabled",
   costHistory: "cost-history",
   usageStats: "usage-stats",
@@ -348,6 +353,7 @@ const SETTINGS_KEYS = {
   skillAutoresearchToolCalling: "skill-autoresearch-tool-calling",
   skillAutoresearchToolCache: "skill-autoresearch-tool-cache",
   skillAutoresearchPowerMutations: "skill-autoresearch-power-mutations",
+  skillAutoresearchTokenGuard: "skill-autoresearch-token-guard",
   skillStalenessDays: "skill-staleness-days",
   stalenessToastLastShownAt: "staleness-toast-last-shown-at",
   stalenessGrandfatherAt: "staleness-grandfather-at",
@@ -3252,7 +3258,7 @@ async function runLlmCouncil(question, models, chair, context, budgetUsd) {
 
     const results = await Promise.all(models.map(async (provider) => {
       const apiKey = getApiKeyForProvider(extensionAPIRef, provider);
-      const model = getPowerModel(provider);
+      const model = getPowerModel(extensionAPIRef, provider);
       try {
         const resp = await callLlm(provider, apiKey, model, COUNCIL_CONJECTURE_SYSTEM,
           [{ role: "user", content: userMessage }], [],
@@ -3281,7 +3287,7 @@ async function runLlmCouncil(question, models, chair, context, budgetUsd) {
       const reviewer = activeModels[i];
       const target = activeModels[(i + 1) % activeModels.length];
       const apiKey = getApiKeyForProvider(extensionAPIRef, reviewer);
-      const model = getPowerModel(reviewer);
+      const model = getPowerModel(extensionAPIRef, reviewer);
       try {
         const resp = await callLlm(reviewer, apiKey, model, COUNCIL_CRITICISM_SYSTEM,
           [{ role: "user", content: `## Analysis to Review\n\n${state.responses[target]}\n\nProvide your critique with a Robustness Score (1-10).` }],
@@ -3307,7 +3313,7 @@ async function runLlmCouncil(question, models, chair, context, budgetUsd) {
         }
       });
       const chairKey = getApiKeyForProvider(extensionAPIRef, state.chair);
-      const chairModel = getPowerModel(state.chair);
+      const chairModel = getPowerModel(extensionAPIRef, state.chair);
       try {
         const resp = await callLlm(state.chair, chairKey, chairModel, COUNCIL_SYNTHESIS_SYSTEM,
           [{ role: "user", content: input }], [],
@@ -4890,6 +4896,9 @@ function buildOnboardingDeps(extensionAPI) {
     connectLocalMcp,
     getLocalMcpTools,
     getLocalMcpClients,
+    // Custom LLM provider awareness for the summary screen
+    listCustomProviderIds,
+    getCustomProviderConfig,
   };
 }
 
@@ -5797,6 +5806,9 @@ function onload({ extensionAPI }) {
   if (extensionAPI?.settings?.get?.(SETTINGS_KEYS.logUseLinkedDates) === undefined) {
     extensionAPI.settings.set(SETTINGS_KEYS.logUseLinkedDates, true);
   }
+  if (extensionAPI?.settings?.get?.(SETTINGS_KEYS.skillAutoresearchTokenGuard) === undefined) {
+    extensionAPI.settings.set(SETTINGS_KEYS.skillAutoresearchTokenGuard, true);
+  }
 
   initUsageTracking({
     SETTINGS_KEYS,
@@ -5849,11 +5861,11 @@ function onload({ extensionAPI }) {
     callLlmPower: async (system, messages, options) => {
       const provider = getLlmProvider(extensionAPIRef);
       const apiKey = getApiKeyForProvider(extensionAPIRef, provider);
-      const model = getPowerModel(provider);
+      const model = getPowerModel(extensionAPIRef, provider);
       if (!apiKey) throw new Error("No API key configured for " + provider);
       return callLlm(provider, apiKey, model, system, messages, [], options);
     },
-    getPowerModel: () => getPowerModel(getLlmProvider(extensionAPIRef)),
+    getPowerModel: () => getPowerModel(extensionAPIRef, getLlmProvider(extensionAPIRef)),
     callLlmJudge: async (system, messages, options) => {
       const config = getAutoresearchJudgeConfig();
       if (!config) throw new Error("No LLM provider available for judge");
@@ -5941,6 +5953,7 @@ function onload({ extensionAPI }) {
     getToolCallingSetting: () => getSettingBool(extensionAPIRef, SETTINGS_KEYS.skillAutoresearchToolCalling, false),
     getToolCacheSetting: () => getSettingBool(extensionAPIRef, SETTINGS_KEYS.skillAutoresearchToolCache, true),
     getPowerMutationSetting: () => getSettingBool(extensionAPIRef, SETTINGS_KEYS.skillAutoresearchPowerMutations, false),
+    getTokenGuardSetting: () => getSettingBool(extensionAPIRef, SETTINGS_KEYS.skillAutoresearchTokenGuard, true),
     updateChatPanelCostIndicator,
   });
   initIntentClassifier({
@@ -5996,6 +6009,8 @@ function onload({ extensionAPI }) {
     getSettingBool,
     getAssistantDisplayName,
     getLlmProvider,
+    listCustomProviderIds,
+    getCustomProviderConfig,
     isDebugLoggingEnabled,
     isDryRunEnabled,
     getExtensionToolsRegistry,
@@ -6661,18 +6676,43 @@ function onload({ extensionAPI }) {
       }, 800);
     }
   } catch { /* ignore */ }
+  // Migration: ensure llm-provider matches the slot's CURRENT compound label so
+  // Roam's select widget shows it as the active item. Roam stores whatever the
+  // user clicked, ignores the `value` prop on subsequent renders, so a stale
+  // label (after rename) or a canonical-only label (from an earlier build)
+  // leaves the dropdown showing nothing selected. Re-syncing here is idempotent.
+  try {
+    const savedProvider = String(extensionAPI.settings.get(SETTINGS_KEYS.llmProvider) || "");
+    const slotMatch = savedProvider.match(/^(custom-\d+)\b/i);
+    if (slotMatch) {
+      const slotId = slotMatch[1].toLowerCase();
+      const cfg = getCustomProviderConfig(extensionAPI, slotId);
+      if (cfg) {
+        const isDefaultName = cfg.name === `Custom ${cfg.slot}`;
+        const expected = (cfg.name && !isDefaultName) ? `${slotId} — ${cfg.name}` : slotId;
+        if (savedProvider !== expected) {
+          extensionAPI.settings.set(SETTINGS_KEYS.llmProvider, expected);
+          debugLog("[Chief flow] Synced llm-provider label:", savedProvider, "→", expected);
+        }
+      }
+    }
+  } catch { /* ignore */ }
   // First-run onboarding
   onboardingCheckTimeoutId = setTimeout(() => {
     onboardingCheckTimeoutId = null;
     if (unloadInProgress || extensionAPIRef === null) return;
     const hasCompleted = extensionAPI.settings.get(SETTINGS_KEYS.onboardingComplete);
-    const hasAnyKey =
+    const hasBuiltinKey =
       getSettingString(extensionAPI, SETTINGS_KEYS.anthropicApiKey, "") ||
       getSettingString(extensionAPI, SETTINGS_KEYS.openaiApiKey, "") ||
       getSettingString(extensionAPI, SETTINGS_KEYS.geminiApiKey, "") ||
       getSettingString(extensionAPI, SETTINGS_KEYS.mistralApiKey, "") ||
+      getSettingString(extensionAPI, SETTINGS_KEYS.groqApiKey, "") ||
       getSettingString(extensionAPI, SETTINGS_KEYS.llmApiKey, "");
-    if (!hasCompleted && !hasAnyKey) {
+    // A configured custom slot (LM Studio, Ollama, OpenRouter, etc.) is just
+    // as valid an "I have an LLM" signal as a built-in key.
+    const hasCustomSlot = listCustomProviderIds(extensionAPI).length > 0;
+    if (!hasCompleted && !hasBuiltinKey && !hasCustomSlot) {
       launchOnboarding(extensionAPI, buildOnboardingDeps(extensionAPI));
     }
   }, 1500);

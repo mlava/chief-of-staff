@@ -22,6 +22,8 @@ import {
   applyMutationDiff,
   ASPECT_SECTION_MAP,
   OPTIMIZATION_DEFAULTS,
+  decideMutationAcceptance,
+  TOKEN_GROWTH_LIMIT,
 } from "../src/skill-autoresearch.js";
 
 // ── Test helpers ────────────────────────────────────────────────────────────
@@ -1266,5 +1268,99 @@ describe("computePassRate with excluded criteria", () => {
   it("returns 0 when all criteria are excluded", () => {
     const scores = makeScores({ a: true });
     assert.strictEqual(computePassRate(scores, 1, new Set(["a"])), 0);
+  });
+});
+
+// ── decideMutationAcceptance (token-growth guard) ─────────────────────────
+
+describe("decideMutationAcceptance", () => {
+  const baseArgs = {
+    mutatedPassRate: 0.8,
+    currentBestPassRate: 0.6,
+    mutatedLength: 1100,
+    currentBestLength: 1000,
+    aspect: "approach_specificity",
+    tokenGuardEnabled: true,
+  };
+
+  it("accepts a refinement mutation that improves score with growth under the limit", () => {
+    // 10% growth on a refinement aspect, score improves → accept
+    const result = decideMutationAcceptance(baseArgs);
+    assert.strictEqual(result.accept, true);
+    assert.ok(result.growthPct < TOKEN_GROWTH_LIMIT);
+  });
+
+  it("rejects a refinement mutation that improves score but bloats tokens", () => {
+    // 30% growth ≥ 25% limit on a refinement aspect → reject with token-bloat
+    const result = decideMutationAcceptance({ ...baseArgs, mutatedLength: 1300 });
+    assert.strictEqual(result.accept, false);
+    assert.strictEqual(result.reason, "token-bloat");
+    assert.ok(result.growthPct >= TOKEN_GROWTH_LIMIT);
+  });
+
+  it("accepts a structural mutation that adds a missing section even with large growth", () => {
+    // 80% growth on add_rubric → accept (structural aspects bypass the guard)
+    const result = decideMutationAcceptance({
+      ...baseArgs,
+      aspect: "add_rubric",
+      mutatedLength: 1800,
+    });
+    assert.strictEqual(result.accept, true);
+  });
+
+  it("accepts each structural aspect with growth above the refinement limit", () => {
+    for (const aspect of ["add_rubric", "add_constraints", "add_or_fix_sources"]) {
+      const result = decideMutationAcceptance({ ...baseArgs, aspect, mutatedLength: 2000 });
+      assert.strictEqual(result.accept, true, `${aspect} should bypass token guard`);
+    }
+  });
+
+  it("accepts a bloat-y refinement when the token guard is disabled", () => {
+    // Same 30% growth that was rejected above — now accepted because guard is off
+    const result = decideMutationAcceptance({
+      ...baseArgs,
+      mutatedLength: 1300,
+      tokenGuardEnabled: false,
+    });
+    assert.strictEqual(result.accept, true);
+  });
+
+  it("rejects a tie that grows the content (existing rule preserved)", () => {
+    const result = decideMutationAcceptance({
+      ...baseArgs,
+      mutatedPassRate: 0.6,
+      currentBestPassRate: 0.6,
+      mutatedLength: 1100,
+    });
+    assert.strictEqual(result.accept, false);
+    assert.strictEqual(result.reason, "tie-grew");
+  });
+
+  it("accepts a tie that does not grow the content (existing rule preserved)", () => {
+    const result = decideMutationAcceptance({
+      ...baseArgs,
+      mutatedPassRate: 0.6,
+      currentBestPassRate: 0.6,
+      mutatedLength: 1000,
+    });
+    assert.strictEqual(result.accept, true);
+  });
+
+  it("rejects a score regression regardless of length", () => {
+    const result = decideMutationAcceptance({
+      ...baseArgs,
+      mutatedPassRate: 0.5,
+      currentBestPassRate: 0.6,
+      mutatedLength: 800,  // shorter, but worse score
+    });
+    assert.strictEqual(result.accept, false);
+    assert.strictEqual(result.reason, "score-regression");
+  });
+
+  it("treats growth at exactly the limit as bloat (>=25% rejected)", () => {
+    // 25% growth — the boundary. Spec says reject at limit.
+    const result = decideMutationAcceptance({ ...baseArgs, mutatedLength: 1250 });
+    assert.strictEqual(result.accept, false);
+    assert.strictEqual(result.reason, "token-bloat");
   });
 });

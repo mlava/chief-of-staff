@@ -30,6 +30,13 @@ export const OPTIMIZATION_DEFAULTS = {
 
 // Phase A: structural sub-aspects (guaranteed first, skipped if section exists)
 const STRUCTURAL_ASPECTS = ["add_rubric", "add_constraints", "add_or_fix_sources"];
+
+// Token-growth guard: refinement mutations must keep growth under this fraction
+// of current best content length to be accepted. Structural mutations are exempt
+// (they only run when their section is missing — growth is intentional).
+// Length is the proxy; chars / 4 ≈ tokens for English. We're comparing relative
+// growth so the heuristic is sufficient.
+export const TOKEN_GROWTH_LIMIT = 0.25;
 // Phase B: refinement aspects (normal cycling after structural phase)
 const REFINEMENT_ASPECTS = [
   "approach_specificity",
@@ -365,6 +372,53 @@ export function computePassRate(scores, criteriaCount, excludedIds = null) {
     totalPasses += (s.results || []).filter(r => r.pass && !(exclude?.has(r.id))).length;
   }
   return totalPasses / (scores.length * effectiveCount);
+}
+
+/**
+ * Decides whether to accept a mutation given its scores and length deltas.
+ *
+ * Rules (in order of precedence):
+ *   1. If the score regresses, reject ("score-regression").
+ *   2. If the score is tied but the content grew, reject ("tie-grew").
+ *   3. If a refinement aspect grew the content beyond TOKEN_GROWTH_LIMIT and the
+ *      token guard is enabled, reject ("token-bloat").
+ *   4. Otherwise accept.
+ *
+ * Structural aspects (add_rubric / add_constraints / add_or_fix_sources) bypass
+ * the token guard — they only run when their section is missing, so growth is
+ * the intent.
+ *
+ * @returns {{ accept: boolean, reason?: string, growthPct: number }}
+ */
+export function decideMutationAcceptance({
+  mutatedPassRate,
+  currentBestPassRate,
+  mutatedLength,
+  currentBestLength,
+  aspect,
+  tokenGuardEnabled,
+}) {
+  const growthPct = currentBestLength > 0
+    ? (mutatedLength - currentBestLength) / currentBestLength
+    : 0;
+  const isImprovement = mutatedPassRate > currentBestPassRate;
+  const isTie = mutatedPassRate === currentBestPassRate;
+  const isShorterOrEqual = mutatedLength <= currentBestLength;
+
+  if (!isImprovement && !isTie) {
+    return { accept: false, reason: "score-regression", growthPct };
+  }
+  if (isTie && !isShorterOrEqual) {
+    return { accept: false, reason: "tie-grew", growthPct };
+  }
+  // Score improved (or size-neutral tie). Apply token guard for refinements only.
+  if (isImprovement
+    && tokenGuardEnabled
+    && !STRUCTURAL_ASPECTS.includes(aspect)
+    && growthPct >= TOKEN_GROWTH_LIMIT) {
+    return { accept: false, reason: "token-bloat", growthPct };
+  }
+  return { accept: true, growthPct };
 }
 
 /**
@@ -1037,6 +1091,15 @@ export async function runSkillOptimization(skillName, options = {}) {
       deps.debugLog("[Autoresearch] Tool result cache enabled");
     }
 
+    // Token-growth guard: refinement mutations must keep length growth under
+    // TOKEN_GROWTH_LIMIT (default ON; disable for legacy stack-everything behavior).
+    state.tokenGuardEnabled = typeof deps.getTokenGuardSetting === "function"
+      ? deps.getTokenGuardSetting()
+      : true;
+    if (!state.tokenGuardEnabled) {
+      deps.debugLog("[Autoresearch] Token-growth guard disabled");
+    }
+
     // ── Phase 1a: Generate test cases + criteria (with one retry) ───
     const miniModel = deps.getMiniModel();
     const maxTestCases = state.useToolCalling ? 3 : OPTIMIZATION_DEFAULTS.maxTestCases;
@@ -1231,14 +1294,22 @@ export async function runSkillOptimization(skillName, options = {}) {
         continue;
       }
 
-      // Accept if score strictly improves. On a tie, accept only if the mutation
-      // does not grow the skill (size-neutral or shorter). Ties that add content
-      // are rejected — they bloat the skill with no measurable benefit.
-      const isTie = mutatedPassRate === state.currentBestPassRate;
-      const isShorterOrEqual = validatedContent.length <= state.currentBestContent.length;
-      if (mutatedPassRate > state.currentBestPassRate || (isTie && isShorterOrEqual)) {
+      // Accept/discard via pure decision function (see decideMutationAcceptance).
+      // Refinement mutations must improve score AND keep growth under
+      // TOKEN_GROWTH_LIMIT; structural mutations (add_*) bypass the growth guard.
+      const decision = decideMutationAcceptance({
+        mutatedPassRate,
+        currentBestPassRate: state.currentBestPassRate,
+        mutatedLength: validatedContent.length,
+        currentBestLength: state.currentBestContent.length,
+        aspect,
+        tokenGuardEnabled: state.tokenGuardEnabled,
+      });
+      const growthPctStr = (decision.growthPct * 100).toFixed(0) + "%";
+      if (decision.accept) {
         deps.debugLog("[Autoresearch] Mutation accepted:", aspect,
-          Math.round(state.currentBestPassRate * 100) + "% ->", Math.round(mutatedPassRate * 100) + "%");
+          Math.round(state.currentBestPassRate * 100) + "% ->", Math.round(mutatedPassRate * 100) + "%",
+          "(length", growthPctStr + ")");
         state.currentBestContent = validatedContent;
         state.currentBestScores = mutatedScores;
         state.currentBestPassRate = mutatedPassRate;
@@ -1249,10 +1320,16 @@ export async function runSkillOptimization(skillName, options = {}) {
       } else {
         deps.debugLog("[Autoresearch] Mutation discarded:", aspect,
           "rate:", Math.round(mutatedPassRate * 100) + "%",
-          "vs current best:", Math.round(state.currentBestPassRate * 100) + "%");
+          "vs current best:", Math.round(state.currentBestPassRate * 100) + "%",
+          "reason:", decision.reason, "(length", growthPctStr + ")");
         state.consecutiveDiscards++;
         trackDiscardFailures(mutatedScores);
-        state.mutationsDiscarded.push({ aspect, description: isTie ? "tie — content grew" : "no improvement" });
+        const description = decision.reason === "token-bloat"
+          ? `token growth ${growthPctStr} (limit ${Math.round(TOKEN_GROWTH_LIMIT * 100)}%)`
+          : decision.reason === "tie-grew"
+            ? "tie — content grew"
+            : "no improvement";
+        state.mutationsDiscarded.push({ aspect, description, reason: decision.reason });
       }
 
       // Progress toast every 2 iterations so the user knows it's alive
