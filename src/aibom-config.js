@@ -24,8 +24,8 @@ export const POWER_LLM_MODELS = {
 
 export const LUDICROUS_LLM_MODELS = {
   mistral: "mistral-large-2512",
-  openai: "gpt-5.4",
+  openai: "gpt-5.5",
   gemini: "gemini-3.1-pro-preview-customtools",
-  anthropic: "claude-opus-4-6",
+  anthropic: "claude-opus-4-7",
   groq: "llama-3.3-70b-versatile"
 };
