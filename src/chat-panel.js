@@ -612,6 +612,7 @@ function shortModelLabel(modelId) {
   if (id.includes("flash"))      return "flash";
   // OpenAI
   if (id.includes("gpt-5-mini")) return "gpt-5-mini";
+  if (id.includes("gpt-5.5"))    return "gpt-5.5";
   if (id.includes("gpt-5.4"))    return "gpt-5.4";
   if (id.includes("gpt-4.1"))    return "gpt-4.1";
   // Mistral
