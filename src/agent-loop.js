@@ -26,7 +26,8 @@ import {
   callLlm, callOpenAIStreaming, getModelCostRates, getApiKeyForProvider,
   getLlmProvider, getLlmModel, getPowerModel, getLudicrousModel,
   isProviderCoolingDown, setProviderCooldown, getFailoverProviders,
-  isFailoverEligibleError, isOpenAICompatible, filterToolsByRelevance
+  isFailoverEligibleError, isOpenAICompatible, filterToolsByRelevance,
+  buildEffectiveFailoverChain, isCustomProvider, getCustomProviderConfig
 } from "./llm-providers.js";
 
 import {
@@ -226,8 +227,8 @@ export async function runAgentLoop(userMessage, options = {}) {
   const apiKey = getApiKeyForProvider(extensionAPI, provider);
   const baseModel = getLlmModel(extensionAPI, provider);
   const effectiveTier = tier || (powerMode ? "power" : "mini");
-  const model = effectiveTier === "ludicrous" ? (getLudicrousModel(provider) || getPowerModel(provider))
-    : effectiveTier === "power" ? getPowerModel(provider)
+  const model = effectiveTier === "ludicrous" ? (getLudicrousModel(extensionAPI, provider) || getPowerModel(extensionAPI, provider))
+    : effectiveTier === "power" ? getPowerModel(extensionAPI, provider)
       : baseModel;
   const maxOutputTokens = effectiveTier === "ludicrous" ? deps.LUDICROUS_MAX_OUTPUT_TOKENS
     : effectiveTier === "power" ? deps.SKILL_MAX_OUTPUT_TOKENS
@@ -337,7 +338,7 @@ export async function runAgentLoop(userMessage, options = {}) {
     totalInputChars,
     estInputTokens,
     toolPct: toolPct + "%",
-    estCostCents: (estInputTokens / 1000 * getModelCostRates(model).inputPerM / 1000).toFixed(3)
+    estCostCents: (estInputTokens / 1000 * getModelCostRates(model, provider).inputPerM / 1000).toFixed(3)
   });
   deps.debugLog("[Chief flow] Tool token breakdown (chars):", toolTokenBreakdown);
   // Record to daily usage stats for aggregate tracking
@@ -480,7 +481,7 @@ export async function runAgentLoop(userMessage, options = {}) {
           const outputTokens = usage.completion_tokens || 0;
           trace.totalInputTokens = (trace.totalInputTokens || 0) + inputTokens;
           trace.totalOutputTokens = (trace.totalOutputTokens || 0) + outputTokens;
-          const callCost = (inputTokens / 1_000_000 * getModelCostRates(model).inputPerM) + (outputTokens / 1_000_000 * getModelCostRates(model).outputPerM);
+          const callCost = (inputTokens / 1_000_000 * getModelCostRates(model, provider).inputPerM) + (outputTokens / 1_000_000 * getModelCostRates(model, provider).outputPerM);
           accumulateSessionTokens(inputTokens, outputTokens, callCost);
           recordCostEntry(model, inputTokens, outputTokens, callCost);
           trace.cost = (trace.cost || 0) + callCost;
@@ -544,7 +545,7 @@ export async function runAgentLoop(userMessage, options = {}) {
           trace.totalOutputTokens = (trace.totalOutputTokens || 0) + outputTokens;
           trace.totalCacheReadTokens = (trace.totalCacheReadTokens || 0) + cacheReadTokens;
           trace.totalCacheCreationTokens = (trace.totalCacheCreationTokens || 0) + cacheCreationTokens;
-          const { inputPerM: costPerMInput, outputPerM: costPerMOutput } = getModelCostRates(model);
+          const { inputPerM: costPerMInput, outputPerM: costPerMOutput } = getModelCostRates(model, provider);
           const callCost = (inputTokens / 1_000_000 * costPerMInput)
             + (cacheCreationTokens / 1_000_000 * costPerMInput * 1.25)
             + (cacheReadTokens / 1_000_000 * costPerMInput * 0.10)
@@ -1333,19 +1334,28 @@ export async function runAgentLoopWithFailover(userMessage, options = {}) {
   // rather than falling back to user's default which may not have a valid key/proxy.
   let primaryProvider;
   if (!options.providerOverride) {
-    let chain = deps.FAILOVER_CHAINS[baseTier] || deps.FAILOVER_CHAINS.mini;
-    // Per-skill provider exclusions (e.g. Models: -Gemini)
-    if (excludeProviders?.size > 0) {
-      chain = chain.filter(p => !excludeProviders.has(p));
-    }
-    // Per-skill provider preference (e.g. Models: +Mistral)
-    if (preferProvider) {
-      const preferred = chain.find(p => p === preferProvider && extensionAPI && !!getApiKeyForProvider(extensionAPI, p) && !isProviderCoolingDown(p));
-      if (preferred) primaryProvider = preferred;
-    }
-    if (!primaryProvider) {
-      primaryProvider = chain.find(p => extensionAPI && !!getApiKeyForProvider(extensionAPI, p) && !isProviderCoolingDown(p))
-        || (extensionAPI ? getLlmProvider(extensionAPI) : deps.DEFAULT_LLM_PROVIDER);
+    // Honour explicit custom-slot selection. Custom providers (LM Studio,
+    // Ollama, OpenAI-compat servers) are a deliberate user choice — they had
+    // to configure base URL and model IDs. Don't override that with chain-order
+    // selection, which would silently route to a built-in with a stale key.
+    const savedProvider = extensionAPI ? getLlmProvider(extensionAPI) : null;
+    if (savedProvider && isCustomProvider(savedProvider) && getCustomProviderConfig(extensionAPI, savedProvider)) {
+      primaryProvider = savedProvider;
+    } else {
+      let chain = buildEffectiveFailoverChain(extensionAPI, baseTier);
+      // Per-skill provider exclusions (e.g. Models: -Gemini)
+      if (excludeProviders?.size > 0) {
+        chain = chain.filter(p => !excludeProviders.has(p));
+      }
+      // Per-skill provider preference (e.g. Models: +Mistral)
+      if (preferProvider) {
+        const preferred = chain.find(p => p === preferProvider && extensionAPI && !!getApiKeyForProvider(extensionAPI, p) && !isProviderCoolingDown(p));
+        if (preferred) primaryProvider = preferred;
+      }
+      if (!primaryProvider) {
+        primaryProvider = chain.find(p => extensionAPI && !!getApiKeyForProvider(extensionAPI, p) && !isProviderCoolingDown(p))
+          || (extensionAPI ? getLlmProvider(extensionAPI) : deps.DEFAULT_LLM_PROVIDER);
+      }
     }
   } else {
     primaryProvider = options.providerOverride;

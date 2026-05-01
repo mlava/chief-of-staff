@@ -873,15 +873,25 @@ const ONBOARDING_STEPS = [
 
       // Build summary
       const provider = deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.llmProvider, "");
-      const hasAnyKey = !!(
+      const hasBuiltinKey = !!(
         deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.anthropicApiKey, "") ||
         deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.openaiApiKey, "") ||
         deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.geminiApiKey, "") ||
         deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.mistralApiKey, "") ||
         deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.groqApiKey, "")
       );
+      // A configured custom slot also counts as "AI provider set up"
+      const customSlotIds = (deps.listCustomProviderIds ? deps.listCustomProviderIds(extensionAPI) : []);
+      const hasCustomSlot = customSlotIds.length > 0;
+      const hasAnyKey = hasBuiltinKey || hasCustomSlot;
       const providerLabels = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Gemini", mistral: "Mistral", groq: "Groq" };
-      const providerLabel = providerLabels[provider] || "Not set";
+      let providerLabel = providerLabels[provider] || "Not set";
+      // If the saved primary is a custom slot, use the friendly name
+      const slotMatch = String(provider || "").match(/^(custom-\d+)\b/i);
+      if (slotMatch && deps.getCustomProviderConfig) {
+        const cfg = deps.getCustomProviderConfig(extensionAPI, slotMatch[1].toLowerCase());
+        if (cfg) providerLabel = cfg.name;
+      }
 
       const summaryContainer = document.createElement("div");
       summaryContainer.className = "cos-onboarding-summary";
