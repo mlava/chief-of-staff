@@ -4425,6 +4425,42 @@ function showRuntimeStats() {
   showInfoToast("Runtime stats logged", `${summary}. See console.`);
 }
 
+/**
+ * Clear every persisted setting for this extension. Recovery hatch for users
+ * who have poisoned their config (bad LLM endpoint, malformed MCP server, etc.)
+ * and can't recover by uninstalling — Roam Depot persists `extensionAPI.settings`
+ * in IndexedDB across uninstall/reinstall, so a clean slate requires explicit
+ * key clearing.
+ *
+ * Uses `settings.getAll()` to enumerate every key (including dynamic numbered
+ * slot keys like `custom-llm-2-api-key` and `remote-mcp-3-url` that aren't
+ * listed in SETTINGS_KEYS). Each key is cleared via `set(key, undefined)`.
+ *
+ * Returns the count of keys attempted. Module-scoped runtime state is NOT
+ * reset by this function — the user must reload Roam (or disable + re-enable
+ * the extension) for the cleared settings to fully take effect.
+ */
+function clearAllExtensionSettings(extensionAPI) {
+  if (!extensionAPI?.settings?.set) return 0;
+  let cleared = 0;
+  let keys = [];
+  try {
+    const all = extensionAPI.settings.getAll?.() || {};
+    keys = Object.keys(all);
+  } catch (e) {
+    console.warn("[Chief of Staff] settings.getAll failed during reset:", e?.message || e);
+  }
+  for (const key of keys) {
+    try {
+      extensionAPI.settings.set(key, undefined);
+      cleared += 1;
+    } catch (e) {
+      console.warn("[Chief of Staff] Failed to clear setting", key, e?.message || e);
+    }
+  }
+  return cleared;
+}
+
 function clearConversationContextWithToast() {
   clearConversationContext({ persist: true });
   clearChatPanelHistory();
@@ -5514,6 +5550,53 @@ function registerCommandPaletteCommands(extensionAPI) {
     }
   });
   extensionAPI.ui.commandPalette.addCommand({
+    label: "Chief of Staff: Reset All Settings (Recovery)",
+    callback: () => {
+      if (!iziToast?.show) {
+        // No iziToast available — fall back to a direct reset with console-only
+        // feedback. Better than silently failing if the user is mid-recovery.
+        const cleared = clearAllExtensionSettings(extensionAPI);
+        console.warn("[Chief of Staff] Reset all settings (no confirm dialog available); cleared", cleared, "keys");
+        return;
+      }
+      iziToast.show({
+        class: "cos-toast",
+        theme: getToastTheme(),
+        title: "Reset all Chief of Staff settings?",
+        message:
+          "<div style=\"margin:6px 0;font-size:12px;line-height:1.4;\">" +
+          "This clears <b>everything</b>: API keys, custom LLM endpoints, MCP servers, onboarding state, cron jobs, and usage history. " +
+          "Use this only to recover from a poisoned config that's blocking the UI." +
+          "<br><br>" +
+          "After confirming, <b>reload Roam</b> (or disable + re-enable the extension) for the reset to fully take effect." +
+          "</div>",
+        position: "center",
+        timeout: false,
+        close: true,
+        overlay: true,
+        drag: false,
+        maxWidth: 460,
+        buttons: [
+          [
+            "<button style=\"font-weight:600;color:#ef4444;\">Reset everything</button>",
+            (instance, toast) => {
+              const cleared = clearAllExtensionSettings(extensionAPI);
+              showInfoToast("Settings reset", `Cleared ${cleared} key(s). Reload Roam to start fresh.`);
+              debugLog("[Chief of Staff] All settings reset; cleared", cleared, "keys");
+              if (instance?.hide) instance.hide({}, toast);
+            }
+          ],
+          [
+            "<button>Cancel</button>",
+            (instance, toast) => {
+              if (instance?.hide) instance.hide({}, toast);
+            }
+          ]
+        ]
+      });
+    }
+  });
+  extensionAPI.ui.commandPalette.addCommand({
     label: "Chief of Staff: Show Cost History",
     callback: () => {
       const summary = getCostHistorySummary();
@@ -6300,6 +6383,12 @@ function onload({ extensionAPI }) {
     resetLastPromptSections,
     isUnloadInProgress: () => unloadInProgress,
     withRoamWriteRetry,
+    // Prefix identifying extension-managed page-description blocks. Inbox
+    // scans skip any top-level child whose string starts with this prefix
+    // so the pinned "ℹ️ Input queue — …" block is never processed even if
+    // the startup static-UID snapshot misses it (e.g. the page was renamed,
+    // recreated, or the description text was updated post-install).
+    descriptionPrefix: PAGE_DESCRIPTION_PREFIX,
   });
   initCronScheduler({
     debugLog,

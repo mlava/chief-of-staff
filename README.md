@@ -329,6 +329,16 @@ The tool is now available to the assistant. Ask it to "fetch https://example.com
 
 > **Note:** Cloudflare's free tier has daily usage limits for Browser Rendering. If you hit a rate limit (HTTP 429), wait for the daily reset.
 
+### Recovery — starting over
+
+Roam Depot stores extension settings in your browser's IndexedDB, which means they **survive uninstall and reinstall**. If you end up with a poisoned configuration — a malformed custom LLM endpoint, a stuck OAuth token, an MCP server that crashes the agent loop — uninstalling the extension does not give you a clean slate.
+
+For that case, run **Chief of Staff: Reset All Settings (Recovery)** from the command palette. It opens a confirmation dialog, then clears every persisted key: API keys for every provider, custom LLM endpoints, all configured local and remote MCP servers, onboarding state, scheduled jobs, usage and cost history, tool installations, and every other setting the extension has saved. Anything you've put on memory pages, in `Chief of Staff/Skills`, or elsewhere in your graph is untouched — only `extensionAPI.settings` is cleared.
+
+After confirming, **reload Roam** (or disable + re-enable the extension) so in-memory state clears too. On next load, onboarding restarts from scratch.
+
+Use this only as a recovery hatch — there's no undo, and you will need to re-enter API keys and reconnect MCP servers. If you only need to clear one specific thing (e.g. a single OAuth token, a single MCP server's stored credentials), prefer the targeted command for that subsystem (`Disconnect Remote OAuth Server`, etc.) instead.
+
 ---
 
 ## Command palette
@@ -363,6 +373,7 @@ The tool is now available to the assistant. Ask it to "fetch https://example.com
 | **Chief of Staff: Show Last Run Trace** | Logs the most recent agent run (iterations, tool calls, timing) to the browser console. |
 | **Chief of Staff: Debug Runtime Stats** | Logs current runtime state (cache sizes, connection status, conversation turns) to the browser console. |
 | **Chief of Staff: Reset Token Usage Stats** | Resets the session token usage counters and cost display. |
+| **Chief of Staff: Reset All Settings (Recovery)** | Recovery hatch: clears every persisted setting (API keys, custom LLM endpoints, MCP servers, onboarding state, cron jobs, usage history) after a confirmation dialog. Use when a bad config is blocking the UI and uninstall/reinstall doesn't help. Requires a Roam reload to fully take effect. See [Recovery — starting over](#recovery--starting-over). |
 | **Chief of Staff: Show Scheduled Jobs** | Logs all scheduled cron jobs and their status to the browser console. |
 
 ---

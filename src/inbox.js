@@ -26,11 +26,13 @@ const INBOX_MAX_BLOCK_CHARS = 20_000;
 const inboxProcessingSet = new Set();  // block UIDs currently being processed
 let inboxProcessingQueue = Promise.resolve(); // sequential processing chain
 const inboxQueuedSet = new Set();      // block UIDs already queued to prevent duplicate growth
+const inboxFailedUIDs = new Set();     // block UIDs that failed this session — skip until reload to stop retry storms
 let inboxPendingQueueCount = 0;        // queued + in-flight inbox items
 let inboxCatchupScanTimeoutId = null;  // deferred full scan once queue drains
 let inboxLastFullScanAt = 0;           // timestamp of last full q-based inbox scan
 let inboxLastFullScanUidSignature = ""; // signature of top-level inbox UIDs at last full scan
 let inboxStaticUIDs = null;            // lazily populated — instruction block UIDs to skip
+let inboxDescriptionPrefix = "";       // pinned page-description prefix (e.g. "ℹ️ ") — set via initInbox deps
 
 // ── Dependency injection ───────────────────────────────────────────────
 
@@ -43,9 +45,15 @@ let deps = {};
  *   getRoamAlphaApi, escapeForDatalog, debugLog, showInfoToast,
  *   invalidateMemoryPromptCache, askChiefOfStaff, clearConversationContext,
  *   isUnloadInProgress   (getter fn, not raw boolean)
+ *
+ * Optional deps:
+ *   descriptionPrefix — pinned page-description prefix (e.g. "ℹ️ ") used to
+ *   identify extension-managed description blocks so they are never queued
+ *   for agent processing.
  */
 export function initInbox(injected) {
   deps = injected || {};
+  inboxDescriptionPrefix = String(deps.descriptionPrefix || "");
 }
 
 // ── Pure / testable helpers ────────────────────────────────────────────
@@ -160,6 +168,7 @@ export function shouldRunInboxFullScanFallback(afterMapSize) {
 
 export function getInboxCandidateBlocksFromChildrenRows(inboxChildren) {
   const staticUIDs = getInboxStaticUIDs();
+  const prefix = inboxDescriptionPrefix;
   const newBlocks = [];
   for (const child of inboxChildren) {
     const uid = child[":block/uid"];
@@ -168,6 +177,14 @@ export function getInboxCandidateBlocksFromChildrenRows(inboxChildren) {
     if (staticUIDs.has(uid)) continue;  // skip instruction blocks
     if (inboxProcessingSet.has(uid)) continue; // already in flight
     if (inboxQueuedSet.has(uid)) continue;     // already queued
+    if (inboxFailedUIDs.has(uid)) continue;    // already failed this session — stop retry storm
+    // Content-based filter for extension-managed page-description blocks. The
+    // startup static-UID snapshot only matches a hardcoded list of legacy
+    // instruction texts, so the current ℹ️-prefixed description block can
+    // slip through and get processed on every scan when the agent loop fails
+    // (e.g. broken LLM config). Filtering by prefix is robust regardless of
+    // when the page was created or whether the snapshot caught it.
+    if (prefix && str.startsWith(prefix)) continue;
     newBlocks.push({ uid, string: str });
   }
   return newBlocks;
@@ -245,7 +262,11 @@ async function processInboxItem(block) {
     }
 
     deps.debugLog?.("[Chief flow] Inbox processing:", block.uid, JSON.stringify(promptText.slice(0, 120)));
-    deps.showInfoToast?.("Inbox", `Processing: ${promptText.slice(0, 80)}`);
+    // Intentionally no "Processing" toast here. The terminal "Done" or
+    // "Failed" toast is sufficient feedback, and avoiding the per-item
+    // start toast halves the steady-state toast volume — important when
+    // many items queue at once or when a misconfigured LLM causes the
+    // queue to churn.
 
     // Run the agent loop with the block text as the prompt
     const tierSuffix = getInboxProcessingTierSuffix(promptText);
@@ -292,6 +313,11 @@ async function processInboxItem(block) {
     const msg = String(e?.message || "").toLowerCase();
     const likelyMissing = msg.includes("not found") || msg.includes("cannot move") || msg.includes("missing");
     if (!likelyMissing) {
+      // Record the UID so we don't re-enqueue this block on the next scan.
+      // Without this, a persistent failure (bad LLM config, expired API key)
+      // turns each pull-watch tick into another retry and another error toast,
+      // flooding the UI. Cleared on cleanupInbox so reload re-enables retry.
+      inboxFailedUIDs.add(block.uid);
       deps.showInfoToast?.("Inbox error", `Failed to process: ${String(block.string || "").slice(0, 60)}`);
     } else {
       deps.debugLog?.("[Chief flow] Inbox skip toast — likely deleted block:", block.uid, e?.message || e);
@@ -619,11 +645,27 @@ export function cleanupInbox() {
   clearInboxCatchupScanTimer();
   inboxQueuedSet.clear();
   inboxProcessingSet.clear();
+  inboxFailedUIDs.clear();
   inboxPendingQueueCount = 0;
   inboxProcessingQueue = Promise.resolve();
   inboxLastFullScanAt = 0;
   inboxLastFullScanUidSignature = "";
   inboxStaticUIDs = null;
+}
+
+/**
+ * Clear the per-session failed-UID set. Mostly for tests, but also a useful
+ * recovery hook if a future "Retry inbox failures" command is added.
+ */
+export function resetInboxFailedUIDs() {
+  inboxFailedUIDs.clear();
+}
+
+/**
+ * Read-only view of the failed-UID set for assertions / debug introspection.
+ */
+export function getInboxFailedUIDs() {
+  return new Set(inboxFailedUIDs);
 }
 
 /**
