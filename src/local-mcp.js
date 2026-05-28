@@ -10,6 +10,7 @@
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { sanitiseRoamSettingsKey } from "./security-core.js";
 
 // ── Constants ───────────────────────────────────────────────────────────────
 const LOCAL_MCP_CONNECT_TIMEOUT_MS = 10_000;  // 10s — execution connections (real-time, needs to be fast)
@@ -58,12 +59,15 @@ export function unsuspendMcpServer(serverKey, acceptNewPin) {
   const suspension = suspendedMcpServers.get(serverKey);
   if (!suspension) return false;
   if (acceptNewPin) {
-    // Accept the new schema — update the stored pin
+    // Accept the new schema — update the stored pin. Sanitise the serverKey
+    // for the Firebase-backed settings layer; the in-memory Map keeps the raw
+    // key. Must match the canonicalisation in checkSchemaPinCore (issue #85).
+    const safeServerKey = sanitiseRoamSettingsKey(serverKey);
     const extensionAPI = deps.getExtensionAPI();
     const stored = extensionAPI.settings.get(deps.SETTINGS_KEY_mcpSchemaHashes) || {};
-    stored[serverKey] = suspension.newHash;
-    stored[`${serverKey}_tools`] = suspension.newToolNames;
-    stored[`${serverKey}_fingerprints`] = suspension.newFingerprints;
+    stored[safeServerKey] = suspension.newHash;
+    stored[`${safeServerKey}_tools`] = suspension.newToolNames;
+    stored[`${safeServerKey}_fingerprints`] = suspension.newFingerprints;
     extensionAPI.settings.set(deps.SETTINGS_KEY_mcpSchemaHashes, stored);
     deps.debugLog(`[MCP Security] Schema pin updated for ${serverKey}: ${suspension.newHash.slice(0, 12)}…`);
   }

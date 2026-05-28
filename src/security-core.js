@@ -18,6 +18,17 @@ export function sanitiseUserContentForPrompt(text) {
   );
 }
 
+// Roam Depot settings are persisted to Firebase, which rejects ANY key
+// (including nested object keys inside a stored value) containing the
+// characters . # $ / [ or ]. MCP serverKeys ("remote:https://host/path")
+// and Composio's older dotted tool slugs both trip this constraint and
+// surface as "Roam MCP error" / "invalid key" failures. Mirror of the
+// helper in usage-tracking.js (kept local to avoid an import cycle).
+// See: issue #85.
+export function sanitiseRoamSettingsKey(k) {
+  return typeof k === "string" ? k.replace(/[.#$/[\]]/g, "_") : k;
+}
+
 export function sanitiseMarkdownHref(href) {
   const value = String(href || "").trim();
   if (!value) return "#";
@@ -317,8 +328,13 @@ export async function checkSchemaPinCore(serverKey, tools, serverName, deps = {}
   } = deps;
 
   const newHash = await computeSchemaHash(tools);
+  // serverKey may be a URL ("remote:https://host/path"), and tool names may
+  // contain "." (legacy Composio slugs) — both would crash the Firebase-backed
+  // settings.set with "invalid key". Canonicalise before using as object keys.
+  // See sanitiseRoamSettingsKey + issue #85.
+  const safeServerKey = sanitiseRoamSettingsKey(serverKey);
   const stored = settingsGet(settingsKey) || {};
-  const oldHash = stored[serverKey];
+  const oldHash = stored[safeServerKey];
 
   const newToolFingerprints = {};
   for (const t of tools) {
@@ -326,13 +342,13 @@ export async function checkSchemaPinCore(serverKey, tools, serverName, deps = {}
     const paramKeys = Object.keys(schema.properties || {}).sort().join(",");
     const paramTypes = Object.entries(schema.properties || {}).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}:${v.type || "any"}`).join(",");
     const descSnippet = (t.description || "").slice(0, 200);
-    newToolFingerprints[t.name] = { paramKeys, paramTypes, descSnippet };
+    newToolFingerprints[sanitiseRoamSettingsKey(t.name)] = { paramKeys, paramTypes, descSnippet };
   }
 
   if (!oldHash) {
-    stored[serverKey] = newHash;
-    stored[`${serverKey}_tools`] = tools.map(t => t.name);
-    stored[`${serverKey}_fingerprints`] = newToolFingerprints;
+    stored[safeServerKey] = newHash;
+    stored[`${safeServerKey}_tools`] = tools.map(t => t.name);
+    stored[`${safeServerKey}_fingerprints`] = newToolFingerprints;
     settingsSet(settingsKey, stored);
     debugLog(`[MCP Security] Schema pinned for ${serverName}: ${newHash.slice(0, 12)}…`);
     return { status: "pinned", hash: newHash };
@@ -343,8 +359,8 @@ export async function checkSchemaPinCore(serverKey, tools, serverName, deps = {}
     return { status: "unchanged", hash: newHash };
   }
 
-  const oldToolNames = stored[`${serverKey}_tools`] || [];
-  const oldFingerprints = stored[`${serverKey}_fingerprints`] || {};
+  const oldToolNames = stored[`${safeServerKey}_tools`] || [];
+  const oldFingerprints = stored[`${safeServerKey}_fingerprints`] || {};
   const newToolNames = tools.map(t => t.name);
   const added = newToolNames.filter(n => !oldToolNames.includes(n));
   const removed = oldToolNames.filter(n => !newToolNames.includes(n));
@@ -352,8 +368,9 @@ export async function checkSchemaPinCore(serverKey, tools, serverName, deps = {}
   const modified = [];
   for (const name of newToolNames) {
     if (added.includes(name)) continue;
-    const oldFp = oldFingerprints[name];
-    const newFp = newToolFingerprints[name];
+    const safeName = sanitiseRoamSettingsKey(name);
+    const oldFp = oldFingerprints[safeName];
+    const newFp = newToolFingerprints[safeName];
     if (!oldFp || !newFp) continue;
     const changes = [];
     if (oldFp.descSnippet !== newFp.descSnippet) changes.push("description");

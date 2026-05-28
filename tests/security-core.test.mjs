@@ -5,6 +5,7 @@ import {
   guardMemoryWriteCore,
   detectSystemPromptLeakage,
   sanitiseUserContentForPrompt,
+  sanitiseRoamSettingsKey,
   checkSchemaPinCore,
   scanToolDescriptionsCore,
   sanitiseMarkdownHref,
@@ -256,6 +257,75 @@ test("checkSchemaPinCore pins on first run, remains unchanged, then detects drif
   assert.ok(changed.modified.some((m) => m.name === "search_docs"));
   assert.equal(suspended.length, 1);
   assert.equal(suspended[0].k, "local:7777");
+});
+
+// Regression for issue #85 — remote MCP serverKeys are URLs and previously
+// crashed Roam Depot's Firebase-backed settings.set with "invalid key" on
+// the forbidden characters . # $ / [ ]. Both checkSchemaPinCore (write) and
+// the round-trip (read on next connection) must canonicalise the key.
+test("sanitiseRoamSettingsKey strips Firebase-forbidden characters", () => {
+  assert.equal(
+    sanitiseRoamSettingsKey("remote:https://mcp.example.com/mcp"),
+    "remote:https:__mcp_example_com_mcp"
+  );
+  // Tool names with dots (legacy Composio slugs) also get canonicalised.
+  assert.equal(sanitiseRoamSettingsKey("gmail.fetch_emails"), "gmail_fetch_emails");
+  // Already-safe keys pass through unchanged.
+  assert.equal(sanitiseRoamSettingsKey("local:7777"), "local:7777");
+  assert.equal(sanitiseRoamSettingsKey("composio:GMAIL"), "composio:GMAIL");
+  // Non-strings pass through untouched (defensive).
+  assert.equal(sanitiseRoamSettingsKey(null), null);
+  assert.equal(sanitiseRoamSettingsKey(undefined), undefined);
+});
+
+test("checkSchemaPinCore stores URL-style serverKeys with no Firebase-forbidden characters (issue #85)", async () => {
+  const store = {};
+  const settingsGet = (key) => store[key];
+  const settingsSet = (key, value) => { store[key] = value; };
+  const tools = [
+    {
+      name: "search_repos",
+      description: "Search GitHub repos",
+      input_schema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] }
+    },
+    {
+      // Legacy Composio-style dotted name — was also a trigger.
+      name: "gmail.fetch_emails",
+      description: "Fetch Gmail messages",
+      input_schema: { type: "object", properties: { limit: { type: "number" } } }
+    }
+  ];
+
+  const rawServerKey = "remote:https://mcp.example.com/mcp";
+  const pinned = await checkSchemaPinCore(rawServerKey, tools, "example-remote", {
+    settingsGet,
+    settingsSet,
+    settingsKey: "mcp-schema-hashes",
+  });
+  assert.equal(pinned.status, "pinned");
+
+  // Verify no stored key (top-level OR nested fingerprint key) contains a
+  // Firebase-forbidden character. This is the exact assertion that, before
+  // the fix, would have crashed on extensionAPI.settings.set.
+  const forbidden = /[.#$/[\]]/;
+  for (const k of Object.keys(store["mcp-schema-hashes"])) {
+    assert.ok(!forbidden.test(k), `top-level key contains forbidden char: ${k}`);
+  }
+  const fingerprints = store["mcp-schema-hashes"][
+    Object.keys(store["mcp-schema-hashes"]).find((k) => k.endsWith("_fingerprints"))
+  ];
+  for (const k of Object.keys(fingerprints || {})) {
+    assert.ok(!forbidden.test(k), `fingerprint key contains forbidden char: ${k}`);
+  }
+
+  // Second call with the same raw key must hit the canonicalised slot —
+  // i.e. the lookup is consistent and we don't re-pin every connection.
+  const unchanged = await checkSchemaPinCore(rawServerKey, tools, "example-remote", {
+    settingsGet,
+    settingsSet,
+    settingsKey: "mcp-schema-hashes",
+  });
+  assert.equal(unchanged.status, "unchanged");
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
