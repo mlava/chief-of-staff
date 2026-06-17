@@ -68,6 +68,27 @@ function setupGlobals() {
   };
 }
 
+// In Node 20.19+ `globalThis.navigator` is a read-only getter, so direct
+// assignment throws. Capture the original descriptor and override via
+// defineProperty so tests can simulate a navigator without `locks`.
+function overrideNavigator(value) {
+  const orig = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", {
+    value,
+    configurable: true,
+    writable: true,
+  });
+  return orig;
+}
+
+function restoreNavigator(origDescriptor) {
+  if (origDescriptor) {
+    Object.defineProperty(globalThis, "navigator", origDescriptor);
+  } else {
+    delete globalThis.navigator;
+  }
+}
+
 test.beforeEach(() => {
   setupGlobals();
   cleanupIdleScheduler();
@@ -170,8 +191,7 @@ test("isCoordinator is false before start", () => {
 
 test("localStorage fallback claims leadership when navigator.locks unavailable", () => {
   // Ensure navigator.locks is not available
-  const origNav = globalThis.navigator;
-  globalThis.navigator = {};
+  const origNav = overrideNavigator({});
   cleanupIdleScheduler();
   initIdleScheduler(stubDeps());
   startIdleScheduler();
@@ -180,19 +200,18 @@ test("localStorage fallback claims leadership when navigator.locks unavailable",
   // Should have claimed via localStorage fallback
   assert.equal(s.isCoordinator, true);
   stopIdleScheduler();
-  globalThis.navigator = origNav;
+  restoreNavigator(origNav);
 });
 
 test("cleanup releases localStorage leadership", () => {
-  const origNav = globalThis.navigator;
-  globalThis.navigator = {};
+  const origNav = overrideNavigator({});
   cleanupIdleScheduler();
   initIdleScheduler(stubDeps());
   startIdleScheduler();
   assert.equal(getIdleSchedulerState().isCoordinator, true);
   cleanupIdleScheduler();
   assert.equal(getIdleSchedulerState().isCoordinator, false);
-  globalThis.navigator = origNav;
+  restoreNavigator(origNav);
 });
 
 // ── Idle Detection ───────────────────────────────────────────────────────────

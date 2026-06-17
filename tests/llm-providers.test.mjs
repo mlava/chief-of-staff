@@ -18,6 +18,10 @@ import {
   buildEffectiveFailoverChain,
   getFailoverProviders,
   shouldOmitToolsForProvider,
+  getConfiguredLlmModelTargets,
+  classifyModelSmokeError,
+  smokeTestConfiguredLlmModels,
+  summariseModelSmokeResults,
   BUILTIN_LLM_PROVIDERS,
   VALID_LLM_PROVIDERS,
 } from "../src/llm-providers.js";
@@ -470,4 +474,87 @@ test("getFailoverProviders returns rotated chain when primary is custom slot WIT
   // Chain is [gemini, mistral, openai, anthropic, groq, custom-1]; primary at end → rotation puts everything before it first
   const result = getFailoverProviders("custom-1", ext, "mini");
   assert.deepEqual(result, ["gemini", "mistral", "openai", "anthropic", "groq"]);
+});
+
+// ── Model smoke tests ────────────────────────────────────────────────────────
+
+test("getConfiguredLlmModelTargets returns keyed built-in and custom tier models", () => {
+  const ext = initWithExt(makeExtensionAPI({
+    "anthropic-api-key": "sk-ant",
+    "openai-api-key": "sk-oa",
+    "custom-llm-count": 1,
+    "custom-llm-1-base-url": "http://localhost:1234/v1",
+    "custom-llm-1-mini-model": "mini-local",
+    "custom-llm-1-power-model": "power-local",
+    "custom-llm-1-ludicrous-model": "power-local",
+  }));
+  const targets = getConfiguredLlmModelTargets(ext);
+  assert.deepEqual(
+    targets.map(t => `${t.provider}:${t.tier}:${t.model}`),
+    [
+      `anthropic:mini:${getLlmModel(ext, "anthropic")}`,
+      `anthropic:power:${getPowerModel(ext, "anthropic")}`,
+      `anthropic:ludicrous:${getLudicrousModel(ext, "anthropic")}`,
+      `openai:mini:${getLlmModel(ext, "openai")}`,
+      `openai:power:${getPowerModel(ext, "openai")}`,
+      `openai:ludicrous:${getLudicrousModel(ext, "openai")}`,
+      "custom-1:mini:mini-local",
+      "custom-1:power:power-local",
+      "custom-1:ludicrous:power-local",
+    ]
+  );
+});
+
+test("classifyModelSmokeError marks missing/deprecated model errors as invalid_model", () => {
+  assert.deepEqual(
+    classifyModelSmokeError(new Error("API error 404: model gpt-old does not exist or is deprecated")),
+    { status: "invalid_model", retryable: false }
+  );
+  assert.deepEqual(
+    classifyModelSmokeError(new Error("rate limit hit")),
+    { status: "rate_limited", retryable: true }
+  );
+  assert.deepEqual(
+    classifyModelSmokeError(new Error("API error 401: bad key")),
+    { status: "auth_error", retryable: false }
+  );
+});
+
+test("smokeTestConfiguredLlmModels calls each target and records invalid models without throwing", async () => {
+  const ext = initWithExt(makeExtensionAPI({
+    "openai-api-key": "sk-oa",
+  }));
+  const calls = [];
+  const results = await smokeTestConfiguredLlmModels(ext, {
+    targets: [
+      { provider: "openai", tier: "mini", model: "good-model", apiKey: "sk-oa" },
+      { provider: "openai", tier: "power", model: "bad-model", apiKey: "sk-oa" },
+    ],
+    callFn: async ({ provider, model, messages, tools, options }) => {
+      calls.push({ provider, model, messages, tools, options });
+      if (model === "bad-model") throw new Error("OpenAI API error 404: model does not exist");
+      return { choices: [{ message: { content: "OK" } }] };
+    },
+  });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].messages[0].content, "OK");
+  assert.deepEqual(calls[0].tools, []);
+  assert.equal(results.results[0].status, "ok");
+  assert.equal(results.results[1].status, "invalid_model");
+  assert.match(results.results[1].message, /does not exist/);
+});
+
+test("summariseModelSmokeResults reports invalid models for settings UI", () => {
+  const summary = summariseModelSmokeResults({
+    finishedAt: "2026-06-17T00:00:00.000Z",
+    results: [
+      { status: "ok", provider: "openai", tier: "mini", model: "good" },
+      { status: "invalid_model", provider: "gemini", tier: "power", model: "bad" },
+      { status: "skipped", provider: "groq", tier: "mini", model: "llama" },
+    ],
+  });
+  assert.match(summary, /Last checked/);
+  assert.match(summary, /1 OK/);
+  assert.match(summary, /1 invalid/);
+  assert.match(summary, /gemini\/power bad/);
 });

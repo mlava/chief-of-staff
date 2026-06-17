@@ -7,7 +7,7 @@
   "main": "index.js",
   "scripts": {
     "build": "webpack",
-    "test": "node --test tests/*.test.mjs",
+    "test": "node --experimental-default-type=module --test tests/*.test.mjs",
     "test:security": "node --test tests/security-core.test.mjs",
     "test:idle": "node --test tests/idle-scheduler.test.mjs",
     "test:eval": "node --test tests/eval-regression.test.mjs",
@@ -17,17 +17,17 @@
     "ci": "npm run build:secure"
   },
   "devDependencies": {
-    "webpack": "^5.105.1",
-    "webpack-cli": "^6.0.1",
     "browserify-zlib": "^0.2.0",
     "buffer": "^6.0.3",
     "https-browserify": "^1.0.0",
     "stream-browserify": "^3.0.0",
     "stream-http": "^3.2.0",
-    "url": "^0.11.4"
+    "url": "^0.11.4",
+    "webpack": "^5.107.2",
+    "webpack-cli": "^6.0.1"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.26.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "croner": "^9.0.0",
     "izitoast": "^1.4.0"
   }

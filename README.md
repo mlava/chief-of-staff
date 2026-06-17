@@ -93,7 +93,7 @@ Open **Settings > Chief of Staff** and fill in:
 - **Response Verbosity** — controls how verbose assistant responses are and how many output tokens are allowed per call. `concise` (1,200 tokens, brief bullet-point style), `standard` (2,500 tokens, default), or `detailed` (4,096 tokens, thorough explanations). Only affects the mini tier — power and ludicrous tiers have their own token budgets. With prompt caching reducing input costs, output tokens become the dominant expense, so this setting gives you direct control over the main remaining cost lever.
 - **Debug Logging** — enable verbose console output for troubleshooting
 - **Dry Run** — one-shot toggle that simulates the next mutating tool call without writing anything (auto-disables after one use)
-- **Ludicrous mode failover** — allow escalation to the most expensive models (Opus 4.7 / GPT-5.5) when all power-tier providers fail
+- **Ludicrous mode failover** — allow escalation to the most expensive models (Opus 4.8 / GPT-5.5) when all power-tier providers fail
 - **Hide COS Pages from Linked References** — automatically filters Chief of Staff namespace pages out of linked references on all non-COS pages. Enabled by default.
 - **Use Linked Dates in CoS Logs** — when enabled, internal CoS log entries (audit log, usage stats, eval scores, corrections, graph hygiene, skill-optimize) prefix each line with a `[[Linked Date]]`. Disable to write plain dates instead — keeps Daily Notes pages from accumulating linked references on mobile. Enabled by default.
 - **Staleness Warning Threshold (days)** — how long a skill or scheduled job can go without being reviewed before it's flagged. A startup toast (debounced to once per 24 hours) lists stale items, and `staleness report` returns the same list on demand. Default `30`. Set to `0` to disable the warnings entirely (the report still works).
@@ -102,9 +102,9 @@ Default models by tier:
 
 | Tier | Anthropic | OpenAI | Gemini | Mistral | Groq |
 |---|---|---|---|---|---|
-| Mini (default) | claude-haiku-4-5 | gpt-5.4-mini | gemini-3.1-flash-lite-preview | mistral-small | llama-3.3-70b-versatile |
-| Power (`/power`) | claude-sonnet-4-6 | gpt-4.1 | gemini-3-flash-preview | mistral-medium | llama-3.3-70b-versatile |
-| Ludicrous (`/ludicrous`) | claude-opus-4-7 | gpt-5.5 | gemini-3.1-pro-preview-customtools | mistral-large | llama-3.3-70b-versatile |
+| Mini (default) | claude-haiku-4-5 | gpt-5.4-mini | gemini-3.1-flash-lite | mistral-small-latest | llama-3.3-70b-versatile |
+| Power (`/power`) | claude-sonnet-4-6 | gpt-5.4 | gemini-3.5-flash | mistral-medium-latest | llama-3.3-70b-versatile |
+| Ludicrous (`/ludicrous`) | claude-opus-4-8 | gpt-5.5 | gemini-3.1-pro-preview-customtools | mistral-medium-latest | llama-3.3-70b-versatile |
 
 #### Custom OpenAI-compatible providers (LM Studio, Ollama, OpenRouter, vLLM, …)
 
@@ -161,7 +161,7 @@ When running on Anthropic, Chief of Staff supports the [advisor tool](https://ww
 
 **When the model decides to consult.** The system prompt instructs the model to consult the advisor sparingly — for genuinely uncertain strategic decisions, ambiguous tool results, forecasts, and judgment calls — and *not* for routine information lookups, simple tool calls, or tasks within its normal capability. In practice, the executor self-selects appropriately: it consults on architectural questions but not on derivative follow-ups or pure tool orchestration like daily briefings.
 
-**Cost attribution.** When the advisor is consulted, its tokens are tracked separately at Opus rates. The Activity tab and persistent audit log show the model label as `claude-haiku-4-5-20251001 + claude-opus-4-7 advisor ×N` for runs that used the advisor, with the token total combining executor and advisor tokens. Cost is the sum of both. The session cost indicator in the chat panel header includes advisor cost in the same line.
+**Cost attribution.** When the advisor is consulted, its tokens are tracked separately at Opus rates. The Activity tab and persistent audit log show the model label as `claude-haiku-4-5-20251001 + claude-opus-4-8 advisor ×N` for runs that used the advisor, with the token total combining executor and advisor tokens. Cost is the sum of both. The session cost indicator in the chat panel header includes advisor cost in the same line.
 
 > **Security note:** API keys are stored in Roam Depot's settings store (browser IndexedDB). They are never transmitted except directly to the LLM provider's API endpoint (via Roam's built-in CORS proxy when available). Do not use shared or public Roam graphs if you store API keys here.
 
@@ -348,6 +348,7 @@ Use this only as a recovery hatch — there's no undo, and you will need to re-e
 | **Chief of Staff: Ask** | Opens a prompt dialogue. The assistant reasons over your question using LLM + available tools. |
 | **Chief of Staff: Toggle Chat Panel** | Shows or hides the floating chat panel. |
 | **Chief of Staff: Doctor (Health Check)** | Runs a self-diagnostic across API keys, MCP connections, memory, skills, cron jobs, Composio, and Extension Tools. Summary toast + full report in console. |
+| **Chief of Staff: Check LLM Model Availability** | Sends a tiny prompt to each configured provider/tier model ID and reports which are reachable. Results summarised in a toast and on the **LLM Model Availability** settings row (also runnable from its **Run check** button). |
 | **Chief of Staff: Run Onboarding** | Launches the guided onboarding flow (API key setup, memory bootstrapping, chat panel intro). |
 | **Chief of Staff: Bootstrap Memory Pages** | Creates memory pages (if missing) with starter content. |
 | **Chief of Staff: Bootstrap Skills Page** | Creates `Chief of Staff/Skills` with starter skills (if missing). |
