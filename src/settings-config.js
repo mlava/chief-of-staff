@@ -80,6 +80,16 @@ function buildProviderSelectValue(extensionAPI) {
   return buildCustomProviderLabel(extensionAPI, canonical);
 }
 
+function getModelSmokeSummary(extensionAPI) {
+  const raw = extensionAPI?.settings?.get?.(deps.SETTINGS_KEYS.llmModelSmokeResults);
+  let report = raw;
+  if (typeof raw === "string") {
+    try { report = JSON.parse(raw); } catch { report = null; }
+  }
+  if (deps.summariseModelSmokeResults) return deps.summariseModelSmokeResults(report);
+  return report ? "LLM model check results are available." : "Not checked yet. Run command palette → Chief of Staff: Check LLM Model Availability.";
+}
+
 // ── Main config builder ─────────────────────────────────────────────────────
 
 export function buildSettingsConfig(extensionAPI) {
@@ -118,6 +128,20 @@ export function buildSettingsConfig(extensionAPI) {
         items: buildProviderSelectItems(extensionAPI),
         value: buildProviderSelectValue(extensionAPI)
       }
+    },
+    {
+      id: deps.SETTINGS_KEYS.llmModelSmokeResults,
+      name: "LLM Model Availability",
+      description: `${getModelSmokeSummary(extensionAPI)} This check sends tiny prompts to each configured provider/tier.`,
+      action: {
+        type: "button",
+        content: "Run check",
+        onClick: async () => {
+          if (deps.runModelAvailabilitySmokeTest) {
+            await deps.runModelAvailabilitySmokeTest(extensionAPI);
+          }
+        },
+      },
     },
     {
       id: deps.SETTINGS_KEYS.anthropicApiKey,
@@ -598,7 +622,11 @@ export function buildSettingsConfig(extensionAPI) {
         id: "ext-tools-none",
         name: "No extensions detected",
         description: "No installed extensions have registered tools yet. Install extensions that support the Extension Tools API.",
-        //action: { type: "input", placeholder: "", onChange: () => {} }
+        action: {
+          type: "button",
+          content: "Refresh",
+          onClick: () => rebuildSettingsPanel(extensionAPI),
+        }
       });
       
     } else {

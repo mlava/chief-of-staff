@@ -927,6 +927,117 @@ export async function callLlm(provider, apiKey, model, system, messages, tools, 
   return callAnthropic(apiKey, model, scrubbedSystem, scrubbedMessages, tools, options);
 }
 
+// ── Model availability smoke tests ───────────────────────────────────────────
+
+const LLM_SMOKE_TIERS = ["mini", "power", "ludicrous"];
+
+function getModelForTier(extensionAPI, provider, tier) {
+  if (tier === "power") return getPowerModel(extensionAPI, provider);
+  if (tier === "ludicrous") return getLudicrousModel(extensionAPI, provider);
+  return getLlmModel(extensionAPI, provider);
+}
+
+export function getConfiguredLlmModelTargets(extensionAPI, { providers, tiers = LLM_SMOKE_TIERS } = {}) {
+  const providerList = providers || getValidProviders(extensionAPI);
+  const targets = [];
+  for (const provider of providerList) {
+    const apiKey = getApiKeyForProvider(extensionAPI, provider);
+    if (!apiKey) continue;
+    for (const tier of tiers) {
+      const model = getModelForTier(extensionAPI, provider, tier);
+      if (!model) continue;
+      targets.push({ provider, tier, model, apiKey });
+    }
+  }
+  return targets;
+}
+
+export function classifyModelSmokeError(error) {
+  const msg = String(error?.message || error || "").toLowerCase();
+  if (/\b(401|403|unauthorized|forbidden|invalid api key|api key|authentication|permission denied)\b/.test(msg)) {
+    return { status: "auth_error", retryable: false };
+  }
+  if (/\b(429|rate limit|quota|too many requests)\b/.test(msg)) {
+    return { status: "rate_limited", retryable: true };
+  }
+  if (/\b(deprecat|retired|sunset|not found|does not exist|unknown model|invalid model|model_not_found|no model|404)\b/.test(msg)) {
+    return { status: "invalid_model", retryable: false };
+  }
+  if (/\b(timeout|timed out|overloaded|503|502|504|failed to fetch|networkerror|err_connection_refused)\b/.test(msg)) {
+    return { status: "transient_error", retryable: true };
+  }
+  return { status: "error", retryable: false };
+}
+
+export async function smokeTestConfiguredLlmModels(extensionAPI, options = {}) {
+  const startedAt = new Date().toISOString();
+  const targets = options.targets || getConfiguredLlmModelTargets(extensionAPI, options);
+  const callFn = options.callFn || (async ({ provider, apiKey, model, system, messages, tools, options: callOptions }) =>
+    callLlm(provider, apiKey, model, system, messages, tools, callOptions)
+  );
+  const timeoutMs = options.timeoutMs || 15_000;
+  const results = [];
+
+  for (const target of targets) {
+    const started = Date.now();
+    try {
+      const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+      const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+      try {
+        await callFn({
+          ...target,
+          system: "You are running a low-cost model availability check. Reply with exactly OK.",
+          messages: [{ role: "user", content: "OK" }],
+          tools: [],
+          options: {
+            tier: target.tier,
+            maxOutputTokens: 8,
+            signal: controller?.signal,
+          },
+        });
+      } finally {
+        if (timeoutId) clearTimeout(timeoutId);
+      }
+      results.push({
+        provider: target.provider,
+        tier: target.tier,
+        model: target.model,
+        status: "ok",
+        durationMs: Date.now() - started,
+      });
+    } catch (error) {
+      const classified = classifyModelSmokeError(error);
+      results.push({
+        provider: target.provider,
+        tier: target.tier,
+        model: target.model,
+        status: classified.status,
+        retryable: classified.retryable,
+        message: String(error?.message || error || "Unknown error").slice(0, 500),
+        durationMs: Date.now() - started,
+      });
+    }
+  }
+
+  return { startedAt, finishedAt: new Date().toISOString(), results };
+}
+
+export function summariseModelSmokeResults(report) {
+  if (!report || !Array.isArray(report.results)) {
+    return "Not checked yet. Run command palette → Chief of Staff: Check LLM Model Availability.";
+  }
+  const counts = { ok: 0, invalid_model: 0, auth_error: 0, rate_limited: 0, transient_error: 0, error: 0, skipped: 0 };
+  for (const r of report.results) counts[r.status] = (counts[r.status] || 0) + 1;
+  const bad = report.results.filter(r => r.status && r.status !== "ok" && r.status !== "skipped");
+  const checked = report.results.length;
+  const when = report.finishedAt ? new Date(report.finishedAt).toLocaleString() : "unknown time";
+  const summary = `Last checked ${when}: ${counts.ok || 0} OK, ${counts.invalid_model || 0} invalid, ${counts.auth_error || 0} auth, ${counts.rate_limited || 0} rate-limited, ${counts.transient_error || 0} transient, ${counts.error || 0} other (${checked} total).`;
+  if (!bad.length) return summary;
+  const details = bad.slice(0, 6).map(r => `${r.provider}/${r.tier} ${r.model}: ${r.status}`).join("; ");
+  const suffix = bad.length > 6 ? `; +${bad.length - 6} more` : "";
+  return `${summary} Problems: ${details}${suffix}`;
+}
+
 // ── Tool Filtering ───────────────────────────────────────────────────────────
 
 /**

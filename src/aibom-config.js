@@ -7,25 +7,25 @@ export const LLM_API_ENDPOINTS = {
 };
 
 export const DEFAULT_LLM_MODELS = {
-  anthropic: "claude-haiku-4-5-20251001",
+  anthropic: "claude-haiku-4-5",
   openai: "gpt-5.4-mini",
-  gemini: "gemini-3.1-flash-lite-preview",
+  gemini: "gemini-3.1-flash-lite",
   mistral: "mistral-small-latest",
   groq: "llama-3.3-70b-versatile"
 };
 
 export const POWER_LLM_MODELS = {
   anthropic: "claude-sonnet-4-6",
-  openai: "gpt-4.1",
-  gemini: "gemini-3-flash-preview",
+  openai: "gpt-5.4",
+  gemini: "gemini-3.5-flash",
   mistral: "mistral-medium-latest",
   groq: "llama-3.3-70b-versatile"
 };
 
 export const LUDICROUS_LLM_MODELS = {
-  mistral: "mistral-large-2512",
+  anthropic: "claude-opus-4-8",
   openai: "gpt-5.5",
   gemini: "gemini-3.1-pro-preview-customtools",
-  anthropic: "claude-opus-4-7",
+  mistral: "mistral-medium-latest",
   groq: "llama-3.3-70b-versatile"
 };

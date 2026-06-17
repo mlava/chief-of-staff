@@ -136,6 +136,8 @@ import {
   getModelCostRates,
   isFailoverEligibleError,
   callOpenAIStreaming,
+  smokeTestConfiguredLlmModels,
+  summariseModelSmokeResults,
   callLlm,
   filterToolsByRelevance,
   getPromotedServerNames,
@@ -359,7 +361,8 @@ const SETTINGS_KEYS = {
   stalenessGrandfatherAt: "staleness-grandfather-at",
   advisorEnabled: "cos-advisor-enabled",
   advisorMaxUses: "cos-advisor-max-uses",
-  advisorMiniOnly: "cos-advisor-mini-only"
+  advisorMiniOnly: "cos-advisor-mini-only",
+  llmModelSmokeResults: "llm-model-smoke-results"
 };
 const TOOLS_SCHEMA_VERSION = 3;
 const AUTH_POLL_INTERVAL_MS = 9000;
@@ -396,16 +399,20 @@ const FAILOVER_CONTINUATION_MESSAGE = "Note: You are continuing a task started b
 const LLM_MODEL_COSTS = {
   // [inputPerM, outputPerM]
   "claude-haiku-4-5-20251001": [1.00, 5.00],
+  "claude-haiku-4-5": [1.00, 5.00],
   "claude-sonnet-4-6": [3.00, 15.00],
   "claude-opus-4-6": [5.00, 25.00],
   "claude-opus-4-7": [5.00, 25.00],
+  "claude-opus-4-8": [5.00, 25.00],
   "gpt-5-mini": [0.25, 2.00],
   "gpt-5.4-mini": [0.75, 4.50],
   "gpt-4.1": [2.00, 8.00],
   "gpt-5.4": [2.50, 15.00],
   "gpt-5.5": [5.00, 30.00],
   "gemini-3.1-flash-lite-preview": [0.25, 1.50],
+  "gemini-3.1-flash-lite": [0.25, 1.50],
   "gemini-3-flash-preview": [0.50, 3.00],
+  "gemini-3.5-flash": [1.50, 9.00],
   "gemini-3.1-pro-preview-customtools": [2.00, 12.00],
   "mistral-small-latest": [0.10, 0.30],
   "mistral-medium-latest": [0.40, 2.00],
@@ -414,7 +421,7 @@ const LLM_MODEL_COSTS = {
 };
 // Anthropic advisor tool (beta) — model invoked when the executor consults the advisor.
 // Pinned to Opus to maximise the quality delta over the executor (Haiku/Sonnet).
-const ANTHROPIC_ADVISOR_MODEL = "claude-opus-4-7";
+const ANTHROPIC_ADVISOR_MODEL = "claude-opus-4-8";
 const ANTHROPIC_ADVISOR_BETA_HEADER = "advisor-tool-2026-03-01";
 const ANTHROPIC_ADVISOR_TOOL_TYPE = "advisor_20260301";
 // Map skill shorthand source names → actual LLM tool names
@@ -4482,6 +4489,33 @@ function getUserFacingLlmErrorMessage(error, context = "Request") {
   return `${context} failed due to an unknown error.`;
 }
 
+async function runModelAvailabilitySmokeTest(extensionAPI = extensionAPIRef) {
+  try {
+    showInfoToast("LLM check", "Testing configured provider/tier model IDs with tiny requests…");
+    const report = await smokeTestConfiguredLlmModels(extensionAPI);
+    // Roam settings writes can be async; persist the completed report before
+    // rebuilding the settings panel so the status row cannot show the previous
+    // run. Store as JSON because the panel already accepts both legacy object
+    // values and the serialised form.
+    try { await Promise.resolve(extensionAPI.settings.set(SETTINGS_KEYS.llmModelSmokeResults, JSON.stringify(report))); } catch { /* ignore */ }
+    const summary = summariseModelSmokeResults(report);
+    const hasProblems = report.results.some(r => r.status !== "ok");
+    if (hasProblems) {
+      showErrorToast("LLM check found issues", summary.slice(0, 260));
+    } else {
+      showInfoToast("LLM check passed", summary.slice(0, 260));
+    }
+    console.info("[Chief of Staff] LLM model availability report", report);
+    try { extensionAPI.settings.panel.create(buildSettingsConfig(extensionAPI)); } catch { /* ignore */ }
+    return report;
+  } catch (error) {
+    const message = getUserFacingLlmErrorMessage(error, "LLM check");
+    showErrorToast("LLM check failed", message);
+    console.error("[Chief of Staff] LLM model availability check failed:", redactForLog(error));
+    throw error;
+  }
+}
+
 function buildAskResult(prompt, responseText) {
   return {
     text: responseText,
@@ -4960,6 +4994,10 @@ function registerCommandPaletteCommands(extensionAPI) {
       showInfoToast("Health Check", md.slice(0, 280));
       console.info("[Chief of Staff] Health Check Report:\n" + md);
     }
+  });
+  extensionAPI.ui.commandPalette.addCommand({
+    label: "Chief of Staff: Check LLM Model Availability",
+    callback: async () => { await runModelAvailabilitySmokeTest(extensionAPI); }
   });
   extensionAPI.ui.commandPalette.addCommand({
     label: "Chief of Staff: Run Onboarding",
@@ -6108,6 +6146,8 @@ function onload({ extensionAPI }) {
     DEFAULT_COMPOSIO_API_KEY,
     DEFAULT_ASSISTANT_NAME,
     getResponseVerbosity,
+    summariseModelSmokeResults,
+    runModelAvailabilitySmokeTest,
     invalidateRemoteMcpToolsCache,
     getOAuthProviderItems: () => ["google", "github", "notion", "slack", "todoist", "linear"],
     getOAuthTokenState,
