@@ -1,7 +1,5 @@
-/** @jsx h */
-/** @jsxFrag Frag */
 /**
- * Onboarding flow controller (React 18, mounted with window.ReactDOM).
+ * Onboarding flow controller.
  *
  * Entry point: launchOnboarding(extensionAPI, deps)
  * Teardown:    teardownOnboarding()
@@ -9,13 +7,14 @@
  *
  * deps is an object of functions/values injected from index.js to avoid
  * circular imports.
- *
- * React/ReactDOM/Blueprint come from Roam at runtime — nothing in this module
- * touches window/document at import time (tests import it under plain node).
  */
 
-import { h, OnboardingCard, focusFirstInput } from "./onboarding-ui.jsx";
+import React from "react";
+import { createRoot } from "react-dom/client";
+import { OnboardingCard, focusFirstInput, showToast } from "./onboarding-ui.jsx";
 import { ONBOARDING_STEPS } from "./onboarding-steps.jsx";
+
+const { useState, useEffect, useRef } = React;
 
 // ── Module-scoped state ──────────────────────────────────────────────────────
 let onboardingRoot = null;       // ReactDOM root
@@ -155,23 +154,11 @@ function doThisLater() {
   const deps = activeDeps;
   if (deps?.iziToast) {
     const hasKey = !!deps.hasAnyLlmConfigured?.(extensionAPI);
-    if (hasKey) {
-      deps.iziToast.info({
-        class: "cos-toast",
-        title: "No worries",
-        message: "You can finish setting up any time via the command palette: Chief of Staff: Run Onboarding.",
-        timeout: 5000,
-        position: "bottomRight",
-      });
-    } else {
-      deps.iziToast.info({
-        class: "cos-toast",
-        title: "No worries",
-        message: "Without an AI model connected I can\u2019t do much yet. You can connect one in Settings \u2192 Chief of Staff, or re-run onboarding from the command palette.",
-        timeout: 5000,
-        position: "bottomRight",
-      });
-    }
+    showToast(deps, "info", "No worries",
+      hasKey
+        ? "You can finish setting up any time via the command palette: Chief of Staff: Run Onboarding."
+        : "Without an AI model connected I can\u2019t do much yet. You can connect one in Settings \u2192 Chief of Staff, or re-run onboarding from the command palette.",
+      5000);
   }
   teardownOnboarding();
 }
@@ -181,8 +168,6 @@ function doThisLater() {
 // ---------------------------------------------------------------------------
 
 function OnboardingApp(props) {
-  const React = window.React;
-  const { useState, useEffect, useRef } = React;
   const [stepIndex, setStepIndex] = useState(props.initialStep || 0);
   const cardRef = useRef(null);
 
@@ -275,10 +260,8 @@ export function launchOnboarding(extensionAPI, deps) {
   // If already active, tear down first (re-run case)
   if (onboardingContainer || onboardingRoot) teardownOnboarding();
 
-  const win = typeof window !== "undefined" ? window : null;
-  const ReactDOM = win ? win.ReactDOM : null;
-  if (!win || !win.React || typeof ReactDOM?.createRoot !== "function") {
-    console.error("[Chief of Staff] Onboarding needs Roam's React 18 runtime (window.React / window.ReactDOM).");
+  if (typeof document === "undefined" || typeof createRoot !== "function") {
+    console.error("[Chief of Staff] Onboarding needs Roam's React 18 runtime.");
     return;
   }
 
@@ -310,7 +293,7 @@ export function launchOnboarding(extensionAPI, deps) {
   document.body.appendChild(container);
   onboardingContainer = container;
 
-  onboardingRoot = ReactDOM.createRoot(container);
+  onboardingRoot = createRoot(container);
   onboardingRoot.render(<OnboardingApp initialStep={initialStep} />);
 }
 

@@ -9,18 +9,26 @@ module.exports = {
             type: "module",
         },
     },
+  // React comes from Roam at runtime: `import React from "react"` in source
+  // resolves to window.React in the bundle (same pattern as RoamJS extensions).
+  // The react/react-dom devDependencies exist only for node tests and editor
+  // tooling — nothing React ships in extension.js.
+  externals: {
+    react: "React",
+    "react-dom": "ReactDOM",
+    "react-dom/client": "ReactDOM",
+  },
+  externalsType: "window",
   module: {
     rules: [
       {
         test: /\.jsx$/,
         loader: "esbuild-loader",
         options: {
-          // JSX compiles to the lazy h()/Frag helpers from onboarding-ui.jsx
-          // (window.React resolved at render time — never bundled).
+          // Classic JSX transform: React.createElement / React.Fragment
+          // (esbuild defaults), with React imported per file.
           loader: "jsx",
           jsx: "transform",
-          jsxFactory: "h",
-          jsxFragment: "Frag",
           target: "es2020",
         },
       },

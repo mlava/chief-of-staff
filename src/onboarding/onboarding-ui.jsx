@@ -1,42 +1,14 @@
-/** @jsx h */
-/** @jsxFrag Frag */
 /**
- * Onboarding UI kit — React 18 + Blueprint 3, both supplied by Roam at runtime.
- *
- * Hard rules for this file (and for every step that imports it):
- *   • NEVER `import` react / react-dom / @blueprintjs — they come from
- *     `window.React`, `window.ReactDOM`, `window.Blueprint.Core`.
- *   • NEVER touch `window` / `document` at module top level. Tests import this
- *     module under plain node (`node --test`), where neither exists. Every
- *     global access must live inside a function body, i.e. run at render time.
- *   • JSX compiles to the local `h()` / `Frag` below via the `@jsx` /
- *     `@jsxFrag` pragmas at the top of this file (esbuild-loader in webpack,
- *     tsx in tests).
- *
- * Card shell / layout / text blocks keep their `.cos-onboarding-*` classes
- * (styles live in extension.css). Form controls and buttons are Blueprint.
+ * Onboarding UI kit — React 18 + Blueprint 3, supplied by Roam at runtime.
+ * `react` imports resolve to window.React via webpack externals; Blueprint is
+ * read from window at render time. No window/document access at module top
+ * level — tests import this under plain node.
  */
+import React from "react";
 
-// ---------------------------------------------------------------------------
-// Runtime accessors (lazy — nothing here runs at import time)
-// ---------------------------------------------------------------------------
+const { useState, useEffect, useRef, useCallback } = React;
 
-/** Roam's React 18. Throws a readable error if the runtime is missing. */
-function getReact() {
-  const React = typeof window !== "undefined" ? window.React : null;
-  if (!React || typeof React.createElement !== "function") {
-    throw new Error(
-      "[Chief of Staff] window.React is unavailable — the onboarding UI needs Roam's React 18 runtime."
-    );
-  }
-  return React;
-}
-
-/**
- * Blueprint 3 core namespace (`window.Blueprint.Core`). Roam guarantees it
- * alongside React (see roamdocs.fyi "Available Libraries"), so a readable
- * throw beats silently rendering unstyled fallbacks.
- */
+/** Blueprint 3 core namespace (window.Blueprint.Core). */
 function getBlueprint() {
   const bp = typeof window !== "undefined" && window.Blueprint ? window.Blueprint.Core : null;
   if (!bp) {
@@ -45,26 +17,6 @@ function getBlueprint() {
     );
   }
   return bp;
-}
-
-/**
- * `React.createElement`, resolved lazily.
- * @param {string|Function} type
- * @param {object|null} props
- * @param {...any} children
- */
-export function h(type, props, ...children) {
-  return getReact().createElement(type, props, ...children);
-}
-
-/**
- * Fragment component for the JSX transform: `<>…</>` compiles to
- * `h(Frag, null, …)` (see jsxFragment/jsxFragmentFactory in
- * webpack.config.js and tsconfig.json). A wrapper component rather than
- * `React.Fragment` itself so nothing touches `window` at module load.
- */
-export function Frag(props) {
-  return h(getReact().Fragment, null, props.children);
 }
 
 /** Join class names, skipping falsy parts — zero-dep stand-in for clsx. */
@@ -105,7 +57,6 @@ export function focusFirstInput(scope) {
  * @param {number} delay ms before focusing (default 50)
  */
 export function useAutoFocus(deps = [], delay = 50) {
-  const { useEffect } = getReact();
   useEffect(() => {
     const id = setTimeout(() => focusFirstInput(null), delay);
     return () => clearTimeout(id);
@@ -119,7 +70,6 @@ export function showToast(deps, kind, title, message, timeout = 4000) {
 
 /** Ref that flips to false on unmount — guards async callbacks and timers. */
 export function useAlive() {
-  const { useRef, useEffect } = getReact();
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -204,7 +154,6 @@ export function InlineError(props) {
  *   `errorNode` is a ready-to-render <InlineError> (null while there's no error).
  */
 export function useInlineError(initial = null) {
-  const { useState, useCallback } = getReact();
   const [error, setErrorState] = useState(initial == null ? null : String(initial));
   const setError = useCallback((msg) => setErrorState(msg == null ? null : String(msg)), []);
   const clearError = useCallback(() => setErrorState(null), []);
@@ -411,8 +360,6 @@ export function SummaryItem(props) {
  * @param {number} [props.stepTotal]   visible step count
  */
 export function OnboardingCard(props) {
-  const React = getReact();
-  const { useEffect, useRef, useCallback } = React;
   const {
     title = "Chief of Staff",
     cardRef,

@@ -1,5 +1,3 @@
-/** @jsx h */
-/** @jsxFrag Frag */
 
 /**
  * Onboarding step definitions — React 18 function components.
@@ -15,20 +13,17 @@
  *   { extensionAPI, deps, advanceStep, goBack, skipToEnd, sessionState }
  *
  * deps contains functions injected from index.js to avoid circular imports.
- *
- * Hard rules (shared with onboarding-ui.jsx):
- *   • React and Blueprint come from Roam at runtime (`window.React`,
- *     `window.Blueprint.Core`) — never `import` them.
- *   • Nothing in this module may touch window/document at module top level.
- *   • JSX compiles to the `h()` / `Frag` helpers from ./onboarding-ui.jsx via
- *     the `@jsx` / `@jsxFrag` pragmas at the top of this file.
- *   • Primary action buttons must carry data-cos-primary="true" (the `Buttons`
- *     helper does this for `{ primary: true }`) — the controller's Enter-key
- *     handler clicks the first `[data-cos-primary]` inside the card.
+ * No window/document access at module top level — tests import this under
+ * plain node. Primary action buttons carry data-cos-primary="true" (the
+ * Buttons helper sets it) — the controller's Enter handler clicks the first
+ * one inside the content area.
  */
 
+import React from "react";
+
+const { useState, useRef, useEffect } = React;
+
 import {
-  h,
   InfoText,
   Hint,
   BulletList,
@@ -126,7 +121,6 @@ function skipIfIntroductions(ctx) {
 }
 
 function IntroductionsStep({ ctx }) {
-  const { useRef } = window.React;
   const { extensionAPI, deps, advanceStep } = ctx;
   const { setError, clearError, errorNode } = useInlineError();
 
@@ -213,7 +207,6 @@ function BetterTasksStep({ ctx }) {
 
 // ---- Step 4: Memory Pages ----
 function MemoryPagesStep({ ctx }) {
-  const { useState } = window.React;
   const { deps, advanceStep, sessionState } = ctx;
 
   // Unmount guard for the pending runBootstrapMemoryPages() promise: the
@@ -330,7 +323,6 @@ function MemoryQuestionnaireStep({ ctx }) {
 
 // ---- Step 6: Command Palette & Hotkey ----
 function HotkeyStep({ ctx }) {
-  const { useEffect, useRef } = window.React;
   const { advanceStep, deps, sessionState } = ctx;
 
   // Timers started from the click handler: tracked so an unmount (Skip,
@@ -436,7 +428,6 @@ function ChatPanelStep({ ctx }) {
 
 // ---- Step 8: Skills ----
 function SkillsStep({ ctx }) {
-  const { useEffect, useRef } = window.React;
   const { extensionAPI, deps, advanceStep, sessionState } = ctx;
 
   const aliveRef = useRef(true);
@@ -517,7 +508,6 @@ function SkillsStep({ ctx }) {
 
 // ---- Step 9: External Tools (Composio) ----
 function ComposioStep({ ctx }) {
-  const { useState } = window.React;
   const { advanceStep } = ctx;
 
   // "Tell me more" swaps the button row for the detailed instructions.
@@ -578,7 +568,6 @@ function ComposioStep({ ctx }) {
 
 // ---- Step 10: Local MCP Servers ----
 function LocalMcpStep({ ctx }) {
-  const { useState, useRef } = window.React;
   const { extensionAPI, deps, advanceStep } = ctx;
   const { setError, clearError, errorNode } = useInlineError();
 

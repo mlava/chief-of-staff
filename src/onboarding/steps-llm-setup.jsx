@@ -1,13 +1,14 @@
-/** @jsx h */
-/** @jsxFrag Frag */
 /**
  * Step 2 — "Connect an AI model": chooser + api-key / ChatGPT-subscription /
  * custom-provider sub-views. Split from onboarding-steps.jsx as one cohesive
  * feature; ApiKeyStep is the dispatcher, each view resets by unmount.
  */
 
+import React from "react";
+
+const { useState, useRef } = React;
+
 import {
-  h,
   InfoText,
   Hint,
   Field,
@@ -99,7 +100,6 @@ function LlmChooserView({ onPick }) {
 }
 
 function LlmApiKeyView({ ctx, onBack }) {
-  const { useState } = window.React;
   const { extensionAPI, deps, advanceStep } = ctx;
   const { setError, clearError, errorNode } = useInlineError();
   const [apiKey, setApiKey] = useState("");
@@ -187,7 +187,6 @@ function LlmApiKeyView({ ctx, onBack }) {
 }
 
 function LlmCodexView({ ctx, onBack }) {
-  const { useState, useRef } = window.React;
   const { deps, advanceStep } = ctx;
   const { setError, clearError, errorNode } = useInlineError();
   const [waiting, setWaiting] = useState(false);
@@ -258,7 +257,6 @@ function LlmCodexView({ ctx, onBack }) {
 }
 
 function LlmCustomProviderView({ ctx, onBack }) {
-  const { useRef } = window.React;
   const { extensionAPI, deps, advanceStep } = ctx;
   const { setError, clearError, errorNode } = useInlineError();
   const nameRef = useRef(null);
@@ -332,7 +330,6 @@ function skipIfLlmConfigured(ctx) {
 }
 
 function ApiKeyStep({ ctx }) {
-  const { useState } = window.React;
   // Sub-view switcher: chooser → apikey | codex | custom. Each view is
   // its own component, so leaving it resets its state via unmount.
   const [view, setView] = useState("chooser");
