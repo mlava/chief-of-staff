@@ -143,7 +143,7 @@ const ONBOARDING_STEPS = [
       const { extensionAPI, deps, advanceStep } = ctx;
       const { setError, clearError, errorNode } = useInlineError();
 
-      // Uncontrolled inputs, read on submit \u2014 same as the vanilla fields.
+      // Uncontrolled inputs, read on submit.
       const nameRef = useRef(null);
       const cosNameRef = useRef(null);
 
@@ -213,15 +213,14 @@ const ONBOARDING_STEPS = [
       const { extensionAPI, deps, advanceStep } = ctx;
       const { setError, clearError, errorNode } = useInlineError();
 
-      // Sub-view switcher within the single step (same pattern as the composio
-      // step): chooser \u2192 apikey | codex | custom.
+      // Sub-view switcher: chooser \u2192 apikey | codex | custom.
       const [view, setView] = useState("chooser");
 
       // --- api-key view state -------------------------------------------------
       const [apiKey, setApiKey] = useState("");
       const [provider, setProvider] = useState("mistral");
-      // Debounced prefix detection, mirroring the vanilla input handler:
-      // {val, detected} recomputed 150ms after the last keystroke.
+      // Debounced prefix detection: {val, detected} recomputed 150ms after
+      // the last keystroke.
       const [probe, setProbe] = useState({ val: "", detected: null });
 
       // --- codex view state ---------------------------------------------------
@@ -253,7 +252,7 @@ const ONBOARDING_STEPS = [
         return () => clearTimeout(id);
       }, [apiKey]);
 
-      /** Swap sub-view, resetting per-view state the way a rebuild did. */
+      /** Swap sub-view, resetting all per-view state. */
       const showView = (name) => {
         connectAttempt.current++;
         setWaiting(false);
@@ -379,9 +378,6 @@ const ONBOARDING_STEPS = [
               ? <Select
                   label="Provider:"
                   options={
-                    // Labels are capitalised exactly as the vanilla step did
-                    // (charAt(0).toUpperCase() + slice(1)), so the option text is
-                    // unchanged - including "Openai".
                     ["mistral", "anthropic", "openai", "gemini", "groq"].map((opt) => ({
                       value: opt,
                       label: opt.charAt(0).toUpperCase() + opt.slice(1),
@@ -638,8 +634,8 @@ const ONBOARDING_STEPS = [
         try {
           await deps.runBootstrapMemoryPages({ silent: true });
         } catch (e) {
-          // Surfaced unconditionally, as in the vanilla step \u2014 the user should
-          // learn the bootstrap failed even if they navigated away.
+          // Surfaced unconditionally \u2014 the user should learn the bootstrap
+          // failed even if they navigated away.
           const errMsg = deps.escapeHtml(e?.message || "Unknown error");
           deps.iziToast.error({
             class: "cos-toast",
@@ -1103,8 +1099,8 @@ const ONBOARDING_STEPS = [
       useEffect(() => () => { alive.current = false; }, []);
       const busy = useRef(false);
 
-      // Snapshot the connection state once, exactly like the vanilla render()
-      // read it once: a failed connect attempt must not re-branch the view.
+      // Snapshot the connection state once: a failed connect attempt must not
+      // re-branch the view.
       const [snapshot] = useState(() => {
         const configuredPorts = deps.getLocalMcpPorts(extensionAPI);
         const clients = deps.getLocalMcpClients();

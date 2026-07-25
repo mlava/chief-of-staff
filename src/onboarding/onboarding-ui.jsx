@@ -129,11 +129,16 @@ export function useAutoFocus(deps = [], delay = 50) {
  */
 export function InfoText(props) {
   const { html, className, style, children } = props || {};
-  const cls = cx("cos-onboarding-text", className);
   if (typeof html === "string") {
-    return <div className={cls} style={style} dangerouslySetInnerHTML={{ __html: html }} />;
+    return (
+      <div
+        className={cx("cos-onboarding-text", className)}
+        style={style}
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+    );
   }
-  return <div className={cls} style={style}>{children}</div>;
+  return <div className={cx("cos-onboarding-text", className)} style={style}>{children}</div>;
 }
 
 /**
@@ -147,9 +152,14 @@ export function Hint(props) {
   const body = typeof html === "string"
     ? <span dangerouslySetInnerHTML={{ __html: html }} />
     : children;
-  const cls = cx("cos-onboarding-text", "cos-onboarding-hint", className);
   return (
-    <Callout className={cls} style={style} intent={intent} icon={icon} title={title}>
+    <Callout
+      className={cx("cos-onboarding-text", "cos-onboarding-hint", className)}
+      style={style}
+      intent={intent}
+      icon={icon}
+      title={title}
+    >
       {body}
     </Callout>
   );
@@ -303,9 +313,7 @@ export function Buttons(props) {
     <div className="cos-onboarding-buttons">
       {list.map((b, i) => {
         const common = {
-          // Key by position, not label — labels change in place (e.g. the codex
-          // "Connect ChatGPT" → "Waiting for sign-in…" swap) and a label-derived
-          // key would remount the button and drop keyboard focus.
+          // Positional keys: label-derived keys would remount (and drop focus) on label swaps.
           key: b.key || `btn-${i}`,
           onClick: b.onClick,
           disabled: !!b.disabled,
@@ -432,7 +440,7 @@ export function OnboardingCard(props) {
     };
   }, []);
 
-  // Dragging — same mousedown/mousemove/mouseup logic as the vanilla card.
+  // Dragging: move/up listeners live on document so drags survive leaving the card.
   useEffect(() => {
     const onMouseMove = (e) => {
       const state = dragRef.current;
@@ -507,9 +515,7 @@ export function OnboardingCard(props) {
           {"\u00d7"}
         </button>
       </div>
-      {/* Keyed by step: a new key mounts a fresh node, and a freshly inserted
-          element runs the enter animation (fill-mode: forwards) exactly once —
-          no state or effect needed to restart it. */}
+      {/* Keyed by step so each swap mounts a fresh node and re-runs the enter animation. */}
       <div key={contentKey} className="cos-onboarding-content cos-onboarding-content-enter">
         {children}
       </div>

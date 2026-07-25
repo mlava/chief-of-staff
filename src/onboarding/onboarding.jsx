@@ -207,9 +207,7 @@ function OnboardingApp(props) {
     const handler = (e) => {
       if (e.key !== "Enter" || e.isComposing) return;
       // Only intercept Enter inside the content area — the header close
-      // button and footer links must keep their own Enter behavior (the
-      // vanilla version got this by listening on contentArea itself; the
-      // content div remounts per step, so delegate from the card instead).
+      // button and footer links keep their own Enter behavior.
       const content = card.querySelector(".cos-onboarding-content");
       if (!content || !content.contains(e.target)) return;
       const primaryBtn = content.querySelector("[data-cos-primary]");
