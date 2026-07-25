@@ -19,6 +19,9 @@ import {
   getFailoverProviders,
   shouldOmitToolsForProvider,
   getConfiguredLlmModelTargets,
+  hasAnyLlmConfigured,
+  nextFreeCustomSlot,
+  saveCustomProviderSlot,
   classifyModelSmokeError,
   smokeTestConfiguredLlmModels,
   summariseModelSmokeResults,
@@ -752,4 +755,159 @@ test("callAnthropic pins thinking off on Sonnet 5 and Opus 5, leaves other model
   assert.equal(captured.thinking, undefined);
   await callAnthropic("sk-x", "claude-haiku-4-5", "sys", [], []);
   assert.equal(captured.thinking, undefined);
+});
+
+// ── hasAnyLlmConfigured ──────────────────────────────────────────────────────
+
+test("hasAnyLlmConfigured is false on an empty store", () => {
+  const ext = initWithExt(makeExtensionAPI());
+  assert.equal(hasAnyLlmConfigured(ext), false);
+});
+
+test("hasAnyLlmConfigured detects each provider key individually", () => {
+  const keys = [
+    "anthropic-api-key", "openai-api-key", "gemini-api-key",
+    "mistral-api-key", "groq-api-key", "llm-api-key",
+  ];
+  for (const key of keys) {
+    const ext = initWithExt(makeExtensionAPI({ [key]: "some-key" }));
+    assert.equal(hasAnyLlmConfigured(ext), true, key);
+  }
+});
+
+test("hasAnyLlmConfigured ignores whitespace-only keys", () => {
+  const ext = initWithExt(makeExtensionAPI({ "anthropic-api-key": "   " }));
+  assert.equal(hasAnyLlmConfigured(ext), false);
+});
+
+test("hasAnyLlmConfigured detects a connected ChatGPT subscription", () => {
+  const ext = initWithExt(makeExtensionAPI(), { isCodexConnected: () => true });
+  assert.equal(hasAnyLlmConfigured(ext), true);
+});
+
+test("hasAnyLlmConfigured detects a configured custom slot", () => {
+  const ext = initWithExt(makeExtensionAPI({
+    "custom-llm-count": "1",
+    "custom-llm-1-base-url": "http://localhost:1234/v1",
+  }));
+  assert.equal(hasAnyLlmConfigured(ext), true);
+});
+
+test("hasAnyLlmConfigured is false when count is set but base URL is blank", () => {
+  const ext = initWithExt(makeExtensionAPI({ "custom-llm-count": "1" }));
+  assert.equal(hasAnyLlmConfigured(ext), false);
+});
+
+// ── nextFreeCustomSlot ───────────────────────────────────────────────────────
+
+test("nextFreeCustomSlot returns 1 on an empty store", () => {
+  const ext = initWithExt(makeExtensionAPI());
+  assert.equal(nextFreeCustomSlot(ext), 1);
+});
+
+test("nextFreeCustomSlot skips occupied slots", () => {
+  const ext = initWithExt(makeExtensionAPI({
+    "custom-llm-1-base-url": "http://localhost:1234/v1",
+  }));
+  assert.equal(nextFreeCustomSlot(ext), 2);
+});
+
+test("nextFreeCustomSlot reuses a gap inside the count", () => {
+  const ext = initWithExt(makeExtensionAPI({
+    "custom-llm-count": "2",
+    "custom-llm-2-base-url": "http://localhost:11434/v1",
+  }));
+  assert.equal(nextFreeCustomSlot(ext), 1);
+});
+
+test("nextFreeCustomSlot returns null when all slots are configured", () => {
+  const ext = initWithExt(makeExtensionAPI({
+    "custom-llm-1-base-url": "http://a/v1",
+    "custom-llm-2-base-url": "http://b/v1",
+    "custom-llm-3-base-url": "http://c/v1",
+  }));
+  assert.equal(nextFreeCustomSlot(ext), null);
+});
+
+// ── saveCustomProviderSlot ───────────────────────────────────────────────────
+
+test("saveCustomProviderSlot writes settings, bumps count, sets compound provider label", () => {
+  const ext = initWithExt(makeExtensionAPI());
+  const result = saveCustomProviderSlot(ext, {
+    name: "LM Studio",
+    baseUrl: "http://localhost:1234/v1/",
+    apiKey: "",
+    miniModel: "llama-3.1-8b-instruct",
+  });
+  assert.equal(result.slot, 1);
+  assert.equal(result.providerId, "custom-1");
+  assert.equal(result.name, "LM Studio");
+  assert.equal(ext._store["custom-llm-1-base-url"], "http://localhost:1234/v1"); // trailing slash stripped
+  assert.equal(ext._store["custom-llm-1-mini-model"], "llama-3.1-8b-instruct");
+  assert.equal(ext._store["custom-llm-1-name"], "LM Studio");
+  assert.equal(ext._store["custom-llm-count"], 1);
+  assert.equal(ext._store["llm-provider"], "custom-1 — LM Studio");
+  // Round-trip: the slot is now discoverable and the provider resolves
+  assert.deepEqual(listCustomProviderIds(ext), ["custom-1"]);
+  assert.equal(getLlmProvider(ext), "custom-1");
+});
+
+test("saveCustomProviderSlot without a name uses the plain provider id", () => {
+  const ext = initWithExt(makeExtensionAPI());
+  const result = saveCustomProviderSlot(ext, {
+    baseUrl: "http://localhost:11434/v1",
+    miniModel: "qwen2.5",
+  });
+  assert.equal(ext._store["llm-provider"], "custom-1");
+  assert.equal(result.name, "Custom 1");
+});
+
+test("saveCustomProviderSlot fills a gap without lowering the count", () => {
+  const ext = initWithExt(makeExtensionAPI({
+    "custom-llm-count": "2",
+    "custom-llm-2-base-url": "http://localhost:11434/v1",
+    "custom-llm-2-mini-model": "qwen2.5",
+  }));
+  const result = saveCustomProviderSlot(ext, {
+    baseUrl: "http://localhost:1234/v1",
+    miniModel: "llama-3.1-8b-instruct",
+  });
+  assert.equal(result.slot, 1);
+  assert.equal(ext._store["custom-llm-count"], "2"); // untouched
+  assert.equal(ext._store["llm-provider"], "custom-1");
+});
+
+test("saveCustomProviderSlot clears stale name and api-key when reusing a slot", () => {
+  const ext = initWithExt(makeExtensionAPI({
+    "custom-llm-count": "1",
+    "custom-llm-1-name": "Old Server",
+    "custom-llm-1-api-key": "stale-bearer-token",
+  }));
+  saveCustomProviderSlot(ext, {
+    baseUrl: "http://localhost:1234/v1",
+    miniModel: "llama-3.1-8b-instruct",
+  });
+  assert.equal(ext._store["custom-llm-1-name"], "");
+  assert.equal(ext._store["custom-llm-1-api-key"], "");
+});
+
+test("saveCustomProviderSlot rejects invalid input", () => {
+  const ext = initWithExt(makeExtensionAPI());
+  assert.throws(() => saveCustomProviderSlot(ext, { baseUrl: "not-a-url", miniModel: "m" }), /valid URL/);
+  assert.throws(() => saveCustomProviderSlot(ext, { baseUrl: "ftp://host/v1", miniModel: "m" }), /valid URL/);
+  assert.throws(() => saveCustomProviderSlot(ext, { baseUrl: "", miniModel: "m" }), /valid URL/);
+  assert.throws(() => saveCustomProviderSlot(ext, { baseUrl: "http://localhost:1234/v1", miniModel: "  " }), /model name/i);
+  assert.equal(ext._store["custom-llm-count"], undefined); // nothing written on failure
+});
+
+test("saveCustomProviderSlot throws when all slots are taken", () => {
+  const ext = initWithExt(makeExtensionAPI({
+    "custom-llm-1-base-url": "http://a/v1",
+    "custom-llm-2-base-url": "http://b/v1",
+    "custom-llm-3-base-url": "http://c/v1",
+  }));
+  assert.throws(
+    () => saveCustomProviderSlot(ext, { baseUrl: "http://d/v1", miniModel: "m" }),
+    /slots are configured/
+  );
 });

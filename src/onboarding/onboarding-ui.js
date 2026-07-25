@@ -1,45 +1,484 @@
 /**
- * Onboarding UI — card shell, DOM helpers, transitions.
+ * Onboarding UI kit — React 18 + Blueprint 3, both supplied by Roam at runtime.
  *
- * All DOM elements use `.cos-onboarding-*` class names.
- * Styles live in extension.css.
+ * Hard rules for this file (and for every step that imports it):
+ *   • NEVER `import` react / react-dom / @blueprintjs — they come from
+ *     `window.React`, `window.ReactDOM`, `window.Blueprint.Core`.
+ *   • NEVER touch `window` / `document` at module top level. Tests import this
+ *     module under plain node (`node --test`), where neither exists. Every
+ *     global access must live inside a function body, i.e. run at render time.
+ *   • No JSX. Build elements with the `h()` helper below.
+ *
+ * Card shell / layout / text blocks keep their `.cos-onboarding-*` classes
+ * (styles live in extension.css). Form controls and buttons are Blueprint.
  */
+
+// ---------------------------------------------------------------------------
+// Runtime accessors (lazy — nothing here runs at import time)
+// ---------------------------------------------------------------------------
+
+/** Roam's React 18. Throws a readable error if the runtime is missing. */
+function getReact() {
+  const React = typeof window !== "undefined" ? window.React : null;
+  if (!React || typeof React.createElement !== "function") {
+    throw new Error(
+      "[Chief of Staff] window.React is unavailable — the onboarding UI needs Roam's React 18 runtime."
+    );
+  }
+  return React;
+}
+
+/** Blueprint 3 core namespace, or `{}` when unavailable (fallbacks kick in). */
+function getBlueprint() {
+  if (typeof window === "undefined") return {};
+  return (window.Blueprint && window.Blueprint.Core) || {};
+}
+
+/**
+ * `React.createElement`, resolved lazily.
+ * @param {string|Function} type
+ * @param {object|null} props
+ * @param {...any} children
+ */
+export function h(type, props, ...children) {
+  return getReact().createElement(type, props, ...children);
+}
+
+/** `<>…</>` without JSX — returns a Fragment wrapping `children`. */
+export function frag(...children) {
+  return h(getReact().Fragment, null, ...children);
+}
+
+// ---------------------------------------------------------------------------
+// Focus helpers
+// ---------------------------------------------------------------------------
+
+/** First focusable text control inside a scope (Blueprint inputs included). */
+export const FIRST_INPUT_SELECTOR =
+  'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([disabled]):not([readonly]), textarea:not([disabled])';
+
+/**
+ * Focus the first text input inside `scope` (defaults to the onboarding card's
+ * content area). Returns true when something was focused.
+ */
+export function focusFirstInput(scope) {
+  let root = scope;
+  if (!root) {
+    if (typeof document === "undefined") return false;
+    root = document.querySelector(".cos-onboarding-content") || document;
+  }
+  const el = root.querySelector ? root.querySelector(FIRST_INPUT_SELECTOR) : null;
+  if (el && typeof el.focus === "function") {
+    el.focus();
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Focus the first input a beat after `deps` change — use it after swapping a
+ * sub-view inside a step (the controller only auto-focuses on step change).
+ * @param {any[]} deps  dependency array (constant length, as React requires)
+ * @param {number} delay ms before focusing (default 50)
+ */
+export function useAutoFocus(deps = [], delay = 50) {
+  const { useEffect } = getReact();
+  useEffect(() => {
+    const id = setTimeout(() => focusFirstInput(null), delay);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+}
+
+// ---------------------------------------------------------------------------
+// Text blocks
+// ---------------------------------------------------------------------------
+
+/**
+ * A block of conversational copy.
+ *   h(InfoText, { html: "…<strong>bold</strong>…" })   // markup preserved
+ *   h(InfoText, null, "plain text")                    // escaped children
+ */
+export function InfoText(props) {
+  const { html, className, style, children } = props || {};
+  const cls = "cos-onboarding-text" + (className ? " " + className : "");
+  if (typeof html === "string") {
+    return h("div", { className: cls, style, dangerouslySetInnerHTML: { __html: html } });
+  }
+  return h("div", { className: cls, style }, children);
+}
+
+/**
+ * Hint / small-print box — Blueprint Callout, keeping `.cos-onboarding-text`
+ * so nested <strong>/<small>/<a> copy stays styled.
+ *   h(Hint, { html: "<small>Your key is stored locally…</small>" })
+ */
+export function Hint(props) {
+  const { html, children, intent, icon = null, title, className, style } = props || {};
+  const { Callout } = getBlueprint();
+  const body = typeof html === "string"
+    ? h("span", { dangerouslySetInnerHTML: { __html: html } })
+    : children;
+  const cls = "cos-onboarding-text cos-onboarding-hint" + (className ? " " + className : "");
+  if (!Callout) return h("div", { className: cls, style }, body);
+  return h(Callout, { className: cls, style, intent, icon, title }, body);
+}
+
+/** Bulleted list. Items are HTML strings (or React nodes). */
+export function BulletList(props) {
+  const items = (props && props.items) || [];
+  return h(
+    "ul",
+    { className: "cos-onboarding-list" },
+    items
+      .filter((i) => i != null)
+      .map((item, i) =>
+        typeof item === "string"
+          ? h("li", { key: i, dangerouslySetInnerHTML: { __html: item } })
+          : h("li", { key: i }, item)
+      )
+  );
+}
+
+/** Inline validation error. Renders nothing when `message` is empty. */
+export function InlineError(props) {
+  const message = typeof props === "string" ? props : props && props.message;
+  if (!message) return null;
+  return h("div", { className: "cos-onboarding-error" }, String(message));
+}
+
+/**
+ * Inline-error state for a step.
+ * @returns {{error: string|null, setError: Function, clearError: Function, errorNode: any}}
+ *   `errorNode` is a ready-to-render <InlineError> (null while there's no error).
+ */
+export function useInlineError(initial = null) {
+  const { useState, useCallback } = getReact();
+  const [error, setErrorState] = useState(initial == null ? null : String(initial));
+  const setError = useCallback((msg) => setErrorState(msg == null ? null : String(msg)), []);
+  const clearError = useCallback(() => setErrorState(null), []);
+  return { error, setError, clearError, errorNode: h(InlineError, { message: error }) };
+}
+
+// ---------------------------------------------------------------------------
+// Form controls (Blueprint)
+// ---------------------------------------------------------------------------
+
+function assignRef(ref, el) {
+  if (typeof ref === "function") ref(el);
+  else if (ref && typeof ref === "object") ref.current = el;
+}
+
+/**
+ * Labelled text/password field — Blueprint InputGroup in `.cos-onboarding-field`.
+ *
+ * Controlled:   h(Field, { label, value, onChange: (e) => setValue(e.target.value) })
+ * Uncontrolled: h(Field, { label, value: initialValue, inputRef })  // read inputRef.current.value
+ *
+ * @param {object} props
+ * @param {string} [props.label]
+ * @param {string} [props.placeholder]
+ * @param {string} [props.value]        controlled value, or initial value when no onChange
+ * @param {string} [props.type]         "text" (default) | "password" | …
+ * @param {Function} [props.onChange]   makes the input controlled
+ * @param {object|Function} [props.inputRef]  ref object or callback → the <input>
+ */
+export function Field(props) {
+  const {
+    label,
+    placeholder = "",
+    value,
+    defaultValue,
+    type = "text",
+    onChange,
+    onKeyDown,
+    inputRef,
+    disabled,
+    className,
+    style,
+    intent,
+    fill = true,
+    rightElement,
+  } = props || {};
+  const { InputGroup } = getBlueprint();
+  const setRef = (el) => assignRef(inputRef, el);
+
+  const shared = { type, placeholder, disabled, onKeyDown, intent };
+  const valueProps = onChange
+    ? { value: value == null ? "" : value, onChange }
+    : { defaultValue: defaultValue != null ? defaultValue : value == null ? "" : value };
+
+  const input = InputGroup
+    ? h(InputGroup, {
+        ...shared,
+        ...valueProps,
+        className: "cos-onboarding-input-group" + (className ? " " + className : ""),
+        fill,
+        inputRef: setRef,
+        rightElement,
+      })
+    : h("input", {
+        ...shared,
+        ...valueProps,
+        className: "cos-onboarding-input" + (className ? " " + className : ""),
+        ref: setRef,
+      });
+
+  return h(
+    "div",
+    { className: "cos-onboarding-field", style },
+    label ? h("label", { className: "cos-onboarding-label" }, label) : null,
+    input
+  );
+}
+
+/**
+ * Dropdown — Blueprint HTMLSelect. `options` accepts strings or {value,label}.
+ * With a `label` it renders as an inline row (label + select).
+ *   h(Select, { label: "Provider:", options: ["mistral","openai"], value, onChange })
+ */
+export function Select(props) {
+  const { label, options = [], value, onChange, disabled, className, style, fill } = props || {};
+  const { HTMLSelect } = getBlueprint();
+  const normalized = options.map((o) => (typeof o === "string" ? { value: o, label: o } : o));
+
+  const select = HTMLSelect
+    ? h(HTMLSelect, {
+        options: normalized,
+        value,
+        onChange,
+        disabled,
+        fill,
+        className: "cos-onboarding-select-wrap" + (className ? " " + className : ""),
+      })
+    : h(
+        "select",
+        {
+          className: "cos-onboarding-select" + (className ? " " + className : ""),
+          value,
+          onChange,
+          disabled,
+        },
+        normalized.map((o) => h("option", { key: String(o.value), value: o.value }, o.label))
+      );
+
+  if (!label) return select;
+  return h(
+    "div",
+    {
+      className: "cos-onboarding-field cos-onboarding-field--inline",
+      style: { display: "flex", alignItems: "center", gap: "6px", margin: "8px 0", ...(style || {}) },
+    },
+    h(
+      "label",
+      { className: "cos-onboarding-label", style: { margin: 0, fontSize: "13px", fontWeight: 600 } },
+      label
+    ),
+    select
+  );
+}
+
+/**
+ * Row of buttons — Blueprint Buttons in a `.cos-onboarding-buttons` flex row.
+ * Each button: { label, primary?, disabled?, loading?, onClick, key?, title? }.
+ *
+ * Primary buttons carry data-cos-primary="true"; the controller's Enter-key
+ * handler clicks the first `[data-cos-primary]` inside the card. Keep exactly
+ * one primary button visible per view.
+ */
+export function Buttons(props) {
+  const list = ((props && props.buttons) || []).filter(Boolean);
+  const { Button } = getBlueprint();
+  return h(
+    "div",
+    { className: "cos-onboarding-buttons" },
+    list.map((b, i) => {
+      const common = {
+        // Key by position, not label — labels change in place (e.g. the codex
+        // "Connect ChatGPT" → "Waiting for sign-in…" swap) and a label-derived
+        // key would remount the button and drop keyboard focus.
+        key: b.key || `btn-${i}`,
+        onClick: b.onClick,
+        disabled: !!b.disabled,
+        title: b.title,
+        "data-cos-primary": b.primary ? "true" : undefined,
+      };
+      return Button
+        ? h(Button, {
+            ...common,
+            className: b.className,
+            intent: b.primary ? "primary" : undefined,
+            loading: !!b.loading,
+            text: b.label,
+          })
+        : h(
+            "button",
+            {
+              ...common,
+              type: "button",
+              className:
+                "cos-onboarding-btn " +
+                (b.primary ? "cos-onboarding-btn--primary" : "cos-onboarding-btn--secondary") +
+                (b.className ? " " + b.className : ""),
+            },
+            b.label
+          );
+    })
+  );
+}
+
+/**
+ * Vertical stack of large clickable option cards.
+ * Each option: { title, description, onClick, key? }.
+ */
+export function OptionCards(props) {
+  const options = ((props && props.options) || []).filter(Boolean);
+  return h(
+    "div",
+    { className: "cos-onboarding-options" },
+    options.map((o, i) =>
+      h(
+        "button",
+        {
+          key: o.key || o.title || i,
+          type: "button",
+          className: "cos-onboarding-option",
+          onClick: o.onClick,
+        },
+        h("span", { className: "cos-onboarding-option-title" }, o.title),
+        o.description ? h("span", { className: "cos-onboarding-option-desc" }, o.description) : null
+      )
+    )
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Summary (finish step)
+// ---------------------------------------------------------------------------
+
+/** Wrapper for a list of <SummaryItem>s. */
+export function Summary(props) {
+  return h("div", { className: "cos-onboarding-summary" }, props && props.children);
+}
+
+/** One checklist row: ✓ when `status` is truthy, – otherwise. */
+export function SummaryItem(props) {
+  const { label, status } = props || {};
+  return h(
+    "div",
+    { className: "cos-onboarding-summary-item" },
+    h(
+      "span",
+      { className: status ? "cos-onboarding-summary-check" : "cos-onboarding-summary-pending" },
+      status ? "\u2713" : "\u2013"
+    ),
+    h("span", null, ` ${label}`)
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Card shell
 // ---------------------------------------------------------------------------
 
 /**
- * Build the outer onboarding card (header + content area + footer).
- * Returns { card, contentArea, footer, stepIndicator, destroy }.
+ * The onboarding card: draggable header (title + close), animated content area,
+ * footer (back link / do-this-later / skip / step indicator).
+ *
+ * Rendered by the controller only — steps render *into* it as `children`.
+ *
+ * @param {object} props
+ * @param {string} props.title
+ * @param {object|Function} [props.cardRef] ref to the card element
+ * @param {string} [props.contentKey]  changes → content remounts + re-animates
+ * @param {boolean} [props.showBack]
+ * @param {Function} [props.onBack]
+ * @param {Function} [props.onSkip]
+ * @param {Function} [props.onDoLater]
+ * @param {number} [props.stepCurrent] zero-based visible position
+ * @param {number} [props.stepTotal]   visible step count
  */
-export function createOnboardingCard({ onSkip, onDoLater, onBack, title = "Chief of Staff" } = {}) {
-  const card = document.createElement("div");
-  card.className = "cos-onboarding-card cos-onboarding-enter";
+export function OnboardingCard(props) {
+  const React = getReact();
+  const { useState, useEffect, useRef, useCallback } = React;
+  const {
+    title = "Chief of Staff",
+    cardRef,
+    contentKey,
+    showBack = false,
+    onBack,
+    onSkip,
+    onDoLater,
+    stepCurrent = 0,
+    stepTotal = 0,
+    children,
+  } = props || {};
 
-  // --- Header (draggable) ---
-  const header = document.createElement("div");
-  header.className = "cos-onboarding-header";
+  const innerRef = useRef(null);
+  const dragRef = useRef(null);
+  const [visible, setVisible] = useState(false);
+  const [entering, setEntering] = useState(true);
 
-  const headerTitle = document.createElement("span");
-  headerTitle.className = "cos-onboarding-header-title";
-  headerTitle.textContent = title;
-  header.appendChild(headerTitle);
+  const attachCard = useCallback(
+    (el) => {
+      innerRef.current = el;
+      assignRef(cardRef, el);
+    },
+    [cardRef]
+  );
 
-  const closeBtn = document.createElement("button");
-  closeBtn.className = "cos-onboarding-header-close";
-  closeBtn.textContent = "\u00d7";
-  closeBtn.title = "Close onboarding";
-  closeBtn.addEventListener("click", () => {
-    if (typeof onDoLater === "function") onDoLater();
-  });
-  header.appendChild(closeBtn);
+  // Entrance animation: .cos-onboarding-enter → .cos-onboarding-visible
+  useEffect(() => {
+    const hasRaf = typeof window.requestAnimationFrame === "function";
+    const id = hasRaf
+      ? window.requestAnimationFrame(() => setVisible(true))
+      : setTimeout(() => setVisible(true), 16);
+    return () => {
+      if (hasRaf) window.cancelAnimationFrame(id);
+      else clearTimeout(id);
+    };
+  }, []);
 
-  // Simple drag behaviour (mirrors chat panel approach)
-  let dragState = null;
-  const onMouseDown = (e) => {
-    if (e.target === closeBtn) return;
-    dragState = {
+  // Step-change animation (enter-only; the content div is keyed so the CSS
+  // animation restarts on every swap).
+  useEffect(() => {
+    setEntering(true);
+    const id = setTimeout(() => setEntering(false), 300);
+    return () => clearTimeout(id);
+  }, [contentKey]);
+
+  // Dragging — same mousedown/mousemove/mouseup logic as the vanilla card.
+  useEffect(() => {
+    const onMouseMove = (e) => {
+      const state = dragRef.current;
+      const card = innerRef.current;
+      if (!state || !card) return;
+      const dx = e.clientX - state.startX;
+      const dy = e.clientY - state.startY;
+      // Switch from centred to absolute positioning on first drag
+      card.style.transform = "none";
+      card.style.left = `${state.origLeft + dx}px`;
+      card.style.top = `${state.origTop + dy}px`;
+    };
+    const onMouseUp = () => {
+      dragRef.current = null;
+    };
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+    return () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      dragRef.current = null;
+    };
+  }, []);
+
+  const onHeaderMouseDown = (e) => {
+    const card = innerRef.current;
+    if (!card) return;
+    const target = e.target;
+    if (target && typeof target.closest === "function" && target.closest(".cos-onboarding-header-close")) {
+      return; // close button — not a drag handle
+    }
+    dragRef.current = {
       startX: e.clientX,
       startY: e.clientY,
       origLeft: card.offsetLeft,
@@ -47,261 +486,71 @@ export function createOnboardingCard({ onSkip, onDoLater, onBack, title = "Chief
     };
     e.preventDefault();
   };
-  const onMouseMove = (e) => {
-    if (!dragState) return;
-    const dx = e.clientX - dragState.startX;
-    const dy = e.clientY - dragState.startY;
-    // Switch from centred to absolute positioning on first drag
-    card.style.transform = "none";
-    card.style.left = `${dragState.origLeft + dx}px`;
-    card.style.top = `${dragState.origTop + dy}px`;
-  };
-  const onMouseUp = () => { dragState = null; };
-  header.addEventListener("mousedown", onMouseDown);
-  document.addEventListener("mousemove", onMouseMove);
-  document.addEventListener("mouseup", onMouseUp);
 
-  // --- Content area ---
-  const contentArea = document.createElement("div");
-  contentArea.className = "cos-onboarding-content";
+  const footerLink = (label, onClick, extraClass, style) =>
+    h(
+      "a",
+      {
+        className: "cos-onboarding-footer-link" + (extraClass ? " " + extraClass : ""),
+        href: "#",
+        style,
+        onClick: (e) => {
+          e.preventDefault();
+          if (typeof onClick === "function") onClick();
+        },
+      },
+      label
+    );
 
-  // --- Footer ---
-  const footer = document.createElement("div");
-  footer.className = "cos-onboarding-footer";
-
-  const stepIndicator = document.createElement("span");
-  stepIndicator.className = "cos-onboarding-step-indicator";
-  footer.appendChild(stepIndicator);
-
-  // Left-side back link
-  let backLink = null;
-  if (onBack) {
-    backLink = document.createElement("a");
-    backLink.className = "cos-onboarding-footer-link cos-onboarding-back-link";
-    backLink.textContent = "\u2190 Back";
-    backLink.href = "#";
-    backLink.style.display = "none"; // hidden on first step
-    backLink.addEventListener("click", (e) => { e.preventDefault(); onBack(); });
-    footer.appendChild(backLink);
-  }
-
-  const footerLinks = document.createElement("span");
-  footerLinks.className = "cos-onboarding-footer-links";
-
-  if (onDoLater) {
-    const doLaterLink = document.createElement("a");
-    doLaterLink.className = "cos-onboarding-footer-link";
-    doLaterLink.textContent = "Do this later";
-    doLaterLink.href = "#";
-    doLaterLink.addEventListener("click", (e) => { e.preventDefault(); onDoLater(); });
-    footerLinks.appendChild(doLaterLink);
-  }
-
-  if (onSkip) {
-    const skipLink = document.createElement("a");
-    skipLink.className = "cos-onboarding-footer-link";
-    skipLink.textContent = "Skip";
-    skipLink.href = "#";
-    skipLink.addEventListener("click", (e) => { e.preventDefault(); onSkip(); });
-    footerLinks.appendChild(skipLink);
-  }
-
-  footer.appendChild(footerLinks);
-
-  card.appendChild(header);
-  card.appendChild(contentArea);
-  card.appendChild(footer);
-
-  const destroy = () => {
-    document.removeEventListener("mousemove", onMouseMove);
-    document.removeEventListener("mouseup", onMouseUp);
-  };
-
-  // Trigger entrance animation on next frame
-  requestAnimationFrame(() => {
-    card.classList.remove("cos-onboarding-enter");
-    card.classList.add("cos-onboarding-visible");
-  });
-
-  return { card, contentArea, footer, stepIndicator, backLink, destroy };
-}
-
-// ---------------------------------------------------------------------------
-// Content transitions
-// ---------------------------------------------------------------------------
-
-/**
- * Replace contentArea children with the given fragment, animating the swap.
- */
-/** Timer IDs from transitionCardContent safety fallbacks. */
-const transitionTimers = new Set();
-
-/** Clear all pending transition timers (call on onboarding teardown). */
-export function clearTransitionTimers() {
-  for (const id of transitionTimers) clearTimeout(id);
-  transitionTimers.clear();
-}
-
-export function transitionCardContent(contentArea, fragment) {
-  if (!contentArea) return;
-  let swapped = false;
-  contentArea.classList.add("cos-onboarding-content-exit");
-  const swap = () => {
-    if (swapped) return;
-    swapped = true;
-    contentArea.innerHTML = "";
-    contentArea.appendChild(fragment);
-    contentArea.classList.remove("cos-onboarding-content-exit");
-    contentArea.classList.add("cos-onboarding-content-enter");
-    const cleanup = () => {
-      contentArea.classList.remove("cos-onboarding-content-enter");
-      contentArea.removeEventListener("animationend", cleanup);
-    };
-    contentArea.addEventListener("animationend", cleanup);
-    // Safety fallback for enter cleanup
-    const enterId = setTimeout(() => {
-      transitionTimers.delete(enterId);
-      contentArea.classList.remove("cos-onboarding-content-enter");
-    }, 300);
-    transitionTimers.add(enterId);
-  };
-  // Wait for exit animation, or swap immediately if no animation support
-  if (contentArea.children.length === 0) {
-    swap();
-  } else {
-    const afterExit = () => {
-      contentArea.removeEventListener("animationend", afterExit);
-      swap();
-    };
-    contentArea.addEventListener("animationend", afterExit);
-    // Safety fallback if animationend never fires
-    const exitId = setTimeout(() => {
-      transitionTimers.delete(exitId);
-      swap();
-    }, 250);
-    transitionTimers.add(exitId);
-  }
-}
-
-/**
- * Update the step indicator text.
- */
-export function updateStepIndicator(stepIndicator, current, total) {
-  if (!stepIndicator) return;
-  stepIndicator.textContent = `${current + 1} of ${total}`;
-}
-
-// ---------------------------------------------------------------------------
-// DOM element factories
-// ---------------------------------------------------------------------------
-
-/**
- * Create a paragraph/block of conversational text.
- * Accepts a string (plain text) or an element.
- */
-export function createInfoText(content) {
-  const p = document.createElement("div");
-  p.className = "cos-onboarding-text";
-  if (typeof content === "string") {
-    p.innerHTML = content;
-  } else if (content instanceof Node) {
-    p.appendChild(content);
-  }
-  return p;
-}
-
-/**
- * Create a labelled input field.
- * Returns { wrapper, input } so the caller can read the value.
- */
-export function createInputField({ label, placeholder = "", value = "", type = "text" } = {}) {
-  const wrapper = document.createElement("div");
-  wrapper.className = "cos-onboarding-field";
-
-  if (label) {
-    const lbl = document.createElement("label");
-    lbl.className = "cos-onboarding-label";
-    lbl.textContent = label;
-    wrapper.appendChild(lbl);
-  }
-
-  const input = document.createElement("input");
-  input.className = "cos-onboarding-input";
-  input.type = type;
-  input.placeholder = placeholder;
-  input.value = value;
-  wrapper.appendChild(input);
-
-  return { wrapper, input };
-}
-
-/**
- * Create a row of buttons.
- * Each button: { label, primary?, onClick }.
- */
-export function createButtonGroup(buttons) {
-  const row = document.createElement("div");
-  row.className = "cos-onboarding-buttons";
-  for (const btn of buttons) {
-    const el = document.createElement("button");
-    el.className = btn.primary
-      ? "cos-onboarding-btn cos-onboarding-btn--primary"
-      : "cos-onboarding-btn cos-onboarding-btn--secondary";
-    el.textContent = btn.label;
-    if (typeof btn.onClick === "function") {
-      el.addEventListener("click", btn.onClick);
-    }
-    row.appendChild(el);
-  }
-  return row;
-}
-
-/**
- * Show an inline validation error inside a container.
- */
-export function showInlineError(container, message) {
-  clearInlineError(container);
-  const el = document.createElement("div");
-  el.className = "cos-onboarding-error";
-  el.textContent = message;
-  container.appendChild(el);
-}
-
-/**
- * Remove any inline validation error from a container.
- */
-export function clearInlineError(container) {
-  const existing = container?.querySelector(".cos-onboarding-error");
-  if (existing) existing.remove();
-}
-
-/**
- * Create a bulleted list from an array of strings (supports HTML).
- */
-export function createBulletList(items) {
-  const ul = document.createElement("ul");
-  ul.className = "cos-onboarding-list";
-  for (const item of items) {
-    const li = document.createElement("li");
-    li.innerHTML = item;
-    ul.appendChild(li);
-  }
-  return ul;
-}
-
-/**
- * Create a summary checklist item for the finish step.
- */
-export function createSummaryItem(label, status) {
-  const row = document.createElement("div");
-  row.className = "cos-onboarding-summary-item";
-  const check = status ? "\u2713" : "\u2013";
-  const checkSpan = document.createElement("span");
-  checkSpan.className = status ? "cos-onboarding-summary-check" : "cos-onboarding-summary-pending";
-  checkSpan.textContent = check;
-  const text = document.createElement("span");
-  text.textContent = ` ${label}`;
-  row.appendChild(checkSpan);
-  row.appendChild(text);
-  return row;
+  return h(
+    "div",
+    {
+      // bp3-dark keeps Blueprint controls legible on the dark card whatever
+      // Roam's active theme is.
+      className:
+        "cos-onboarding-card bp3-dark " + (visible ? "cos-onboarding-visible" : "cos-onboarding-enter"),
+      ref: attachCard,
+    },
+    h(
+      "div",
+      { className: "cos-onboarding-header", onMouseDown: onHeaderMouseDown },
+      h("span", { className: "cos-onboarding-header-title" }, title),
+      h(
+        "button",
+        {
+          type: "button",
+          className: "cos-onboarding-header-close",
+          title: "Close onboarding",
+          onClick: () => {
+            if (typeof onDoLater === "function") onDoLater();
+          },
+        },
+        "\u00d7"
+      )
+    ),
+    h(
+      "div",
+      {
+        key: contentKey,
+        className: "cos-onboarding-content" + (entering ? " cos-onboarding-content-enter" : ""),
+      },
+      children
+    ),
+    h(
+      "div",
+      { className: "cos-onboarding-footer" },
+      h("span", { className: "cos-onboarding-step-indicator" }, `${stepCurrent + 1} of ${stepTotal}`),
+      onBack
+        ? footerLink("\u2190 Back", onBack, "cos-onboarding-back-link", {
+            display: showBack ? "" : "none",
+          })
+        : null,
+      h(
+        "span",
+        { className: "cos-onboarding-footer-links" },
+        onDoLater ? footerLink("Do this later", onDoLater) : null,
+        onSkip ? footerLink("Skip", onSkip) : null
+      )
+    )
+  );
 }

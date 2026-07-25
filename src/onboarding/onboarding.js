@@ -1,30 +1,28 @@
 /**
- * Onboarding flow controller.
+ * Onboarding flow controller (React 18, mounted with window.ReactDOM).
  *
  * Entry point: launchOnboarding(extensionAPI, deps)
  * Teardown:    teardownOnboarding()
+ * Query:       isOnboardingActive()
  *
- * deps is an object of functions/values injected from index.js
- * to avoid circular imports.
+ * deps is an object of functions/values injected from index.js to avoid
+ * circular imports.
+ *
+ * React/ReactDOM/Blueprint come from Roam at runtime — nothing in this module
+ * touches window/document at import time (tests import it under plain node).
  */
 
-import {
-  createOnboardingCard,
-  transitionCardContent,
-  updateStepIndicator,
-  clearTransitionTimers,
-} from "./onboarding-ui.js";
+import { h, OnboardingCard, focusFirstInput } from "./onboarding-ui.js";
 import { ONBOARDING_STEPS } from "./onboarding-steps.js";
 
-// Module-scoped state
-let onboardingCardEl = null;
-let onboardingDestroyFn = null;
-let currentStepIndex = 0;
+// ── Module-scoped state ──────────────────────────────────────────────────────
+let onboardingRoot = null;       // ReactDOM root
+let onboardingContainer = null;  // host <div> appended to document.body
+let onboardingCardEl = null;     // .cos-onboarding-card element
 let activeExtensionAPI = null;
 let activeDeps = null;
-let activeContentArea = null;
-let activeStepIndicator = null;
-let activeBackLink = null;
+let currentStepIndex = 0;
+let setStepIndexRef = null;      // OnboardingApp's setState, published on mount
 // Mutable session state shared across steps (survives async settings timing)
 let sessionState = {};
 
@@ -34,13 +32,9 @@ let sessionState = {};
 
 function loadOnboardingState(extensionAPI, deps) {
   const hasName = !!extensionAPI.settings.get(deps.SETTINGS_KEYS.userName);
-  const hasKey = !!(
-    deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.anthropicApiKey, "") ||
-    deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.openaiApiKey, "") ||
-    deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.geminiApiKey, "") ||
-    deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.mistralApiKey, "") ||
-    deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.llmApiKey, "")
-  );
+  // Any configured LLM path counts: built-in/legacy key, ChatGPT
+  // subscription, or a custom slot.
+  const hasKey = !!deps.hasAnyLlmConfigured?.(extensionAPI);
 
   // Check for memory and skills pages (user may have set up manually)
   let hasMemory = false;
@@ -69,117 +63,208 @@ function loadOnboardingState(extensionAPI, deps) {
 }
 
 // ---------------------------------------------------------------------------
-// Back navigation
+// Navigation
 // ---------------------------------------------------------------------------
+
+/**
+ * ctx used purely for evaluating skipIf() during navigation bookkeeping.
+ * skipIf implementations must stay pure/DOM-free, so the no-op callbacks here
+ * are never invoked.
+ */
+function navContext() {
+  return {
+    extensionAPI: activeExtensionAPI,
+    deps: activeDeps,
+    advanceStep: () => {},
+    goBack: () => {},
+    skipToEnd: () => {},
+    sessionState,
+  };
+}
+
+function isStepSkipped(step, ctx) {
+  return !!(step && typeof step.skipIf === "function" && step.skipIf(ctx));
+}
+
+/**
+ * First index >= fromIndex whose step is not skipped.
+ * Returns ONBOARDING_STEPS.length when there is none (i.e. flow is finished).
+ */
+function findNextVisibleStep(fromIndex) {
+  const ctx = navContext();
+  for (let i = Math.max(0, fromIndex); i < ONBOARDING_STEPS.length; i++) {
+    if (!isStepSkipped(ONBOARDING_STEPS[i], ctx)) return i;
+  }
+  return ONBOARDING_STEPS.length;
+}
 
 /**
  * Walk backward from the given index, skipping steps whose skipIf returns true.
  * Returns the previous visible step index, or -1 if there is none.
  */
 function findPreviousVisibleStep(fromIndex) {
-  const ctx = {
-    extensionAPI: activeExtensionAPI,
-    deps: activeDeps,
-    advanceStep: () => {},
-    skipToEnd: () => {},
-    card: onboardingCardEl,
-    contentArea: activeContentArea,
-    sessionState,
-  };
+  const ctx = navContext();
   for (let i = fromIndex - 1; i >= 0; i--) {
-    const s = ONBOARDING_STEPS[i];
-    if (typeof s.skipIf !== "function" || !s.skipIf(ctx)) {
-      return i;
-    }
+    if (!isStepSkipped(ONBOARDING_STEPS[i], ctx)) return i;
   }
   return -1;
 }
 
-function goBack() {
-  const prev = findPreviousVisibleStep(currentStepIndex);
-  if (prev >= 0) renderStep(prev);
+/** Visible position (0-based) of stepIndex and the visible step count. */
+function computeStepPosition(stepIndex) {
+  const ctx = navContext();
+  let visibleTotal = 0;
+  let visiblePosition = 0;
+  for (let i = 0; i < ONBOARDING_STEPS.length; i++) {
+    const skipped = isStepSkipped(ONBOARDING_STEPS[i], ctx);
+    if (!skipped) {
+      visibleTotal++;
+      if (i < stepIndex) visiblePosition++;
+    }
+  }
+  return { visiblePosition, visibleTotal };
 }
 
-// ---------------------------------------------------------------------------
-// Step rendering
-// ---------------------------------------------------------------------------
-
-function renderStep(stepIndex) {
-  if (!activeExtensionAPI || !activeDeps || !activeContentArea) return;
-
-  // Past the last step — finish
-  if (stepIndex >= ONBOARDING_STEPS.length) {
+/** Move forward to `index`, skipping steps whose skipIf is satisfied. */
+function goToStep(index) {
+  if (!activeExtensionAPI || !activeDeps) return;
+  const target = findNextVisibleStep(index);
+  if (target >= ONBOARDING_STEPS.length) {
+    // Past the last step — finish
     teardownOnboarding();
     return;
   }
+  currentStepIndex = target;
+  if (typeof setStepIndexRef === "function") setStepIndexRef(target);
+}
+
+/** Move back one visible step (no-op on the first visible step). */
+function goBack() {
+  if (!activeExtensionAPI || !activeDeps) return;
+  const prev = findPreviousVisibleStep(currentStepIndex);
+  if (prev < 0) return;
+  currentStepIndex = prev;
+  if (typeof setStepIndexRef === "function") setStepIndexRef(prev);
+}
+
+/** "Do this later" footer link and header close button. */
+function doThisLater() {
+  const extensionAPI = activeExtensionAPI;
+  const deps = activeDeps;
+  if (deps?.iziToast) {
+    const hasKey = !!deps.hasAnyLlmConfigured?.(extensionAPI);
+    if (hasKey) {
+      deps.iziToast.info({
+        class: "cos-toast",
+        title: "No worries",
+        message: "You can finish setting up any time via the command palette: Chief of Staff: Run Onboarding.",
+        timeout: 5000,
+        position: "bottomRight",
+      });
+    } else {
+      deps.iziToast.info({
+        class: "cos-toast",
+        title: "No worries",
+        message: "Without an AI model connected I can\u2019t do much yet. You can connect one in Settings \u2192 Chief of Staff, or re-run onboarding from the command palette.",
+        timeout: 5000,
+        position: "bottomRight",
+      });
+    }
+  }
+  teardownOnboarding();
+}
+
+// ---------------------------------------------------------------------------
+// Root component
+// ---------------------------------------------------------------------------
+
+function OnboardingApp(props) {
+  const React = window.React;
+  const { useState, useEffect, useRef } = React;
+  const [stepIndex, setStepIndex] = useState(props.initialStep || 0);
+  const cardRef = useRef(null);
+
+  // Publish the state setter + card element to the module-level controller.
+  useEffect(() => {
+    setStepIndexRef = setStepIndex;
+    onboardingCardEl = cardRef.current;
+    return () => {
+      if (setStepIndexRef === setStepIndex) setStepIndexRef = null;
+    };
+  }, []);
+
+  // Keep the module-level mirror in sync (used by goBack/skip bookkeeping).
+  useEffect(() => {
+    currentStepIndex = stepIndex;
+  }, [stepIndex]);
+
+  // Enter triggers the current view's primary action.
+  useEffect(() => {
+    const card = cardRef.current;
+    if (!card) return undefined;
+    const handler = (e) => {
+      if (e.key !== "Enter" || e.isComposing) return;
+      // Only intercept Enter inside the content area — the header close
+      // button and footer links must keep their own Enter behavior (the
+      // vanilla version got this by listening on contentArea itself; the
+      // content div remounts per step, so delegate from the card instead).
+      const content = card.querySelector(".cos-onboarding-content");
+      if (!content || !content.contains(e.target)) return;
+      const primaryBtn = content.querySelector("[data-cos-primary]");
+      if (!primaryBtn || primaryBtn.disabled) return;
+      e.preventDefault();
+      primaryBtn.click();
+    };
+    card.addEventListener("keydown", handler);
+    return () => card.removeEventListener("keydown", handler);
+  }, []);
+
+  // Auto-focus the first input shortly after each step renders.
+  useEffect(() => {
+    const id = setTimeout(() => {
+      const card = cardRef.current;
+      if (!card) return;
+      focusFirstInput(card.querySelector(".cos-onboarding-content") || card);
+    }, 380);
+    return () => clearTimeout(id);
+  }, [stepIndex]);
 
   const step = ONBOARDING_STEPS[stepIndex];
-  currentStepIndex = stepIndex;
+  if (!step) return null;
 
-  // Check skip condition
+  const StepComponent = step.Component;
+  const { visiblePosition, visibleTotal } = computeStepPosition(stepIndex);
+
   const ctx = {
     extensionAPI: activeExtensionAPI,
     deps: activeDeps,
-    advanceStep: () => renderStep(stepIndex + 1),
+    advanceStep: () => goToStep(stepIndex + 1),
     goBack: () => goBack(),
     skipToEnd: () => teardownOnboarding(),
-    card: onboardingCardEl,
-    contentArea: activeContentArea,
     sessionState,
   };
 
-  if (typeof step.skipIf === "function" && step.skipIf(ctx)) {
-    renderStep(stepIndex + 1);
-    return;
-  }
+  let title = "Chief of Staff";
+  try {
+    title = activeDeps?.getAssistantDisplayName?.(activeExtensionAPI) || title;
+  } catch { /* keep the default */ }
 
-  // Show/hide back link based on whether there's a previous visible step
-  if (activeBackLink) {
-    const hasPrev = findPreviousVisibleStep(stepIndex) >= 0;
-    activeBackLink.style.display = hasPrev ? "" : "none";
-  }
-
-  // Render step content
-  const fragment = step.render(ctx);
-
-  // Count visible (non-skipped) steps for the indicator
-  const visibleTotal = ONBOARDING_STEPS.filter((s, i) => {
-    if (typeof s.skipIf !== "function") return true;
-    // Re-check skip conditions with current ctx (step index doesn't matter for skipIf)
-    return !s.skipIf(ctx);
-  }).length;
-
-  // Calculate visible position (how many non-skipped steps before this one)
-  let visiblePosition = 0;
-  for (let i = 0; i < stepIndex; i++) {
-    const s = ONBOARDING_STEPS[i];
-    if (typeof s.skipIf !== "function" || !s.skipIf(ctx)) {
-      visiblePosition++;
-    }
-  }
-
-  transitionCardContent(activeContentArea, fragment);
-  updateStepIndicator(activeStepIndicator, visiblePosition, visibleTotal);
-
-  // After content swap: auto-focus first input and wire Enter key to primary button
-  setTimeout(() => {
-    if (!activeContentArea) return;
-    const firstInput = activeContentArea.querySelector(".cos-onboarding-input");
-    if (firstInput) firstInput.focus();
-
-    // Remove any previous Enter handler, then attach a fresh one
-    if (activeContentArea._onboardingKeyHandler) {
-      activeContentArea.removeEventListener("keydown", activeContentArea._onboardingKeyHandler);
-    }
-    const handler = (e) => {
-      if (e.key === "Enter") {
-        const primaryBtn = activeContentArea.querySelector(".cos-onboarding-btn--primary");
-        if (primaryBtn) { e.preventDefault(); primaryBtn.click(); }
-      }
-    };
-    activeContentArea._onboardingKeyHandler = handler;
-    activeContentArea.addEventListener("keydown", handler);
-  }, 380);
+  return h(
+    OnboardingCard,
+    {
+      title,
+      cardRef,
+      contentKey: step.id || String(stepIndex),
+      showBack: findPreviousVisibleStep(stepIndex) >= 0,
+      stepCurrent: visiblePosition,
+      stepTotal: visibleTotal,
+      onBack: () => goBack(),
+      // "Skip" footer link — advance one step
+      onSkip: () => goToStep(stepIndex + 1),
+      onDoLater: () => doThisLater(),
+    },
+    StepComponent ? h(StepComponent, { ctx }) : null
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -193,62 +278,28 @@ function renderStep(stepIndex) {
  */
 export function launchOnboarding(extensionAPI, deps) {
   // If already active, tear down first (re-run case)
-  if (onboardingCardEl) teardownOnboarding();
+  if (onboardingContainer || onboardingRoot) teardownOnboarding();
+
+  const win = typeof window !== "undefined" ? window : null;
+  const ReactDOM = win ? win.ReactDOM : null;
+  if (!win || !win.React || typeof ReactDOM?.createRoot !== "function") {
+    console.error("[Chief of Staff] Onboarding needs Roam's React 18 runtime (window.React / window.ReactDOM).");
+    return;
+  }
 
   activeExtensionAPI = extensionAPI;
   activeDeps = deps;
   sessionState = {};
 
   const state = loadOnboardingState(extensionAPI, deps);
-
-  const {
-    card,
-    contentArea,
-    stepIndicator,
-    backLink,
-    destroy,
-  } = createOnboardingCard({
-    title: deps.getAssistantDisplayName(extensionAPI),
-    onBack: () => goBack(),
-    onSkip: () => {
-      // "Skip" footer link — advance one step
-      renderStep(currentStepIndex + 1);
-    },
-    onDoLater: () => {
-      // "Do this later" / close button
-      const hasKey = !!(
-        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.anthropicApiKey, "") ||
-        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.openaiApiKey, "") ||
-        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.geminiApiKey, "") ||
-        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.mistralApiKey, "") ||
-        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.llmApiKey, "")
-      );
-      if (hasKey) {
-        deps.iziToast.info({
-          class: "cos-toast",
-          title: "No worries",
-          message: "You can finish setting up any time via the command palette: Chief of Staff: Run Onboarding.",
-          timeout: 5000,
-          position: "bottomRight",
-        });
-      } else {
-        deps.iziToast.info({
-          class: "cos-toast",
-          title: "No worries",
-          message: "Without an API key I can\u2019t do much yet. You can add one in Settings \u2192 Chief of Staff.",
-          timeout: 5000,
-          position: "bottomRight",
-        });
-      }
-      teardownOnboarding();
-    },
-  });
-
-  onboardingCardEl = card;
-  onboardingDestroyFn = destroy;
-  activeContentArea = contentArea;
-  activeStepIndicator = stepIndicator;
-  activeBackLink = backLink;
+  const initialStep = findNextVisibleStep(state.currentStep || 0);
+  if (initialStep >= ONBOARDING_STEPS.length) {
+    // Everything is already configured — nothing to show.
+    activeExtensionAPI = null;
+    activeDeps = null;
+    return;
+  }
+  currentStepIndex = initialStep;
 
   // Hide the Roam Depot settings overlay so onboarding inputs are accessible.
   // React-managed Blueprint portal ignores synthetic close events, so we hide
@@ -259,10 +310,13 @@ export function launchOnboarding(extensionAPI, deps) {
     sessionState._hiddenSettingsPortal = settingsPortal;
   }
 
-  document.body.appendChild(card);
+  const container = document.createElement("div");
+  container.className = "cos-onboarding-root";
+  document.body.appendChild(container);
+  onboardingContainer = container;
 
-  // Start from the resume point
-  renderStep(state.currentStep);
+  onboardingRoot = ReactDOM.createRoot(container);
+  onboardingRoot.render(h(OnboardingApp, { initialStep }));
 }
 
 /**
@@ -275,41 +329,47 @@ export function teardownOnboarding() {
     delete sessionState._hotkeyTimerId;
   }
 
-  clearTransitionTimers();
-
-  if (onboardingDestroyFn) {
-    onboardingDestroyFn();
-    onboardingDestroyFn = null;
-  }
-
-  // Grab ref before clearing sessionState
+  // Grab refs before clearing module state
   const hiddenPortal = sessionState._hiddenSettingsPortal;
+  const root = onboardingRoot;
+  const container = onboardingContainer;
+  const card =
+    onboardingCardEl ||
+    (typeof document !== "undefined" ? document.querySelector(".cos-onboarding-card") : null);
 
-  const card = onboardingCardEl || document.querySelector(".cos-onboarding-card");
-  if (card) {
-    card.classList.add("cos-onboarding-exit");
-    setTimeout(() => {
-      card.remove();
-      // Restore settings overlay after exit animation so it doesn't flash
-      if (hiddenPortal) hiddenPortal.style.display = "";
-    }, 300);
-  } else if (hiddenPortal) {
-    hiddenPortal.style.display = "";
-  }
+  if (card) card.classList.add("cos-onboarding-exit");
 
+  onboardingRoot = null;
+  onboardingContainer = null;
   onboardingCardEl = null;
   activeExtensionAPI = null;
   activeDeps = null;
-  activeContentArea = null;
-  activeStepIndicator = null;
-  activeBackLink = null;
+  setStepIndexRef = null;
   currentStepIndex = 0;
   sessionState = {};
+
+  // Unmount after the exit animation. Deferring also keeps us out of React's
+  // render/event phase when teardown is triggered from a button handler.
+  const finish = () => {
+    if (root) {
+      try { root.unmount(); } catch { /* already gone */ }
+    }
+    if (container && typeof container.remove === "function") container.remove();
+    // Restore settings overlay after exit animation so it doesn't flash
+    if (hiddenPortal) hiddenPortal.style.display = "";
+  };
+
+  if (root || container) setTimeout(finish, card ? 300 : 0);
+  else if (hiddenPortal) hiddenPortal.style.display = "";
 }
 
 /**
  * Check if onboarding is currently showing.
  */
 export function isOnboardingActive() {
-  return !!(onboardingCardEl && document.body.contains(onboardingCardEl));
+  return !!(
+    onboardingContainer &&
+    typeof document !== "undefined" &&
+    document.body.contains(onboardingContainer)
+  );
 }
