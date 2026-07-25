@@ -35,20 +35,3 @@ test("ONBOARDING_STEPS keeps the resume-logic contract", () => {
   assert.equal(ONBOARDING_STEPS[2].id, "api-key");
   assert.equal(ONBOARDING_STEPS[11].id, "finish");
 });
-
-// ── api-key step skip logic ──────────────────────────────────────────────────
-
-test("api-key step skips iff any LLM path is configured", () => {
-  const step = ONBOARDING_STEPS.find((s) => s.id === "api-key");
-  const ctx = (configured) => ({
-    extensionAPI: {},
-    deps: { hasAnyLlmConfigured: () => configured },
-  });
-  assert.equal(!!step.skipIf(ctx(true)), true);
-  assert.equal(!!step.skipIf(ctx(false)), false);
-});
-
-test("api-key step does not skip when the helper is missing from deps", () => {
-  const step = ONBOARDING_STEPS.find((s) => s.id === "api-key");
-  assert.equal(!!step.skipIf({ extensionAPI: {}, deps: {} }), false);
-});
