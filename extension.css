@@ -887,6 +887,10 @@ h6.chief-heading {
 
 /* --- Card container --- */
 .cos-onboarding-card {
+    /* Design tokens — single source for the accent + muted colors that the
+       JSX references via var(--cos-accent) / var(--cos-text-muted). */
+    --cos-accent: #5c7cfa;
+    --cos-text-muted: #94a3b8;
     position: fixed;
     left: 50%;
     bottom: 94px;
@@ -972,24 +976,8 @@ h6.chief-heading {
     }
 }
 
-@keyframes cos-onboarding-fade-out {
-    from {
-        opacity: 1;
-        transform: translateX(0);
-    }
-
-    to {
-        opacity: 0;
-        transform: translateX(-8px);
-    }
-}
-
 .cos-onboarding-content.cos-onboarding-content-enter {
     animation: cos-onboarding-fade-in 0.2s ease forwards;
-}
-
-.cos-onboarding-content.cos-onboarding-content-exit {
-    animation: cos-onboarding-fade-out 0.15s ease forwards;
 }
 
 /* --- Footer --- */
@@ -1012,6 +1000,11 @@ h6.chief-heading {
 }
 
 .cos-onboarding-footer-link {
+    /* Rendered as <button> for a11y — reset the button chrome. */
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
     color: rgba(148, 163, 184, 0.85);
     text-decoration: none;
     cursor: pointer;
@@ -1063,55 +1056,37 @@ h6.chief-heading {
     font-size: 13px;
 }
 
-.cos-onboarding-input {
-    width: 100%;
-    padding: 8px 10px;
-    background: rgba(30, 41, 59, 0.8);
-    border: 1px solid rgba(148, 163, 184, 0.3);
-    border-radius: 6px;
-    color: #e2e8f0;
+/* Inputs, selects, and buttons are Blueprint components (bp3-*) — Roam ships
+   the styling; only layout containers are ours. */
+
+/* Inline label + control row (e.g. the "Provider:" select). */
+.cos-onboarding-field--inline {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 8px 0;
+}
+
+.cos-onboarding-field--inline .cos-onboarding-label {
+    margin: 0;
     font-size: 13px;
-    font-family: inherit;
-    outline: none;
-    box-sizing: border-box;
+    font-weight: 600;
 }
 
-.cos-onboarding-input:focus {
-    border-color: rgba(92, 124, 250, 0.6);
-    box-shadow: 0 0 0 2px rgba(92, 124, 250, 0.15);
-}
-
-.cos-onboarding-input::placeholder {
-    color: rgba(148, 163, 184, 0.5);
-}
-
-.cos-onboarding-select {
-    padding: 6px 10px;
-    background: rgba(30, 41, 59, 0.8);
-    border: 1px solid rgba(148, 163, 184, 0.3);
-    border-radius: 6px;
-    color: #e2e8f0;
+/* Provider auto-detection feedback line (api-key step). */
+.cos-onboarding-detected-provider {
     font-size: 13px;
-    font-family: inherit;
-    outline: none;
-    cursor: pointer;
-    -webkit-appearance: none;
-    -moz-appearance: none;
-    appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M3 5l3 3 3-3'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 8px center;
-    padding-right: 28px;
+    margin: 4px 0 8px;
+    min-height: 20px;
 }
 
-.cos-onboarding-select:focus {
-    border-color: rgba(92, 124, 250, 0.6);
-    box-shadow: 0 0 0 2px rgba(92, 124, 250, 0.15);
+/* Color utilities backed by the card's design tokens. */
+.cos-onboarding-accent {
+    color: var(--cos-accent);
 }
 
-.cos-onboarding-select option {
-    background: #1e293b;
-    color: #e2e8f0;
+.cos-onboarding-muted {
+    color: var(--cos-text-muted);
 }
 
 /* --- Buttons --- */
@@ -1120,40 +1095,6 @@ h6.chief-heading {
     gap: 8px;
     margin-top: 14px;
     flex-wrap: wrap;
-}
-
-.cos-onboarding-btn {
-    padding: 8px 16px;
-    border-radius: 6px;
-    font-size: 13px;
-    font-family: inherit;
-    cursor: pointer;
-    border: none;
-    transition: background 0.15s ease, color 0.15s ease;
-}
-
-.cos-onboarding-btn--primary {
-    background: #5c7cfa;
-    color: #fff;
-}
-
-.cos-onboarding-btn--primary:hover {
-    background: #4c6ef5;
-}
-
-.cos-onboarding-btn--secondary {
-    background: rgba(148, 163, 184, 0.15);
-    color: #94a3b8;
-}
-
-.cos-onboarding-btn--secondary:hover {
-    background: rgba(148, 163, 184, 0.25);
-    color: #cbd5e1;
-}
-
-.cos-onboarding-btn:disabled {
-    opacity: 0.6;
-    cursor: default;
 }
 
 /* --- Option cards (connect-an-AI-model chooser) --- */
@@ -1180,7 +1121,7 @@ h6.chief-heading {
 }
 
 .cos-onboarding-option:hover {
-    border-color: rgba(92, 124, 250, 0.6);
+    border-color: color-mix(in srgb, var(--cos-accent) 60%, transparent);
     background: rgba(30, 41, 59, 1);
 }
 
@@ -1234,6 +1175,16 @@ h6.chief-heading {
 
 .cos-onboarding-content .cos-onboarding-hint.bp3-callout small {
     font-size: 11px;
+}
+
+/* Respect the user's motion preference for the card + content animations. */
+@media (prefers-reduced-motion: reduce) {
+    .cos-onboarding-card,
+    .cos-onboarding-content,
+    .cos-onboarding-option {
+        animation: none !important;
+        transition: none !important;
+    }
 }
 
 /* Button row — bp3 buttons default to 14px; the card runs at 13px */

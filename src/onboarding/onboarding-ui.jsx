@@ -32,10 +32,19 @@ function getReact() {
   return React;
 }
 
-/** Blueprint 3 core namespace, or `{}` when unavailable (fallbacks kick in). */
+/**
+ * Blueprint 3 core namespace (`window.Blueprint.Core`). Roam guarantees it
+ * alongside React (see roamdocs.fyi "Available Libraries"), so a readable
+ * throw beats silently rendering unstyled fallbacks.
+ */
 function getBlueprint() {
-  if (typeof window === "undefined") return {};
-  return (window.Blueprint && window.Blueprint.Core) || {};
+  const bp = typeof window !== "undefined" && window.Blueprint ? window.Blueprint.Core : null;
+  if (!bp) {
+    throw new Error(
+      "[Chief of Staff] window.Blueprint.Core is unavailable — the onboarding UI needs Roam's Blueprint runtime."
+    );
+  }
+  return bp;
 }
 
 /**
@@ -61,6 +70,11 @@ export function frag(...children) {
  */
 export function Frag(props) {
   return h(getReact().Fragment, null, props.children);
+}
+
+/** Join class names, skipping falsy parts — zero-dep stand-in for clsx. */
+export function cx(...parts) {
+  return parts.filter(Boolean).join(" ");
 }
 
 // ---------------------------------------------------------------------------
@@ -115,7 +129,7 @@ export function useAutoFocus(deps = [], delay = 50) {
  */
 export function InfoText(props) {
   const { html, className, style, children } = props || {};
-  const cls = "cos-onboarding-text" + (className ? " " + className : "");
+  const cls = cx("cos-onboarding-text", className);
   if (typeof html === "string") {
     return <div className={cls} style={style} dangerouslySetInnerHTML={{ __html: html }} />;
   }
@@ -133,8 +147,7 @@ export function Hint(props) {
   const body = typeof html === "string"
     ? <span dangerouslySetInnerHTML={{ __html: html }} />
     : children;
-  const cls = "cos-onboarding-text cos-onboarding-hint" + (className ? " " + className : "");
-  if (!Callout) return <div className={cls} style={style}>{body}</div>;
+  const cls = cx("cos-onboarding-text", "cos-onboarding-hint", className);
   return (
     <Callout className={cls} style={style} intent={intent} icon={icon} title={title}>
       {body}
@@ -226,25 +239,16 @@ export function Field(props) {
     ? { value: value == null ? "" : value, onChange }
     : { defaultValue: defaultValue != null ? defaultValue : value == null ? "" : value };
 
-  const input = InputGroup
-    ? (
-        <InputGroup
-          {...shared}
-          {...valueProps}
-          className={"cos-onboarding-input-group" + (className ? " " + className : "")}
-          fill={fill}
-          inputRef={setRef}
-          rightElement={rightElement}
-        />
-      )
-    : (
-        <input
-          {...shared}
-          {...valueProps}
-          className={"cos-onboarding-input" + (className ? " " + className : "")}
-          ref={setRef}
-        />
-      );
+  const input = (
+    <InputGroup
+      {...shared}
+      {...valueProps}
+      className={cx("cos-onboarding-input-group", className)}
+      fill={fill}
+      inputRef={setRef}
+      rightElement={rightElement}
+    />
+  );
 
   return (
     <div className="cos-onboarding-field" style={style}>
@@ -264,39 +268,21 @@ export function Select(props) {
   const { HTMLSelect } = getBlueprint();
   const normalized = options.map((o) => (typeof o === "string" ? { value: o, label: o } : o));
 
-  const select = HTMLSelect
-    ? (
-        <HTMLSelect
-          options={normalized}
-          value={value}
-          onChange={onChange}
-          disabled={disabled}
-          fill={fill}
-          className={"cos-onboarding-select-wrap" + (className ? " " + className : "")}
-        />
-      )
-    : (
-        <select
-          className={"cos-onboarding-select" + (className ? " " + className : "")}
-          value={value}
-          onChange={onChange}
-          disabled={disabled}
-        >
-          {normalized.map((o) => (
-            <option key={String(o.value)} value={o.value}>{o.label}</option>
-          ))}
-        </select>
-      );
+  const select = (
+    <HTMLSelect
+      options={normalized}
+      value={value}
+      onChange={onChange}
+      disabled={disabled}
+      fill={fill}
+      className={cx("cos-onboarding-select-wrap", className)}
+    />
+  );
 
   if (!label) return select;
   return (
-    <div
-      className="cos-onboarding-field cos-onboarding-field--inline"
-      style={{ display: "flex", alignItems: "center", gap: "6px", margin: "8px 0", ...(style || {}) }}
-    >
-      <label className="cos-onboarding-label" style={{ margin: 0, fontSize: "13px", fontWeight: 600 }}>
-        {label}
-      </label>
+    <div className="cos-onboarding-field cos-onboarding-field--inline" style={style}>
+      <label className="cos-onboarding-label">{label}</label>
       {select}
     </div>
   );
@@ -326,29 +312,15 @@ export function Buttons(props) {
           title: b.title,
           "data-cos-primary": b.primary ? "true" : undefined,
         };
-        return Button
-          ? (
-              <Button
-                {...common}
-                className={b.className}
-                intent={b.primary ? "primary" : undefined}
-                loading={!!b.loading}
-                text={b.label}
-              />
-            )
-          : (
-              <button
-                {...common}
-                type="button"
-                className={
-                  "cos-onboarding-btn " +
-                  (b.primary ? "cos-onboarding-btn--primary" : "cos-onboarding-btn--secondary") +
-                  (b.className ? " " + b.className : "")
-                }
-              >
-                {b.label}
-              </button>
-            );
+        return (
+          <Button
+            {...common}
+            className={b.className}
+            intent={b.primary ? "primary" : undefined}
+            loading={!!b.loading}
+            text={b.label}
+          />
+        );
       })}
     </div>
   );
@@ -439,7 +411,6 @@ export function OnboardingCard(props) {
   const innerRef = useRef(null);
   const dragRef = useRef(null);
   const [visible, setVisible] = useState(false);
-  const [entering, setEntering] = useState(true);
 
   const attachCard = useCallback(
     (el) => {
@@ -460,14 +431,6 @@ export function OnboardingCard(props) {
       else clearTimeout(id);
     };
   }, []);
-
-  // Step-change animation (enter-only; the content div is keyed so the CSS
-  // animation restarts on every swap).
-  useEffect(() => {
-    setEntering(true);
-    const id = setTimeout(() => setEntering(false), 300);
-    return () => clearTimeout(id);
-  }, [contentKey]);
 
   // Dragging — same mousedown/mousemove/mouseup logic as the vanilla card.
   useEffect(() => {
@@ -510,18 +473,16 @@ export function OnboardingCard(props) {
     e.preventDefault();
   };
 
-  const footerLink = (label, onClick, extraClass, style) => (
-    <a
-      className={"cos-onboarding-footer-link" + (extraClass ? " " + extraClass : "")}
-      href="#"
-      style={style}
-      onClick={(e) => {
-        e.preventDefault();
-        if (typeof onClick === "function") onClick();
-      }}
+  // <button>, not <a href="#">: these are actions, not navigation — correct
+  // semantics for keyboard/screen-reader users (CSS resets the chrome).
+  const footerLink = (label, onClick, extraClass) => (
+    <button
+      type="button"
+      className={cx("cos-onboarding-footer-link", extraClass)}
+      onClick={onClick}
     >
       {label}
-    </a>
+    </button>
   );
 
   return (
@@ -529,7 +490,7 @@ export function OnboardingCard(props) {
       // bp3-dark keeps Blueprint controls legible on the dark card whatever
       // Roam's active theme is.
       className={
-        "cos-onboarding-card bp3-dark " + (visible ? "cos-onboarding-visible" : "cos-onboarding-enter")
+        cx("cos-onboarding-card", "bp3-dark", visible ? "cos-onboarding-visible" : "cos-onboarding-enter")
       }
       ref={attachCard}
     >
@@ -546,19 +507,15 @@ export function OnboardingCard(props) {
           {"\u00d7"}
         </button>
       </div>
-      <div
-        key={contentKey}
-        className={"cos-onboarding-content" + (entering ? " cos-onboarding-content-enter" : "")}
-      >
+      {/* Keyed by step: a new key mounts a fresh node, and a freshly inserted
+          element runs the enter animation (fill-mode: forwards) exactly once —
+          no state or effect needed to restart it. */}
+      <div key={contentKey} className="cos-onboarding-content cos-onboarding-content-enter">
         {children}
       </div>
       <div className="cos-onboarding-footer">
         <span className="cos-onboarding-step-indicator">{`${stepCurrent + 1} of ${stepTotal}`}</span>
-        {onBack
-          ? footerLink("\u2190 Back", onBack, "cos-onboarding-back-link", {
-              display: showBack ? "" : "none",
-            })
-          : null}
+        {onBack && showBack ? footerLink("\u2190 Back", onBack, "cos-onboarding-back-link") : null}
         <span className="cos-onboarding-footer-links">
           {onDoLater ? footerLink("Do this later", onDoLater) : null}
           {onSkip ? footerLink("Skip", onSkip) : null}

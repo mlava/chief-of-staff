@@ -312,14 +312,14 @@ const ONBOARDING_STEPS = [
         let feedback = null;
         if (probe.detected) {
           feedback = (
-            <span style={{ color: "var(--cos-accent, #4a9eff)" }}>
+            <span className="cos-onboarding-accent">
               {"\u2713 Detected: "}
               <strong>{providerLabelsMap[probe.detected]}</strong>
             </span>
           );
         } else if (probe.val) {
           feedback = (
-            <span style={{ color: "var(--cos-text-muted, #888)" }}>
+            <span className="cos-onboarding-muted">
               {"Select your provider below"}
             </span>
           );
@@ -391,12 +391,7 @@ const ONBOARDING_STEPS = [
                   onChange={(e) => setProvider(e.currentTarget.value)}
                 />
               : null}
-            <div
-              className="cos-onboarding-detected-provider"
-              style={{ fontSize: "13px", margin: "4px 0 8px", minHeight: "20px" }}
-            >
-              {feedback}
-            </div>
+            <div className="cos-onboarding-detected-provider">{feedback}</div>
             <Hint
               html={"<small>Your key is stored locally in Roam and is only sent directly to your AI provider. It never passes through any other server.</small>"}
             />
@@ -1127,7 +1122,7 @@ const ONBOARDING_STEPS = [
         body = (
           <>
             <InfoText
-              html={`<span style="color:var(--cos-accent,#4a9eff)">\u2713 Already connected to ${connectedCount} server${connectedCount > 1 ? "s" : ""}: <strong>${serverNames.join(", ")}</strong></span>`}
+              html={`<span class="cos-onboarding-accent">\u2713 Already connected to ${connectedCount} server${connectedCount > 1 ? "s" : ""}: <strong>${serverNames.join(", ")}</strong></span>`}
             />
             <Buttons
               buttons={[
