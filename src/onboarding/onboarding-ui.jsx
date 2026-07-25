@@ -112,6 +112,11 @@ export function useAutoFocus(deps = [], delay = 50) {
   }, deps);
 }
 
+/** Standard onboarding toast: bottom-right, cos-toast class. kind: success|info|error. */
+export function showToast(deps, kind, title, message, timeout = 4000) {
+  deps.iziToast[kind]({ class: "cos-toast", title, message, timeout, position: "bottomRight" });
+}
+
 /** Ref that flips to false on unmount — guards async callbacks and timers. */
 export function useAlive() {
   const { useRef, useEffect } = getReact();
