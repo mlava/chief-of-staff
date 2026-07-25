@@ -41,6 +41,7 @@ import {
   SummaryItem,
   useInlineError,
   useAutoFocus,
+  useAlive,
 } from "./onboarding-ui.jsx";
 
 // ---------------------------------------------------------------------------
@@ -209,7 +210,7 @@ const ONBOARDING_STEPS = [
       return !!ctx.deps.hasAnyLlmConfigured?.(ctx.extensionAPI);
     },
     Component: function ApiKeyStep({ ctx }) {
-      const { useState, useRef, useEffect } = window.React;
+      const { useState, useRef } = window.React;
       const { extensionAPI, deps, advanceStep } = ctx;
       const { setError, clearError, errorNode } = useInlineError();
 
@@ -219,9 +220,6 @@ const ONBOARDING_STEPS = [
       // --- api-key view state -------------------------------------------------
       const [apiKey, setApiKey] = useState("");
       const [provider, setProvider] = useState("mistral");
-      // Debounced prefix detection: {val, detected} recomputed 150ms after
-      // the last keystroke.
-      const [probe, setProbe] = useState({ val: "", detected: null });
 
       // --- codex view state ---------------------------------------------------
       const [waiting, setWaiting] = useState(false);
@@ -237,20 +235,11 @@ const ONBOARDING_STEPS = [
       const modelRef = useRef(null);
 
       // Unmount guard for the pending connectCodex() promise.
-      const alive = useRef(true);
-      useEffect(() => () => { alive.current = false; }, []);
+      const alive = useAlive();
 
       // The controller's auto-focus only fires on step render, so focus the
       // first input ourselves after a sub-view swap.
       useAutoFocus([view], 50);
-
-      useEffect(() => {
-        const id = setTimeout(() => {
-          const val = apiKey.trim();
-          setProbe({ val, detected: detectProvider(val) });
-        }, 150);
-        return () => clearTimeout(id);
-      }, [apiKey]);
 
       /** Swap sub-view, resetting all per-view state. */
       const showView = (name) => {
@@ -259,7 +248,6 @@ const ONBOARDING_STEPS = [
         clearError();
         setApiKey("");
         setProvider("mistral");
-        setProbe({ val: "", detected: null });
         setView(name);
       };
 
@@ -306,6 +294,9 @@ const ONBOARDING_STEPS = [
         };
 
         // Manual selector only for keys that can't be auto-detected.
+        // Derived during render — no state/effect needed for four prefix checks.
+        const probeVal = apiKey.trim();
+        const probe = { val: probeVal, detected: detectProvider(probeVal) };
         const showManualSelect = !probe.detected && !!probe.val;
 
         let feedback = null;
@@ -599,17 +590,15 @@ const ONBOARDING_STEPS = [
     id: "memory-pages",
     skipIf: null,
     Component: function MemoryPagesStep({ ctx }) {
-      const { useState, useRef, useEffect } = window.React;
+      const { useState } = window.React;
       const { deps, advanceStep, sessionState } = ctx;
 
       // Unmount guard for the pending runBootstrapMemoryPages() promise: the
       // user can close the card or navigate while it is still in flight, and a
       // dead step must never advance or set state.
-      const alive = useRef(true);
-      useEffect(() => () => { alive.current = false; }, []);
+      const alive = useAlive();
 
-      // Vanilla had no busy state (the button stayed live during the await, so
-      // a double-click bootstrapped twice). React gives us the guard for free.
+      // Busy guard: a double-click must not bootstrap twice.
       const [busy, setBusy] = useState(false);
 
       const pages = [
@@ -1091,12 +1080,11 @@ const ONBOARDING_STEPS = [
     id: "local-mcp",
     skipIf: null,
     Component: function LocalMcpStep({ ctx }) {
-      const { useState, useRef, useEffect } = window.React;
+      const { useState, useRef } = window.React;
       const { extensionAPI, deps, advanceStep } = ctx;
       const { setError, clearError, errorNode } = useInlineError();
 
-      const alive = useRef(true);
-      useEffect(() => () => { alive.current = false; }, []);
+      const alive = useAlive();
       const busy = useRef(false);
 
       // Snapshot the connection state once: a failed connect attempt must not

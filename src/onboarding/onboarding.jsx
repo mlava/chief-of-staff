@@ -195,11 +195,6 @@ function OnboardingApp(props) {
     };
   }, []);
 
-  // Keep the module-level mirror in sync (used by goBack/skip bookkeeping).
-  useEffect(() => {
-    currentStepIndex = stepIndex;
-  }, [stepIndex]);
-
   // Enter triggers the current view's primary action.
   useEffect(() => {
     const card = cardRef.current;

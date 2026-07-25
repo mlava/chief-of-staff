@@ -1,8 +1,8 @@
 {
-  // Not used for type-checking — this configures the JSX transform for the
-  // `tsx` test loader (node --import tsx), mirroring the esbuild-loader
-  // options in webpack.config.js: JSX compiles to h()/Frag from
-  // src/onboarding/onboarding-ui.jsx.
+  // Editor tooling only (IntelliSense for .jsx files). The authoritative JSX
+  // factory config is the /** @jsx h */ + /** @jsxFrag Frag */ pragmas at the
+  // top of each .jsx file — both esbuild-loader (build) and tsx (tests) honor
+  // those; tsx does NOT reliably pick up this file's jsxFactory settings.
   "compilerOptions": {
     "jsx": "react",
     "jsxFactory": "h",

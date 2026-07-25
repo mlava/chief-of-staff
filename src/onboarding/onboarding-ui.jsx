@@ -57,11 +57,6 @@ export function h(type, props, ...children) {
   return getReact().createElement(type, props, ...children);
 }
 
-/** `<>…</>` without JSX — returns a Fragment wrapping `children`. */
-export function frag(...children) {
-  return h(getReact().Fragment, null, ...children);
-}
-
 /**
  * Fragment component for the JSX transform: `<>…</>` compiles to
  * `h(Frag, null, …)` (see jsxFragment/jsxFragmentFactory in
@@ -114,8 +109,18 @@ export function useAutoFocus(deps = [], delay = 50) {
   useEffect(() => {
     const id = setTimeout(() => focusFirstInput(null), delay);
     return () => clearTimeout(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
+}
+
+/** Ref that flips to false on unmount — guards async callbacks and timers. */
+export function useAlive() {
+  const { useRef, useEffect } = getReact();
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  return alive;
 }
 
 // ---------------------------------------------------------------------------
@@ -402,7 +407,7 @@ export function SummaryItem(props) {
  */
 export function OnboardingCard(props) {
   const React = getReact();
-  const { useState, useEffect, useRef, useCallback } = React;
+  const { useEffect, useRef, useCallback } = React;
   const {
     title = "Chief of Staff",
     cardRef,
@@ -418,7 +423,6 @@ export function OnboardingCard(props) {
 
   const innerRef = useRef(null);
   const dragRef = useRef(null);
-  const [visible, setVisible] = useState(false);
 
   const attachCard = useCallback(
     (el) => {
@@ -427,18 +431,6 @@ export function OnboardingCard(props) {
     },
     [cardRef]
   );
-
-  // Entrance animation: .cos-onboarding-enter → .cos-onboarding-visible
-  useEffect(() => {
-    const hasRaf = typeof window.requestAnimationFrame === "function";
-    const id = hasRaf
-      ? window.requestAnimationFrame(() => setVisible(true))
-      : setTimeout(() => setVisible(true), 16);
-    return () => {
-      if (hasRaf) window.cancelAnimationFrame(id);
-      else clearTimeout(id);
-    };
-  }, []);
 
   // Dragging: move/up listeners live on document so drags survive leaving the card.
   useEffect(() => {
@@ -496,10 +488,8 @@ export function OnboardingCard(props) {
   return (
     <div
       // bp3-dark keeps Blueprint controls legible on the dark card whatever
-      // Roam's active theme is.
-      className={
-        cx("cos-onboarding-card", "bp3-dark", visible ? "cos-onboarding-visible" : "cos-onboarding-enter")
-      }
+      // Roam's active theme is. Entrance is a pure CSS mount animation.
+      className="cos-onboarding-card bp3-dark"
       ref={attachCard}
     >
       <div className="cos-onboarding-header" onMouseDown={onHeaderMouseDown}>
