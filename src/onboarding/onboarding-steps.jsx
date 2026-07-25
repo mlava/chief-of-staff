@@ -85,6 +85,318 @@ function openCommandPalette() {
 }
 
 // ---------------------------------------------------------------------------
+// Step 2 sub-views — module-level components. Never define components inside
+// a component (a nested definition is a new type every render, remounting the
+// subtree); and because these are separate components, leaving a view
+// unmounts it, so its state resets without manual bookkeeping.
+// ---------------------------------------------------------------------------
+
+const LLM_SETUP_OPTIONS = [
+  {
+    view: "apikey",
+    title: "API key",
+    description:
+      "Anthropic Claude, OpenAI GPT, Google Gemini, Mistral, or Groq — pay-as-you-go, most capable.",
+  },
+  {
+    view: "codex",
+    title: "ChatGPT subscription",
+    description:
+      "Use your ChatGPT Plus/Pro plan with a one-time sign-in code — no API key. (Experimental)",
+  },
+  {
+    view: "custom",
+    title: "Local or custom provider",
+    description:
+      "LM Studio, Ollama, OpenRouter, vLLM — any OpenAI-compatible endpoint.",
+  },
+];
+
+const PROVIDER_LABELS = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  gemini: "Gemini",
+  mistral: "Mistral",
+  groq: "Groq",
+};
+
+const PROVIDER_DETECT_LABELS = {
+  anthropic: "Anthropic (Claude)",
+  openai: "OpenAI (GPT)",
+  gemini: "Google (Gemini)",
+  groq: "Groq (Llama)",
+};
+
+function LlmChooserView({ onPick }) {
+  return (
+    <div>
+      <InfoText
+        html={"In order for me to think and work, I need access to an AI model. There are three ways to connect one — pick whichever suits you:"}
+      />
+      <OptionCards
+        options={LLM_SETUP_OPTIONS.map((o) => ({
+          title: o.title,
+          description: o.description,
+          onClick: () => onPick(o.view),
+        }))}
+      />
+    </div>
+  );
+}
+
+function LlmApiKeyView({ ctx, onBack }) {
+  const { useState } = window.React;
+  const { extensionAPI, deps, advanceStep } = ctx;
+  const { setError, clearError, errorNode } = useInlineError();
+  const [apiKey, setApiKey] = useState("");
+  const [provider, setProvider] = useState("mistral");
+
+  // Manual selector only for keys that can't be auto-detected.
+  // Derived during render — no state/effect needed for four prefix checks.
+  const probeVal = apiKey.trim();
+  const detected = detectProvider(probeVal);
+  const showManualSelect = !detected && !!probeVal;
+
+  let feedback = null;
+  if (detected) {
+    feedback = (
+      <span className="cos-onboarding-accent">
+        {"✓ Detected: "}
+        <strong>{PROVIDER_DETECT_LABELS[detected]}</strong>
+      </span>
+    );
+  } else if (probeVal) {
+    feedback = (
+      <span className="cos-onboarding-muted">{"Select your provider below"}</span>
+    );
+  }
+
+  const onSaveKey = () => {
+    const key = apiKey.trim();
+    if (!key) {
+      setError("Please paste an API key.");
+      return;
+    }
+    const chosen = detectProvider(key) || provider;
+    if (!chosen) {
+      setError("Please select a provider for this key.");
+      return;
+    }
+    clearError();
+    // Write to provider-specific key field
+    const keySettingMap = {
+      openai: deps.SETTINGS_KEYS.openaiApiKey,
+      anthropic: deps.SETTINGS_KEYS.anthropicApiKey,
+      gemini: deps.SETTINGS_KEYS.geminiApiKey,
+      mistral: deps.SETTINGS_KEYS.mistralApiKey,
+      groq: deps.SETTINGS_KEYS.groqApiKey,
+    };
+    extensionAPI.settings.set(keySettingMap[chosen], key);
+    extensionAPI.settings.set(deps.SETTINGS_KEYS.llmProvider, chosen);
+    deps.iziToast.success({
+      class: "cos-toast",
+      title: `${PROVIDER_LABELS[chosen]} key saved`,
+      message: "I’m ready to think.",
+      timeout: 4000,
+      position: "bottomRight",
+    });
+    advanceStep();
+  };
+
+  return (
+    <div>
+      <InfoText
+        html={"I support Anthropic Claude, OpenAI GPT, Google Gemini, Mistral, and Groq — paste a key from any of them and I’ll recognise which provider it belongs to. For Mistral keys (which have no distinctive prefix), choose your provider from the dropdown."}
+      />
+      <Field
+        placeholder="sk-... / AIza... / gsk_..."
+        type="password"
+        value={apiKey}
+        onChange={(e) => setApiKey(e.target.value)}
+      />
+      {showManualSelect
+        ? <Select
+            label="Provider:"
+            options={
+              ["mistral", "anthropic", "openai", "gemini", "groq"].map((opt) => ({
+                value: opt,
+                label: opt.charAt(0).toUpperCase() + opt.slice(1),
+              }))
+            }
+            value={provider}
+            onChange={(e) => setProvider(e.currentTarget.value)}
+          />
+        : null}
+      <div className="cos-onboarding-detected-provider">{feedback}</div>
+      <Hint
+        html={"<small>Your key is stored locally in Roam and is only sent directly to your AI provider. It never passes through any other server.</small>"}
+      />
+      {errorNode}
+      <Buttons
+        buttons={[
+          { label: "Save key →", primary: true, onClick: onSaveKey },
+          { label: "← All options", onClick: onBack },
+        ]}
+      />
+    </div>
+  );
+}
+
+function LlmCodexView({ ctx, onBack }) {
+  const { useState, useRef } = window.React;
+  const { deps, advanceStep } = ctx;
+  const { setError, clearError, errorNode } = useInlineError();
+  const [waiting, setWaiting] = useState(false);
+  // Monotonic token: an explicit cancel bumps it, so a cancelled attempt's
+  // late-resolving promise can never be mistaken for the current attempt.
+  // (Leaving the view unmounts this component — `alive` guards that path.)
+  const connectAttempt = useRef(0);
+  // Unmount guard for the pending connectCodex() promise.
+  const alive = useAlive();
+
+  const onConnect = async () => {
+    if (waiting) return;
+    const myAttempt = ++connectAttempt.current;
+    setWaiting(true);
+    clearError();
+    const result = await deps.connectCodex();
+    // Stale-guard: the user may have cancelled or navigated away while the
+    // flow was pending.
+    if (connectAttempt.current !== myAttempt || !alive.current) return;
+    setWaiting(false);
+    if (result?.connected) {
+      // llm-provider was already set by the connect flow
+      advanceStep();
+      return;
+    }
+    setError(
+      String(
+        result?.error?.message ||
+          result?.error ||
+          "Connection didn’t complete — try again."
+      )
+    );
+  };
+
+  const onSecondary = () => {
+    if (waiting) {
+      // Cancel a pending connect: stop polling + hide the code toast.
+      // The pending connectCodex promise never settles after this, which
+      // is why the connect handler guards on the attempt token instead
+      // of relying on the await.
+      connectAttempt.current++;
+      deps.cancelCodexConnect?.();
+      setWaiting(false);
+      clearError();
+      return;
+    }
+    onBack();
+  };
+
+  return (
+    <div>
+      <InfoText
+        html={"Sign in with your ChatGPT Plus/Pro account — no API key needed. I’ll show you a one-time code; enter it on OpenAI’s sign-in page and we’re connected. <strong>(Experimental)</strong>"}
+      />
+      <Hint
+        html={"<small>Heads-up: these calls route through Roam’s shared proxy, which caps long generations at ~60 seconds. Everyday queries are fine; for heavy skill runs an API key works better.</small>"}
+      />
+      {errorNode}
+      <Buttons
+        buttons={[
+          {
+            label: waiting ? "Waiting for sign-in…" : "Connect ChatGPT →",
+            primary: true,
+            disabled: waiting,
+            onClick: onConnect,
+          },
+          {
+            label: waiting ? "Cancel" : "← All options",
+            onClick: onSecondary,
+          },
+        ]}
+      />
+    </div>
+  );
+}
+
+function LlmCustomProviderView({ ctx, onBack }) {
+  const { useRef } = window.React;
+  const { extensionAPI, deps, advanceStep } = ctx;
+  const { setError, clearError, errorNode } = useInlineError();
+  const nameRef = useRef(null);
+  const urlRef = useRef(null);
+  const apiKeyFieldRef = useRef(null);
+  const modelRef = useRef(null);
+
+  const readField = (ref) => (ref.current ? ref.current.value : "");
+
+  const onSaveProvider = () => {
+    clearError();
+    let result;
+    try {
+      result = deps.saveCustomProviderSlot(extensionAPI, {
+        name: readField(nameRef),
+        baseUrl: readField(urlRef),
+        apiKey: readField(apiKeyFieldRef),
+        miniModel: readField(modelRef),
+      });
+    } catch (err) {
+      setError(String(err?.message || err));
+      return;
+    }
+    deps.iziToast.success({
+      class: "cos-toast",
+      title: `${deps.escapeHtml(result.name)} configured`,
+      message:
+        "It’s now my primary model. Run “Check LLM Model Availability” from settings any time to verify it responds.",
+      timeout: 5000,
+      position: "bottomRight",
+    });
+    advanceStep();
+  };
+
+  return (
+    <div>
+      <InfoText
+        html={"Point me at any OpenAI-compatible endpoint — LM Studio, Ollama, OpenRouter, vLLM, or your own server."}
+      />
+      <Field
+        label="Name (optional)"
+        placeholder="LM Studio / Ollama / OpenRouter"
+        inputRef={nameRef}
+      />
+      <Field
+        label="Base URL"
+        placeholder="http://localhost:1234/v1"
+        inputRef={urlRef}
+      />
+      <Field
+        label="API key (optional)"
+        placeholder="Leave blank for LM Studio / Ollama"
+        type="password"
+        inputRef={apiKeyFieldRef}
+      />
+      <Field
+        label="Model"
+        placeholder="e.g. llama-3.1-8b-instruct"
+        inputRef={modelRef}
+      />
+      <Hint
+        html={"<small>Base URL usually ends in /v1 — LM Studio: http://localhost:1234/v1, Ollama: http://localhost:11434/v1, OpenRouter: https://openrouter.ai/api/v1. Power/failover models and advanced options live in Settings → Chief of Staff.</small>"}
+      />
+      {errorNode}
+      <Buttons
+        buttons={[
+          { label: "Save provider →", primary: true, onClick: onSaveProvider },
+          { label: "← All options", onClick: onBack },
+        ]}
+      />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Steps
 // ---------------------------------------------------------------------------
 
@@ -210,324 +522,18 @@ const ONBOARDING_STEPS = [
       return !!ctx.deps.hasAnyLlmConfigured?.(ctx.extensionAPI);
     },
     Component: function ApiKeyStep({ ctx }) {
-      const { useState, useRef } = window.React;
-      const { extensionAPI, deps, advanceStep } = ctx;
-      const { setError, clearError, errorNode } = useInlineError();
-
-      // Sub-view switcher: chooser \u2192 apikey | codex | custom.
+      const { useState } = window.React;
+      // Sub-view switcher: chooser → apikey | codex | custom. Each view is
+      // its own component, so leaving it resets its state via unmount.
       const [view, setView] = useState("chooser");
-
-      // --- api-key view state -------------------------------------------------
-      const [apiKey, setApiKey] = useState("");
-      const [provider, setProvider] = useState("mistral");
-
-      // --- codex view state ---------------------------------------------------
-      const [waiting, setWaiting] = useState(false);
-      // Monotonic token: each connect attempt captures its own value, and any
-      // cancel/sub-view swap bumps it, so a cancelled attempt's late-resolving
-      // promise can never be mistaken for the current attempt.
-      const connectAttempt = useRef(0);
-
-      // --- custom-provider view refs ------------------------------------------
-      const nameRef = useRef(null);
-      const urlRef = useRef(null);
-      const apiKeyFieldRef = useRef(null);
-      const modelRef = useRef(null);
-
-      // Unmount guard for the pending connectCodex() promise.
-      const alive = useAlive();
-
       // The controller's auto-focus only fires on step render, so focus the
       // first input ourselves after a sub-view swap.
       useAutoFocus([view], 50);
-
-      /** Swap sub-view, resetting all per-view state. */
-      const showView = (name) => {
-        connectAttempt.current++;
-        setWaiting(false);
-        clearError();
-        setApiKey("");
-        setProvider("mistral");
-        setView(name);
-      };
-
-      // ---- chooser ----------------------------------------------------------
-      if (view === "chooser") {
-        return (
-          <div>
-            <InfoText
-              html={"In order for me to think and work, I need access to an AI model. There are three ways to connect one \u2014 pick whichever suits you:"}
-            />
-            <OptionCards
-              options={[
-                {
-                  title: "API key",
-                  description:
-                    "Anthropic Claude, OpenAI GPT, Google Gemini, Mistral, or Groq \u2014 pay-as-you-go, most capable.",
-                  onClick: () => showView("apikey"),
-                },
-                {
-                  title: "ChatGPT subscription",
-                  description:
-                    "Use your ChatGPT Plus/Pro plan with a one-time sign-in code \u2014 no API key. (Experimental)",
-                  onClick: () => showView("codex"),
-                },
-                {
-                  title: "Local or custom provider",
-                  description:
-                    "LM Studio, Ollama, OpenRouter, vLLM \u2014 any OpenAI-compatible endpoint.",
-                  onClick: () => showView("custom"),
-                },
-              ]}
-            />
-          </div>
-        );
-      }
-
-      // ---- api key ----------------------------------------------------------
-      if (view === "apikey") {
-        const providerLabelsMap = {
-          anthropic: "Anthropic (Claude)",
-          openai: "OpenAI (GPT)",
-          gemini: "Google (Gemini)",
-          groq: "Groq (Llama)",
-        };
-
-        // Manual selector only for keys that can't be auto-detected.
-        // Derived during render — no state/effect needed for four prefix checks.
-        const probeVal = apiKey.trim();
-        const probe = { val: probeVal, detected: detectProvider(probeVal) };
-        const showManualSelect = !probe.detected && !!probe.val;
-
-        let feedback = null;
-        if (probe.detected) {
-          feedback = (
-            <span className="cos-onboarding-accent">
-              {"\u2713 Detected: "}
-              <strong>{providerLabelsMap[probe.detected]}</strong>
-            </span>
-          );
-        } else if (probe.val) {
-          feedback = (
-            <span className="cos-onboarding-muted">
-              {"Select your provider below"}
-            </span>
-          );
-        }
-
-        const onSaveKey = () => {
-          const key = apiKey.trim();
-          if (!key) {
-            setError("Please paste an API key.");
-            return;
-          }
-          const chosen = detectProvider(key) || provider;
-          if (!chosen) {
-            setError("Please select a provider for this key.");
-            return;
-          }
-          clearError();
-          // Write to provider-specific key field
-          const keySettingMap = {
-            openai: deps.SETTINGS_KEYS.openaiApiKey,
-            anthropic: deps.SETTINGS_KEYS.anthropicApiKey,
-            gemini: deps.SETTINGS_KEYS.geminiApiKey,
-            mistral: deps.SETTINGS_KEYS.mistralApiKey,
-            groq: deps.SETTINGS_KEYS.groqApiKey,
-          };
-          extensionAPI.settings.set(keySettingMap[chosen], key);
-          extensionAPI.settings.set(deps.SETTINGS_KEYS.llmProvider, chosen);
-          const providerLabels = {
-            anthropic: "Anthropic",
-            openai: "OpenAI",
-            gemini: "Gemini",
-            mistral: "Mistral",
-            groq: "Groq",
-          };
-          deps.iziToast.success({
-            class: "cos-toast",
-            title: `${providerLabels[chosen]} key saved`,
-            message: "I\u2019m ready to think.",
-            timeout: 4000,
-            position: "bottomRight",
-          });
-          advanceStep();
-        };
-
-        return (
-          <div>
-            <InfoText
-              html={"I support Anthropic Claude, OpenAI GPT, Google Gemini, Mistral, and Groq \u2014 paste a key from any of them and I\u2019ll recognise which provider it belongs to. For Mistral keys (which have no distinctive prefix), choose your provider from the dropdown."}
-            />
-            <Field
-              placeholder="sk-... / AIza... / gsk_..."
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-            />
-            {showManualSelect
-              ? <Select
-                  label="Provider:"
-                  options={
-                    ["mistral", "anthropic", "openai", "gemini", "groq"].map((opt) => ({
-                      value: opt,
-                      label: opt.charAt(0).toUpperCase() + opt.slice(1),
-                    }))
-                  }
-                  value={provider}
-                  onChange={(e) => setProvider(e.currentTarget.value)}
-                />
-              : null}
-            <div className="cos-onboarding-detected-provider">{feedback}</div>
-            <Hint
-              html={"<small>Your key is stored locally in Roam and is only sent directly to your AI provider. It never passes through any other server.</small>"}
-            />
-            {errorNode}
-            <Buttons
-              buttons={[
-                { label: "Save key \u2192", primary: true, onClick: onSaveKey },
-                { label: "\u2190 All options", onClick: () => showView("chooser") },
-              ]}
-            />
-          </div>
-        );
-      }
-
-      // ---- ChatGPT subscription (Codex) --------------------------------------
-      if (view === "codex") {
-        const onConnect = async () => {
-          if (waiting) return;
-          const myAttempt = ++connectAttempt.current;
-          setWaiting(true);
-          clearError();
-          const result = await deps.connectCodex();
-          // Stale-guard: the user may have cancelled, left this sub-view, or
-          // navigated steps while the flow was pending — any of those bumps
-          // the attempt token past ours.
-          if (connectAttempt.current !== myAttempt || !alive.current) return;
-          setWaiting(false);
-          if (result?.connected) {
-            // llm-provider was already set by the connect flow
-            advanceStep();
-            return;
-          }
-          setError(
-            String(
-              result?.error?.message ||
-                result?.error ||
-                "Connection didn\u2019t complete \u2014 try again."
-            )
-          );
-        };
-
-        const onSecondary = () => {
-          if (waiting) {
-            // Cancel a pending connect: stop polling + hide the code toast.
-            // The pending connectCodex promise never settles after this, which
-            // is why the connect handler guards on the attempt token instead
-            // of relying on the await.
-            connectAttempt.current++;
-            deps.cancelCodexConnect?.();
-            setWaiting(false);
-            clearError();
-            return;
-          }
-          showView("chooser");
-        };
-
-        return (
-          <div>
-            <InfoText
-              html={"Sign in with your ChatGPT Plus/Pro account \u2014 no API key needed. I\u2019ll show you a one-time code; enter it on OpenAI\u2019s sign-in page and we\u2019re connected. <strong>(Experimental)</strong>"}
-            />
-            <Hint
-              html={"<small>Heads-up: these calls route through Roam\u2019s shared proxy, which caps long generations at ~60 seconds. Everyday queries are fine; for heavy skill runs an API key works better.</small>"}
-            />
-            {errorNode}
-            <Buttons
-              buttons={[
-                {
-                  label: waiting ? "Waiting for sign-in\u2026" : "Connect ChatGPT \u2192",
-                  primary: true,
-                  disabled: waiting,
-                  onClick: onConnect,
-                },
-                {
-                  label: waiting ? "Cancel" : "\u2190 All options",
-                  onClick: onSecondary,
-                },
-              ]}
-            />
-          </div>
-        );
-      }
-
-      // ---- local / custom OpenAI-compatible provider -------------------------
-      const readField = (ref) => (ref.current ? ref.current.value : "");
-
-      const onSaveProvider = () => {
-        clearError();
-        let result;
-        try {
-          result = deps.saveCustomProviderSlot(extensionAPI, {
-            name: readField(nameRef),
-            baseUrl: readField(urlRef),
-            apiKey: readField(apiKeyFieldRef),
-            miniModel: readField(modelRef),
-          });
-        } catch (err) {
-          setError(String(err?.message || err));
-          return;
-        }
-        deps.iziToast.success({
-          class: "cos-toast",
-          title: `${deps.escapeHtml(result.name)} configured`,
-          message:
-            "It\u2019s now my primary model. Run \u201cCheck LLM Model Availability\u201d from settings any time to verify it responds.",
-          timeout: 5000,
-          position: "bottomRight",
-        });
-        advanceStep();
-      };
-
-      return (
-        <div>
-          <InfoText
-            html={"Point me at any OpenAI-compatible endpoint \u2014 LM Studio, Ollama, OpenRouter, vLLM, or your own server."}
-          />
-          <Field
-            label="Name (optional)"
-            placeholder="LM Studio / Ollama / OpenRouter"
-            inputRef={nameRef}
-          />
-          <Field
-            label="Base URL"
-            placeholder="http://localhost:1234/v1"
-            inputRef={urlRef}
-          />
-          <Field
-            label="API key (optional)"
-            placeholder="Leave blank for LM Studio / Ollama"
-            type="password"
-            inputRef={apiKeyFieldRef}
-          />
-          <Field
-            label="Model"
-            placeholder="e.g. llama-3.1-8b-instruct"
-            inputRef={modelRef}
-          />
-          <Hint
-            html={"<small>Base URL usually ends in /v1 \u2014 LM Studio: http://localhost:1234/v1, Ollama: http://localhost:11434/v1, OpenRouter: https://openrouter.ai/api/v1. Power/failover models and advanced options live in Settings \u2192 Chief of Staff.</small>"}
-          />
-          {errorNode}
-          <Buttons
-            buttons={[
-              { label: "Save provider \u2192", primary: true, onClick: onSaveProvider },
-              { label: "\u2190 All options", onClick: () => showView("chooser") },
-            ]}
-          />
-        </div>
-      );
+      const showChooser = () => setView("chooser");
+      if (view === "apikey") return <LlmApiKeyView ctx={ctx} onBack={showChooser} />;
+      if (view === "codex") return <LlmCodexView ctx={ctx} onBack={showChooser} />;
+      if (view === "custom") return <LlmCustomProviderView ctx={ctx} onBack={showChooser} />;
+      return <LlmChooserView onPick={setView} />;
     },
   },
 
