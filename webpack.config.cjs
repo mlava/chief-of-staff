@@ -27,7 +27,7 @@ module.exports = {
     ],
   },
   resolve: {
-    extensions: [".ts", ".tsx", ".js", ".jsx"],
+    extensions: [".js", ".jsx"],
     fallback: {
       "child_process": false,
       "fs": false,
