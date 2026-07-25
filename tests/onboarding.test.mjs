@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ONBOARDING_STEPS, detectProvider } from "../src/onboarding/onboarding-steps.js";
+import { ONBOARDING_STEPS, detectProvider } from "../src/onboarding/onboarding-steps.jsx";
 
 // NOTE: render() functions need a DOM and cannot run under node — these tests
 // cover the pure parts: provider detection, step ordering, and skip logic.

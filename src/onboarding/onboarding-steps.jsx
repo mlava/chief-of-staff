@@ -1,3 +1,6 @@
+/** @jsx h */
+/** @jsxFrag Frag */
+
 /**
  * Onboarding step definitions — React 18 function components.
  *
@@ -13,11 +16,12 @@
  *
  * deps contains functions injected from index.js to avoid circular imports.
  *
- * Hard rules (shared with onboarding-ui.js):
+ * Hard rules (shared with onboarding-ui.jsx):
  *   • React and Blueprint come from Roam at runtime (`window.React`,
  *     `window.Blueprint.Core`) — never `import` them.
  *   • Nothing in this module may touch window/document at module top level.
- *   • No JSX: elements are built with the `h()` helper from ./onboarding-ui.js.
+ *   • JSX compiles to the `h()` / `Frag` helpers from ./onboarding-ui.jsx via
+ *     the `@jsx` / `@jsxFrag` pragmas at the top of this file.
  *   • Primary action buttons must carry data-cos-primary="true" (the `Buttons`
  *     helper does this for `{ primary: true }`) — the controller's Enter-key
  *     handler clicks the first `[data-cos-primary]` inside the card.
@@ -25,7 +29,7 @@
 
 import {
   h,
-  frag,
+  Frag,
   InfoText,
   Hint,
   BulletList,
@@ -37,7 +41,7 @@ import {
   SummaryItem,
   useInlineError,
   useAutoFocus,
-} from "./onboarding-ui.js";
+} from "./onboarding-ui.jsx";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -92,38 +96,38 @@ const ONBOARDING_STEPS = [
     Component: function WelcomeStep({ ctx }) {
       const { extensionAPI, deps, advanceStep, skipToEnd } = ctx;
 
-      return h(
-        "div",
-        null,
-        h(InfoText, {
-          html: "Welcome. I\u2019m your Chief of Staff \u2014 an AI assistant that lives inside your Roam graph.",
-        }),
-        h(InfoText, {
-          html: "I\u2019d like to take a minute to get set up so I can start helping you. We can do this now, or you can configure everything manually in Roam Depot settings any time.",
-        }),
-        h(Buttons, {
-          buttons: [
-            {
-              label: "Let\u2019s go",
-              primary: true,
-              onClick: () => advanceStep(),
-            },
-            {
-              label: "I\u2019ll set up manually",
-              onClick: () => {
-                extensionAPI.settings.set(deps.SETTINGS_KEYS.onboardingComplete, true);
-                deps.iziToast.info({
-                  class: "cos-toast",
-                  title: "No worries",
-                  message: "Open Settings \u2192 Chief of Staff whenever you\u2019re ready.",
-                  timeout: 5000,
-                  position: "bottomRight",
-                });
-                skipToEnd();
+      return (
+        <div>
+          <InfoText
+            html={"Welcome. I\u2019m your Chief of Staff \u2014 an AI assistant that lives inside your Roam graph."}
+          />
+          <InfoText
+            html={"I\u2019d like to take a minute to get set up so I can start helping you. We can do this now, or you can configure everything manually in Roam Depot settings any time."}
+          />
+          <Buttons
+            buttons={[
+              {
+                label: "Let\u2019s go",
+                primary: true,
+                onClick: () => advanceStep(),
               },
-            },
-          ],
-        })
+              {
+                label: "I\u2019ll set up manually",
+                onClick: () => {
+                  extensionAPI.settings.set(deps.SETTINGS_KEYS.onboardingComplete, true);
+                  deps.iziToast.info({
+                    class: "cos-toast",
+                    title: "No worries",
+                    message: "Open Settings \u2192 Chief of Staff whenever you\u2019re ready.",
+                    timeout: 5000,
+                    position: "bottomRight",
+                  });
+                  skipToEnd();
+                },
+              },
+            ]}
+          />
+        </div>
       );
     },
   },
@@ -164,34 +168,34 @@ const ONBOARDING_STEPS = [
         advanceStep();
       };
 
-      return h(
-        "div",
-        null,
-        h(InfoText, { html: "Let\u2019s start with introductions." }),
-        h(Field, {
-          label: "What should I call you?",
-          placeholder: "Your name",
-          value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.userName, ""),
-          inputRef: nameRef,
-        }),
-        h(InfoText, {
-          html: "<strong>What would you like to call me?</strong><br>I\u2019ll answer to \u201cChief of Staff\u201d and any name you choose. You can change this later in settings.",
-        }),
-        h(Field, {
-          placeholder: "Chief of Staff",
-          value: deps.getAssistantDisplayName(extensionAPI),
-          inputRef: cosNameRef,
-        }),
-        errorNode,
-        h(Buttons, {
-          buttons: [
-            {
-              label: "Continue \u2192",
-              primary: true,
-              onClick: onContinue,
-            },
-          ],
-        })
+      return (
+        <div>
+          <InfoText html={"Let\u2019s start with introductions."} />
+          <Field
+            label="What should I call you?"
+            placeholder="Your name"
+            value={deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.userName, "")}
+            inputRef={nameRef}
+          />
+          <InfoText
+            html={"<strong>What would you like to call me?</strong><br>I\u2019ll answer to \u201cChief of Staff\u201d and any name you choose. You can change this later in settings."}
+          />
+          <Field
+            placeholder="Chief of Staff"
+            value={deps.getAssistantDisplayName(extensionAPI)}
+            inputRef={cosNameRef}
+          />
+          {errorNode}
+          <Buttons
+            buttons={[
+              {
+                label: "Continue \u2192",
+                primary: true,
+                onClick: onContinue,
+              },
+            ]}
+          />
+        </div>
       );
     },
   },
@@ -262,34 +266,34 @@ const ONBOARDING_STEPS = [
 
       // ---- chooser ----------------------------------------------------------
       if (view === "chooser") {
-        return h(
-          "div",
-          null,
-          h(InfoText, {
-            html: "In order for me to think and work, I need access to an AI model. There are three ways to connect one \u2014 pick whichever suits you:",
-          }),
-          h(OptionCards, {
-            options: [
-              {
-                title: "API key",
-                description:
-                  "Anthropic Claude, OpenAI GPT, Google Gemini, Mistral, or Groq \u2014 pay-as-you-go, most capable.",
-                onClick: () => showView("apikey"),
-              },
-              {
-                title: "ChatGPT subscription",
-                description:
-                  "Use your ChatGPT Plus/Pro plan with a one-time sign-in code \u2014 no API key. (Experimental)",
-                onClick: () => showView("codex"),
-              },
-              {
-                title: "Local or custom provider",
-                description:
-                  "LM Studio, Ollama, OpenRouter, vLLM \u2014 any OpenAI-compatible endpoint.",
-                onClick: () => showView("custom"),
-              },
-            ],
-          })
+        return (
+          <div>
+            <InfoText
+              html={"In order for me to think and work, I need access to an AI model. There are three ways to connect one \u2014 pick whichever suits you:"}
+            />
+            <OptionCards
+              options={[
+                {
+                  title: "API key",
+                  description:
+                    "Anthropic Claude, OpenAI GPT, Google Gemini, Mistral, or Groq \u2014 pay-as-you-go, most capable.",
+                  onClick: () => showView("apikey"),
+                },
+                {
+                  title: "ChatGPT subscription",
+                  description:
+                    "Use your ChatGPT Plus/Pro plan with a one-time sign-in code \u2014 no API key. (Experimental)",
+                  onClick: () => showView("codex"),
+                },
+                {
+                  title: "Local or custom provider",
+                  description:
+                    "LM Studio, Ollama, OpenRouter, vLLM \u2014 any OpenAI-compatible endpoint.",
+                  onClick: () => showView("custom"),
+                },
+              ]}
+            />
+          </div>
         );
       }
 
@@ -307,17 +311,17 @@ const ONBOARDING_STEPS = [
 
         let feedback = null;
         if (probe.detected) {
-          feedback = h(
-            "span",
-            { style: { color: "var(--cos-accent, #4a9eff)" } },
-            "\u2713 Detected: ",
-            h("strong", null, providerLabelsMap[probe.detected])
+          feedback = (
+            <span style={{ color: "var(--cos-accent, #4a9eff)" }}>
+              {"\u2713 Detected: "}
+              <strong>{providerLabelsMap[probe.detected]}</strong>
+            </span>
           );
         } else if (probe.val) {
-          feedback = h(
-            "span",
-            { style: { color: "var(--cos-text-muted, #888)" } },
-            "Select your provider below"
+          feedback = (
+            <span style={{ color: "var(--cos-text-muted, #888)" }}>
+              {"Select your provider below"}
+            </span>
           );
         }
 
@@ -360,50 +364,50 @@ const ONBOARDING_STEPS = [
           advanceStep();
         };
 
-        return h(
-          "div",
-          null,
-          h(InfoText, {
-            html: "I support Anthropic Claude, OpenAI GPT, Google Gemini, Mistral, and Groq \u2014 paste a key from any of them and I\u2019ll recognise which provider it belongs to. For Mistral keys (which have no distinctive prefix), choose your provider from the dropdown.",
-          }),
-          h(Field, {
-            placeholder: "sk-... / AIza... / gsk_...",
-            type: "password",
-            value: apiKey,
-            onChange: (e) => setApiKey(e.target.value),
-          }),
-          showManualSelect
-            ? h(Select, {
-                label: "Provider:",
-                // Labels are capitalised exactly as the vanilla step did
-                // (charAt(0).toUpperCase() + slice(1)), so the option text is
-                // unchanged - including "Openai".
-                options: ["mistral", "anthropic", "openai", "gemini", "groq"].map((opt) => ({
-                  value: opt,
-                  label: opt.charAt(0).toUpperCase() + opt.slice(1),
-                })),
-                value: provider,
-                onChange: (e) => setProvider(e.currentTarget.value),
-              })
-            : null,
-          h(
-            "div",
-            {
-              className: "cos-onboarding-detected-provider",
-              style: { fontSize: "13px", margin: "4px 0 8px", minHeight: "20px" },
-            },
-            feedback
-          ),
-          h(Hint, {
-            html: "<small>Your key is stored locally in Roam and is only sent directly to your AI provider. It never passes through any other server.</small>",
-          }),
-          errorNode,
-          h(Buttons, {
-            buttons: [
-              { label: "Save key \u2192", primary: true, onClick: onSaveKey },
-              { label: "\u2190 All options", onClick: () => showView("chooser") },
-            ],
-          })
+        return (
+          <div>
+            <InfoText
+              html={"I support Anthropic Claude, OpenAI GPT, Google Gemini, Mistral, and Groq \u2014 paste a key from any of them and I\u2019ll recognise which provider it belongs to. For Mistral keys (which have no distinctive prefix), choose your provider from the dropdown."}
+            />
+            <Field
+              placeholder="sk-... / AIza... / gsk_..."
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+            />
+            {showManualSelect
+              ? <Select
+                  label="Provider:"
+                  options={
+                    // Labels are capitalised exactly as the vanilla step did
+                    // (charAt(0).toUpperCase() + slice(1)), so the option text is
+                    // unchanged - including "Openai".
+                    ["mistral", "anthropic", "openai", "gemini", "groq"].map((opt) => ({
+                      value: opt,
+                      label: opt.charAt(0).toUpperCase() + opt.slice(1),
+                    }))
+                  }
+                  value={provider}
+                  onChange={(e) => setProvider(e.currentTarget.value)}
+                />
+              : null}
+            <div
+              className="cos-onboarding-detected-provider"
+              style={{ fontSize: "13px", margin: "4px 0 8px", minHeight: "20px" }}
+            >
+              {feedback}
+            </div>
+            <Hint
+              html={"<small>Your key is stored locally in Roam and is only sent directly to your AI provider. It never passes through any other server.</small>"}
+            />
+            {errorNode}
+            <Buttons
+              buttons={[
+                { label: "Save key \u2192", primary: true, onClick: onSaveKey },
+                { label: "\u2190 All options", onClick: () => showView("chooser") },
+              ]}
+            />
+          </div>
         );
       }
 
@@ -449,30 +453,30 @@ const ONBOARDING_STEPS = [
           showView("chooser");
         };
 
-        return h(
-          "div",
-          null,
-          h(InfoText, {
-            html: "Sign in with your ChatGPT Plus/Pro account \u2014 no API key needed. I\u2019ll show you a one-time code; enter it on OpenAI\u2019s sign-in page and we\u2019re connected. <strong>(Experimental)</strong>",
-          }),
-          h(Hint, {
-            html: "<small>Heads-up: these calls route through Roam\u2019s shared proxy, which caps long generations at ~60 seconds. Everyday queries are fine; for heavy skill runs an API key works better.</small>",
-          }),
-          errorNode,
-          h(Buttons, {
-            buttons: [
-              {
-                label: waiting ? "Waiting for sign-in\u2026" : "Connect ChatGPT \u2192",
-                primary: true,
-                disabled: waiting,
-                onClick: onConnect,
-              },
-              {
-                label: waiting ? "Cancel" : "\u2190 All options",
-                onClick: onSecondary,
-              },
-            ],
-          })
+        return (
+          <div>
+            <InfoText
+              html={"Sign in with your ChatGPT Plus/Pro account \u2014 no API key needed. I\u2019ll show you a one-time code; enter it on OpenAI\u2019s sign-in page and we\u2019re connected. <strong>(Experimental)</strong>"}
+            />
+            <Hint
+              html={"<small>Heads-up: these calls route through Roam\u2019s shared proxy, which caps long generations at ~60 seconds. Everyday queries are fine; for heavy skill runs an API key works better.</small>"}
+            />
+            {errorNode}
+            <Buttons
+              buttons={[
+                {
+                  label: waiting ? "Waiting for sign-in\u2026" : "Connect ChatGPT \u2192",
+                  primary: true,
+                  disabled: waiting,
+                  onClick: onConnect,
+                },
+                {
+                  label: waiting ? "Cancel" : "\u2190 All options",
+                  onClick: onSecondary,
+                },
+              ]}
+            />
+          </div>
         );
       }
 
@@ -504,43 +508,43 @@ const ONBOARDING_STEPS = [
         advanceStep();
       };
 
-      return h(
-        "div",
-        null,
-        h(InfoText, {
-          html: "Point me at any OpenAI-compatible endpoint \u2014 LM Studio, Ollama, OpenRouter, vLLM, or your own server.",
-        }),
-        h(Field, {
-          label: "Name (optional)",
-          placeholder: "LM Studio / Ollama / OpenRouter",
-          inputRef: nameRef,
-        }),
-        h(Field, {
-          label: "Base URL",
-          placeholder: "http://localhost:1234/v1",
-          inputRef: urlRef,
-        }),
-        h(Field, {
-          label: "API key (optional)",
-          placeholder: "Leave blank for LM Studio / Ollama",
-          type: "password",
-          inputRef: apiKeyFieldRef,
-        }),
-        h(Field, {
-          label: "Model",
-          placeholder: "e.g. llama-3.1-8b-instruct",
-          inputRef: modelRef,
-        }),
-        h(Hint, {
-          html: "<small>Base URL usually ends in /v1 \u2014 LM Studio: http://localhost:1234/v1, Ollama: http://localhost:11434/v1, OpenRouter: https://openrouter.ai/api/v1. Power/failover models and advanced options live in Settings \u2192 Chief of Staff.</small>",
-        }),
-        errorNode,
-        h(Buttons, {
-          buttons: [
-            { label: "Save provider \u2192", primary: true, onClick: onSaveProvider },
-            { label: "\u2190 All options", onClick: () => showView("chooser") },
-          ],
-        })
+      return (
+        <div>
+          <InfoText
+            html={"Point me at any OpenAI-compatible endpoint \u2014 LM Studio, Ollama, OpenRouter, vLLM, or your own server."}
+          />
+          <Field
+            label="Name (optional)"
+            placeholder="LM Studio / Ollama / OpenRouter"
+            inputRef={nameRef}
+          />
+          <Field
+            label="Base URL"
+            placeholder="http://localhost:1234/v1"
+            inputRef={urlRef}
+          />
+          <Field
+            label="API key (optional)"
+            placeholder="Leave blank for LM Studio / Ollama"
+            type="password"
+            inputRef={apiKeyFieldRef}
+          />
+          <Field
+            label="Model"
+            placeholder="e.g. llama-3.1-8b-instruct"
+            inputRef={modelRef}
+          />
+          <Hint
+            html={"<small>Base URL usually ends in /v1 \u2014 LM Studio: http://localhost:1234/v1, Ollama: http://localhost:11434/v1, OpenRouter: https://openrouter.ai/api/v1. Power/failover models and advanced options live in Settings \u2192 Chief of Staff.</small>"}
+          />
+          {errorNode}
+          <Buttons
+            buttons={[
+              { label: "Save provider \u2192", primary: true, onClick: onSaveProvider },
+              { label: "\u2190 All options", onClick: () => showView("chooser") },
+            ]}
+          />
+        </div>
       );
     },
   },
@@ -552,49 +556,49 @@ const ONBOARDING_STEPS = [
     Component: function BetterTasksStep({ ctx }) {
       const { deps, advanceStep, sessionState } = ctx;
 
-      return h(
-        "div",
-        null,
-        h(InfoText, {
-          html: "Do you use the <strong>Better Tasks</strong> extension? I have deep integration with it \u2014 I can search, create, and manage tasks with full attribute support (projects, due dates, priorities, and more).",
-        }),
-        h(InfoText, {
-          html: "I work effectively without it too, using Roam\u2019s standard TODO/DONE blocks.",
-        }),
-        h(Buttons, {
-          buttons: [
-            {
-              label: "Yes, I use Better Tasks",
-              primary: true,
-              onClick: () => {
-                // Read back by memory-pages (Projects bullet) and finish (summary).
-                sessionState.betterTasksEnabled = true;
-                deps.iziToast.success({
-                  class: "cos-toast",
-                  title: "Better Tasks",
-                  message: "Excellent. I\u2019ll use Better Tasks for all task operations.",
-                  timeout: 4000,
-                  position: "bottomRight",
-                });
-                advanceStep();
+      return (
+        <div>
+          <InfoText
+            html={"Do you use the <strong>Better Tasks</strong> extension? I have deep integration with it \u2014 I can search, create, and manage tasks with full attribute support (projects, due dates, priorities, and more)."}
+          />
+          <InfoText
+            html={"I work effectively without it too, using Roam\u2019s standard TODO/DONE blocks."}
+          />
+          <Buttons
+            buttons={[
+              {
+                label: "Yes, I use Better Tasks",
+                primary: true,
+                onClick: () => {
+                  // Read back by memory-pages (Projects bullet) and finish (summary).
+                  sessionState.betterTasksEnabled = true;
+                  deps.iziToast.success({
+                    class: "cos-toast",
+                    title: "Better Tasks",
+                    message: "Excellent. I\u2019ll use Better Tasks for all task operations.",
+                    timeout: 4000,
+                    position: "bottomRight",
+                  });
+                  advanceStep();
+                },
               },
-            },
-            {
-              label: "No, just standard TODOs",
-              onClick: () => {
-                sessionState.betterTasksEnabled = false;
-                deps.iziToast.info({
-                  class: "cos-toast",
-                  title: "Standard TODOs",
-                  message: "No problem. I\u2019ll work with standard TODO/DONE blocks. If you install Better Tasks later, I\u2019ll detect it automatically.",
-                  timeout: 5000,
-                  position: "bottomRight",
-                });
-                advanceStep();
+              {
+                label: "No, just standard TODOs",
+                onClick: () => {
+                  sessionState.betterTasksEnabled = false;
+                  deps.iziToast.info({
+                    class: "cos-toast",
+                    title: "Standard TODOs",
+                    message: "No problem. I\u2019ll work with standard TODO/DONE blocks. If you install Better Tasks later, I\u2019ll detect it automatically.",
+                    timeout: 5000,
+                    position: "bottomRight",
+                  });
+                  advanceStep();
+                },
               },
-            },
-          ],
-        })
+            ]}
+          />
+        </div>
       );
     },
   },
@@ -656,40 +660,40 @@ const ONBOARDING_STEPS = [
         advanceStep();
       };
 
-      return h(
-        "div",
-        null,
-        h(InfoText, {
-          html: "I\u2019d like to create a few pages in your graph for our shared working memory. These are my notebooks \u2014 you can read, edit, or delete them at any time.",
-        }),
-        h(InfoText, { html: "I\u2019ll create:" }),
-        h(BulletList, { items: pages }),
-        h(InfoText, { html: "May I create these now?" }),
-        h(Buttons, {
-          buttons: [
-            {
-              label: "Yes, create them",
-              primary: true,
-              loading: busy,
-              disabled: busy,
-              onClick: onCreate,
-            },
-            {
-              label: "Not yet",
-              disabled: busy,
-              onClick: () => {
-                deps.iziToast.info({
-                  class: "cos-toast",
-                  title: "No worries",
-                  message: "You can create them later via the command palette: Chief of Staff: Bootstrap Memory Pages.",
-                  timeout: 5000,
-                  position: "bottomRight",
-                });
-                advanceStep();
+      return (
+        <div>
+          <InfoText
+            html={"I\u2019d like to create a few pages in your graph for our shared working memory. These are my notebooks \u2014 you can read, edit, or delete them at any time."}
+          />
+          <InfoText html={"I\u2019ll create:"} />
+          <BulletList items={pages} />
+          <InfoText html="May I create these now?" />
+          <Buttons
+            buttons={[
+              {
+                label: "Yes, create them",
+                primary: true,
+                loading: busy,
+                disabled: busy,
+                onClick: onCreate,
               },
-            },
-          ],
-        })
+              {
+                label: "Not yet",
+                disabled: busy,
+                onClick: () => {
+                  deps.iziToast.info({
+                    class: "cos-toast",
+                    title: "No worries",
+                    message: "You can create them later via the command palette: Chief of Staff: Bootstrap Memory Pages.",
+                    timeout: 5000,
+                    position: "bottomRight",
+                  });
+                  advanceStep();
+                },
+              },
+            ]}
+          />
+        </div>
       );
     },
   },
@@ -704,51 +708,51 @@ const ONBOARDING_STEPS = [
     Component: function MemoryQuestionnaireStep({ ctx }) {
       const { advanceStep, deps } = ctx;
 
-      return h(
-        "div",
-        null,
-        h(InfoText, {
-          html: "The more I know about you, the better I can help. I\u2019ve added a series of questions to <strong>[[Chief of Staff/Memory]]</strong> \u2014 things like your role, working style, and current priorities. Your answers become part of my context on every request.",
-        }),
-        h(InfoText, {
-          html: "We can fill this in together now, or you can do it any time.",
-        }),
-        h(Buttons, {
-          buttons: [
-            {
-              label: "Open Memory page now",
-              primary: true,
-              onClick: () => {
-                try {
-                  window.roamAlphaAPI.ui.mainWindow.openPage({
-                    page: { title: "Chief of Staff/Memory" },
+      return (
+        <div>
+          <InfoText
+            html={"The more I know about you, the better I can help. I\u2019ve added a series of questions to <strong>[[Chief of Staff/Memory]]</strong> \u2014 things like your role, working style, and current priorities. Your answers become part of my context on every request."}
+          />
+          <InfoText
+            html="We can fill this in together now, or you can do it any time."
+          />
+          <Buttons
+            buttons={[
+              {
+                label: "Open Memory page now",
+                primary: true,
+                onClick: () => {
+                  try {
+                    window.roamAlphaAPI.ui.mainWindow.openPage({
+                      page: { title: "Chief of Staff/Memory" },
+                    });
+                  } catch { /* ignore if API unavailable */ }
+                  deps.iziToast.info({
+                    class: "cos-toast",
+                    title: "Memory page opened",
+                    message: "Fill in what you can \u2014 even a few answers help.",
+                    timeout: 4000,
+                    position: "bottomRight",
                   });
-                } catch { /* ignore if API unavailable */ }
-                deps.iziToast.info({
-                  class: "cos-toast",
-                  title: "Memory page opened",
-                  message: "Fill in what you can \u2014 even a few answers help.",
-                  timeout: 4000,
-                  position: "bottomRight",
-                });
-                advanceStep();
+                  advanceStep();
+                },
               },
-            },
-            {
-              label: "I\u2019ll do it later",
-              onClick: () => {
-                deps.iziToast.info({
-                  class: "cos-toast",
-                  title: "Memory",
-                  message: "No rush. You can open [[Chief of Staff/Memory]] any time to fill in your context \u2014 even a few answers make a difference.",
-                  timeout: 5000,
-                  position: "bottomRight",
-                });
-                advanceStep();
+              {
+                label: "I\u2019ll do it later",
+                onClick: () => {
+                  deps.iziToast.info({
+                    class: "cos-toast",
+                    title: "Memory",
+                    message: "No rush. You can open [[Chief of Staff/Memory]] any time to fill in your context \u2014 even a few answers make a difference.",
+                    timeout: 5000,
+                    position: "bottomRight",
+                  });
+                  advanceStep();
+                },
               },
-            },
-          ],
-        })
+            ]}
+          />
+        </div>
       );
     },
   },
@@ -825,27 +829,27 @@ const ONBOARDING_STEPS = [
         sessionState._hotkeyTimerId = advanceTimerId;
       };
 
-      return h(
-        "div",
-        null,
-        h(InfoText, { html: "You can ask me things via the command palette:" }),
-        h(InfoText, { html: "<strong>Chief of Staff: Ask</strong>" }),
-        h(InfoText, {
-          html: "I\u2019d recommend setting a keyboard shortcut for this \u2014 it makes reaching me much faster.",
-        }),
-        h(Buttons, {
-          buttons: [
-            {
-              label: "Set up hotkey now",
-              primary: true,
-              onClick: onSetUpHotkey,
-            },
-            {
-              label: "Skip",
-              onClick: () => advanceStep(),
-            },
-          ],
-        })
+      return (
+        <div>
+          <InfoText html="You can ask me things via the command palette:" />
+          <InfoText html="<strong>Chief of Staff: Ask</strong>" />
+          <InfoText
+            html={"I\u2019d recommend setting a keyboard shortcut for this \u2014 it makes reaching me much faster."}
+          />
+          <Buttons
+            buttons={[
+              {
+                label: "Set up hotkey now",
+                primary: true,
+                onClick: onSetUpHotkey,
+              },
+              {
+                label: "Skip",
+                onClick: () => advanceStep(),
+              },
+            ]}
+          />
+        </div>
       );
     },
   },
@@ -884,25 +888,25 @@ const ONBOARDING_STEPS = [
         advanceStep();
       };
 
-      return h(
-        "div",
-        null,
-        h(InfoText, {
-          html: "We can also talk via a floating chat panel \u2014 it\u2019s like having me on call in the corner of your screen. Persistent history, drag it where you like, pin responses to your daily page.",
-        }),
-        h(Buttons, {
-          buttons: [
-            {
-              label: "Show me the chat panel",
-              primary: true,
-              onClick: onShowChatPanel,
-            },
-            {
-              label: "Not now",
-              onClick: () => advanceStep(),
-            },
-          ],
-        })
+      return (
+        <div>
+          <InfoText
+            html={"We can also talk via a floating chat panel \u2014 it\u2019s like having me on call in the corner of your screen. Persistent history, drag it where you like, pin responses to your daily page."}
+          />
+          <Buttons
+            buttons={[
+              {
+                label: "Show me the chat panel",
+                primary: true,
+                onClick: onShowChatPanel,
+              },
+              {
+                label: "Not now",
+                onClick: () => advanceStep(),
+              },
+            ]}
+          />
+        </div>
       );
     },
   },
@@ -981,37 +985,37 @@ const ONBOARDING_STEPS = [
         timersRef.current.push(settleTimerId);
       };
 
-      return h(
-        "div",
-        null,
-        h(InfoText, {
-          html: "One of my best features is <strong>Skills</strong> \u2014 structured workflows I can execute end-to-end. Things like Daily Briefings, Weekly Reviews, Brain Dumps, Meeting Processing, and more.",
-        }),
-        h(InfoText, {
-          html: "I have a full set of built-in skills ready to install. They\u2019re templates \u2014 you can customise, rewrite, or delete any of them.",
-        }),
-        h(Buttons, {
-          buttons: [
-            {
-              label: "Install skills",
-              primary: true,
-              onClick: onInstallSkills,
-            },
-            {
-              label: "Skip for now",
-              onClick: () => {
-                deps.iziToast.info({
-                  class: "cos-toast",
-                  title: "Skills",
-                  message: "You can install them any time via the command palette: Chief of Staff: Bootstrap Skills Page.",
-                  timeout: 5000,
-                  position: "bottomRight",
-                });
-                advanceStep();
+      return (
+        <div>
+          <InfoText
+            html={"One of my best features is <strong>Skills</strong> \u2014 structured workflows I can execute end-to-end. Things like Daily Briefings, Weekly Reviews, Brain Dumps, Meeting Processing, and more."}
+          />
+          <InfoText
+            html={"I have a full set of built-in skills ready to install. They\u2019re templates \u2014 you can customise, rewrite, or delete any of them."}
+          />
+          <Buttons
+            buttons={[
+              {
+                label: "Install skills",
+                primary: true,
+                onClick: onInstallSkills,
               },
-            },
-          ],
-        })
+              {
+                label: "Skip for now",
+                onClick: () => {
+                  deps.iziToast.info({
+                    class: "cos-toast",
+                    title: "Skills",
+                    message: "You can install them any time via the command palette: Chief of Staff: Bootstrap Skills Page.",
+                    timeout: 5000,
+                    position: "bottomRight",
+                  });
+                  advanceStep();
+                },
+              },
+            ]}
+          />
+        </div>
       );
     },
   },
@@ -1028,69 +1032,65 @@ const ONBOARDING_STEPS = [
       const [expanded, setExpanded] = useState(false);
       useAutoFocus([expanded], 50);
 
-      return h(
-        "div",
-        null,
-        h(InfoText, {
-          html: "There are many ways we can work together, and one is to give me access to external tools. With those, I can check your email, read your calendar to create a day plan, manage tasks in Todoist, and much more.",
-        }),
-        h(InfoText, {
-          html: "I\u2019m fully capable within Roam on my own. With external tools, I gain superpowers.",
-        }),
-        h(InfoText, {
-          html: "The provider we use is <strong>Composio</strong> \u2014 it handles secure authentication to external services. Setting it up requires a few extra steps outside of Roam.",
-        }),
-        expanded
-          ? h(
-              "div",
-              null,
-              h(InfoText, { html: "To connect external tools:" }),
-              h(BulletList, {
-                items: [
-                  "Sign up at <a href=\"https://composio.dev\" target=\"_blank\" rel=\"noopener\">composio.dev</a>",
-                  "Deploy the included CORS proxy (see the README for instructions)",
-                  "Add your Composio MCP URL and API key in Settings \u2192 Chief of Staff",
-                  "Run <strong>Chief of Staff: Connect Composio</strong> from the command palette",
-                  "Install tools by saying \u201cinstall google calendar\u201d in our chat",
-                ],
-              }),
-              h(InfoText, { html: "Full instructions are in the README." }),
-              h(Buttons, {
-                buttons: [
-                  {
-                    label: "Open README",
-                    primary: true,
-                    onClick: () => {
-                      try {
-                        window.open("https://github.com/mlava/chief-of-staff#2-connect-composio-optional", "_blank", "noopener");
-                      } catch { /* ignore */ }
-                      advanceStep();
+      return (
+        <div>
+          <InfoText
+            html="There are many ways we can work together, and one is to give me access to external tools. With those, I can check your email, read your calendar to create a day plan, manage tasks in Todoist, and much more."
+          />
+          <InfoText
+            html={"I\u2019m fully capable within Roam on my own. With external tools, I gain superpowers."}
+          />
+          <InfoText
+            html={"The provider we use is <strong>Composio</strong> \u2014 it handles secure authentication to external services. Setting it up requires a few extra steps outside of Roam."}
+          />
+          {expanded
+            ? <div>
+                <InfoText html="To connect external tools:" />
+                <BulletList
+                  items={[
+                    "Sign up at <a href=\"https://composio.dev\" target=\"_blank\" rel=\"noopener\">composio.dev</a>",
+                    "Deploy the included CORS proxy (see the README for instructions)",
+                    "Add your Composio MCP URL and API key in Settings \u2192 Chief of Staff",
+                    "Run <strong>Chief of Staff: Connect Composio</strong> from the command palette",
+                    "Install tools by saying \u201cinstall google calendar\u201d in our chat",
+                  ]}
+                />
+                <InfoText html="Full instructions are in the README." />
+                <Buttons
+                  buttons={[
+                    {
+                      label: "Open README",
+                      primary: true,
+                      onClick: () => {
+                        try {
+                          window.open("https://github.com/mlava/chief-of-staff#2-connect-composio-optional", "_blank", "noopener");
+                        } catch { /* ignore */ }
+                        advanceStep();
+                      },
                     },
-                  },
-                  {
-                    label: "Done",
-                    onClick: () => advanceStep(),
-                  },
-                ],
-              })
-            )
-          : h(
-              "div",
-              null,
-              h(Buttons, {
-                buttons: [
-                  {
-                    label: "Tell me more",
-                    primary: true,
-                    onClick: () => setExpanded(true),
-                  },
-                  {
-                    label: "Maybe later",
-                    onClick: () => advanceStep(),
-                  },
-                ],
-              })
-            )
+                    {
+                      label: "Done",
+                      onClick: () => advanceStep(),
+                    },
+                  ]}
+                />
+              </div>
+            : <div>
+                <Buttons
+                  buttons={[
+                    {
+                      label: "Tell me more",
+                      primary: true,
+                      onClick: () => setExpanded(true),
+                    },
+                    {
+                      label: "Maybe later",
+                      onClick: () => advanceStep(),
+                    },
+                  ]}
+                />
+              </div>}
+        </div>
       );
     },
   },
@@ -1124,19 +1124,21 @@ const ONBOARDING_STEPS = [
 
       let body;
       if (connectedCount > 0) {
-        body = frag(
-          h(InfoText, {
-            html: `<span style="color:var(--cos-accent,#4a9eff)">\u2713 Already connected to ${connectedCount} server${connectedCount > 1 ? "s" : ""}: <strong>${serverNames.join(", ")}</strong></span>`,
-          }),
-          h(Buttons, {
-            buttons: [
-              {
-                label: "Continue \u2192",
-                primary: true,
-                onClick: () => advanceStep(),
-              },
-            ],
-          })
+        body = (
+          <>
+            <InfoText
+              html={`<span style="color:var(--cos-accent,#4a9eff)">\u2713 Already connected to ${connectedCount} server${connectedCount > 1 ? "s" : ""}: <strong>${serverNames.join(", ")}</strong></span>`}
+            />
+            <Buttons
+              buttons={[
+                {
+                  label: "Continue \u2192",
+                  primary: true,
+                  onClick: () => advanceStep(),
+                },
+              ]}
+            />
+          </>
         );
       } else if (configuredPorts.length > 0) {
         const tryConnect = async () => {
@@ -1170,59 +1172,61 @@ const ONBOARDING_STEPS = [
           setError("Could not connect. Check that your servers are running and try again, or continue and connect later.");
         };
 
-        body = frag(
-          h(InfoText, {
-            html: `You have ports configured (<strong>${configuredPorts.map((p) => deps.escapeHtml(String(p))).join(", ")}</strong>) but no servers are connected yet. Make sure your supergateway is running, then connect.`,
-          }),
-          h(
-            "div",
-            null,
-            errorNode,
-            h(Buttons, {
-              buttons: [
-                {
-                  label: "Try connecting now",
-                  primary: true,
-                  onClick: tryConnect,
-                },
-                {
-                  label: "Skip",
-                  onClick: () => advanceStep(),
-                },
-              ],
-            })
-          )
+        body = (
+          <>
+            <InfoText
+              html={`You have ports configured (<strong>${configuredPorts.map((p) => deps.escapeHtml(String(p))).join(", ")}</strong>) but no servers are connected yet. Make sure your supergateway is running, then connect.`}
+            />
+            <div>
+              {errorNode}
+              <Buttons
+                buttons={[
+                  {
+                    label: "Try connecting now",
+                    primary: true,
+                    onClick: tryConnect,
+                  },
+                  {
+                    label: "Skip",
+                    onClick: () => advanceStep(),
+                  },
+                ]}
+              />
+            </div>
+          </>
         );
       } else {
-        body = frag(
-          h(InfoText, {
-            html: "To set this up, add your server ports in <strong>Settings \u2192 Chief of Staff \u2192 Local MCP Server Ports</strong> (comma-separated, e.g. <code>8765,8766</code>), then run <strong>Chief of Staff: Connect Local MCP</strong> from the command palette.",
-          }),
-          h(Hint, {
-            html: "<small>Full setup instructions are in the README. This is entirely optional \u2014 I work great without it.</small>",
-          }),
-          h(Buttons, {
-            buttons: [
-              {
-                label: "Continue \u2192",
-                primary: true,
-                onClick: () => advanceStep(),
-              },
-            ],
-          })
+        body = (
+          <>
+            <InfoText
+              html={"To set this up, add your server ports in <strong>Settings \u2192 Chief of Staff \u2192 Local MCP Server Ports</strong> (comma-separated, e.g. <code>8765,8766</code>), then run <strong>Chief of Staff: Connect Local MCP</strong> from the command palette."}
+            />
+            <Hint
+              html={"<small>Full setup instructions are in the README. This is entirely optional \u2014 I work great without it.</small>"}
+            />
+            <Buttons
+              buttons={[
+                {
+                  label: "Continue \u2192",
+                  primary: true,
+                  onClick: () => advanceStep(),
+                },
+              ]}
+            />
+          </>
         );
       }
 
-      return h(
-        "div",
-        null,
-        h(InfoText, {
-          html: "I can also connect to <strong>local MCP servers</strong> running on your machine \u2014 tools like Zotero, GitHub, or any custom server that speaks the Model Context Protocol.",
-        }),
-        h(InfoText, {
-          html: "If you run MCP servers via <strong>supergateway</strong> (which bridges stdio servers to SSE), I can connect to them directly in your browser. No proxy needed.",
-        }),
-        body
+      return (
+        <div>
+          <InfoText
+            html={"I can also connect to <strong>local MCP servers</strong> running on your machine \u2014 tools like Zotero, GitHub, or any custom server that speaks the Model Context Protocol."}
+          />
+          <InfoText
+            html={"If you run MCP servers via <strong>supergateway</strong> (which bridges stdio servers to SSE), I can connect to them directly in your browser. No proxy needed."}
+          />
+          {body}
+        </div>
       );
     },
   },
@@ -1268,78 +1272,76 @@ const ONBOARDING_STEPS = [
       // Local MCP
       const localConnected = Array.from(deps.getLocalMcpClients().values()).filter((e) => e?.serverName).length;
 
-      return h(
-        "div",
-        null,
-        h(InfoText, {
-          html: `We\u2019re all set${safeName}. Here\u2019s a quick summary of what\u2019s configured:`,
-        }),
-        h(
-          Summary,
-          null,
-          h(SummaryItem, { key: "provider", label: `AI provider: ${providerLabel}`, status: hasAnyKey }),
-          h(SummaryItem, {
-            key: "memory",
-            label: `Memory pages: ${memoryCreated ? "Created" : "Not yet"}`,
-            status: memoryCreated,
-          }),
-          h(SummaryItem, {
-            key: "skills",
-            label: `Skills: ${skillsCreated ? "Installed" : "Not yet"}`,
-            status: skillsCreated,
-          }),
-          h(SummaryItem, {
-            key: "better-tasks",
-            label: `Better Tasks: ${usesBT ? "Enabled" : "Not using"}`,
-            status: usesBT,
-          }),
-          h(SummaryItem, {
-            key: "composio",
-            label: `External tools: ${composioConfigured ? "Configured" : "Set up later"}`,
-            status: composioConfigured,
-          }),
-          h(SummaryItem, {
-            key: "local-mcp",
-            label: `Local MCP: ${localConnected > 0 ? localConnected + " server" + (localConnected > 1 ? "s" : "") + " connected" : "Not configured"}`,
-            status: localConnected > 0,
-          })
-        ),
-        h(InfoText, {
-          html: "You can always revisit settings in <strong>Settings \u2192 Chief of Staff</strong>, or re-run this walkthrough from the command palette.",
-        }),
-        h(Buttons, {
-          buttons: [
-            {
-              label: "Start working together",
-              primary: true,
-              onClick: () => {
-                extensionAPI.settings.set(deps.SETTINGS_KEYS.onboardingComplete, true);
+      return (
+        <div>
+          <InfoText
+            html={`We\u2019re all set${safeName}. Here\u2019s a quick summary of what\u2019s configured:`}
+          />
+          <Summary>
+            <SummaryItem key="provider" label={`AI provider: ${providerLabel}`} status={hasAnyKey} />
+            <SummaryItem
+              key="memory"
+              label={`Memory pages: ${memoryCreated ? "Created" : "Not yet"}`}
+              status={memoryCreated}
+            />
+            <SummaryItem
+              key="skills"
+              label={`Skills: ${skillsCreated ? "Installed" : "Not yet"}`}
+              status={skillsCreated}
+            />
+            <SummaryItem
+              key="better-tasks"
+              label={`Better Tasks: ${usesBT ? "Enabled" : "Not using"}`}
+              status={usesBT}
+            />
+            <SummaryItem
+              key="composio"
+              label={`External tools: ${composioConfigured ? "Configured" : "Set up later"}`}
+              status={composioConfigured}
+            />
+            <SummaryItem
+              key="local-mcp"
+              label={`Local MCP: ${localConnected > 0 ? localConnected + " server" + (localConnected > 1 ? "s" : "") + " connected" : "Not configured"}`}
+              status={localConnected > 0}
+            />
+          </Summary>
+          <InfoText
+            html={"You can always revisit settings in <strong>Settings \u2192 Chief of Staff</strong>, or re-run this walkthrough from the command palette."}
+          />
+          <Buttons
+            buttons={[
+              {
+                label: "Start working together",
+                primary: true,
+                onClick: () => {
+                  extensionAPI.settings.set(deps.SETTINGS_KEYS.onboardingComplete, true);
 
-                // Conditional closing message. The 400ms timer is deliberately
-                // NOT cancelled on unmount: skipToEnd() tears the card down
-                // immediately and the message lands in the chat panel, which
-                // outlives onboarding.
-                if (deps.chatPanelIsOpen()) {
-                  setTimeout(() => {
-                    const msg = "Ready when you are. If you\u2019d like to see what I can do, try: \u201cRun my daily briefing\u201d or \u201cWhat was I working on?\u201d";
-                    deps.appendChatPanelMessage("assistant", msg);
-                    deps.appendChatPanelHistory("assistant", msg);
-                  }, 400);
-                } else {
-                  deps.iziToast.success({
-                    class: "cos-toast",
-                    title: "All set",
-                    message: "Open the command palette and run Chief of Staff: Ask whenever you need me.",
-                    timeout: 5000,
-                    position: "bottomRight",
-                  });
-                }
+                  // Conditional closing message. The 400ms timer is deliberately
+                  // NOT cancelled on unmount: skipToEnd() tears the card down
+                  // immediately and the message lands in the chat panel, which
+                  // outlives onboarding.
+                  if (deps.chatPanelIsOpen()) {
+                    setTimeout(() => {
+                      const msg = "Ready when you are. If you\u2019d like to see what I can do, try: \u201cRun my daily briefing\u201d or \u201cWhat was I working on?\u201d";
+                      deps.appendChatPanelMessage("assistant", msg);
+                      deps.appendChatPanelHistory("assistant", msg);
+                    }, 400);
+                  } else {
+                    deps.iziToast.success({
+                      class: "cos-toast",
+                      title: "All set",
+                      message: "Open the command palette and run Chief of Staff: Ask whenever you need me.",
+                      timeout: 5000,
+                      position: "bottomRight",
+                    });
+                  }
 
-                skipToEnd();
+                  skipToEnd();
+                },
               },
-            },
-          ],
-        })
+            ]}
+          />
+        </div>
       );
     },
   },

@@ -1,3 +1,5 @@
+/** @jsx h */
+/** @jsxFrag Frag */
 /**
  * Onboarding UI kit — React 18 + Blueprint 3, both supplied by Roam at runtime.
  *
@@ -7,7 +9,9 @@
  *   • NEVER touch `window` / `document` at module top level. Tests import this
  *     module under plain node (`node --test`), where neither exists. Every
  *     global access must live inside a function body, i.e. run at render time.
- *   • No JSX. Build elements with the `h()` helper below.
+ *   • JSX compiles to the local `h()` / `Frag` below via the `@jsx` /
+ *     `@jsxFrag` pragmas at the top of this file (esbuild-loader in webpack,
+ *     tsx in tests).
  *
  * Card shell / layout / text blocks keep their `.cos-onboarding-*` classes
  * (styles live in extension.css). Form controls and buttons are Blueprint.
@@ -47,6 +51,16 @@ export function h(type, props, ...children) {
 /** `<>…</>` without JSX — returns a Fragment wrapping `children`. */
 export function frag(...children) {
   return h(getReact().Fragment, null, ...children);
+}
+
+/**
+ * Fragment component for the JSX transform: `<>…</>` compiles to
+ * `h(Frag, null, …)` (see jsxFragment/jsxFragmentFactory in
+ * webpack.config.js and tsconfig.json). A wrapper component rather than
+ * `React.Fragment` itself so nothing touches `window` at module load.
+ */
+export function Frag(props) {
+  return h(getReact().Fragment, null, props.children);
 }
 
 // ---------------------------------------------------------------------------
@@ -103,9 +117,9 @@ export function InfoText(props) {
   const { html, className, style, children } = props || {};
   const cls = "cos-onboarding-text" + (className ? " " + className : "");
   if (typeof html === "string") {
-    return h("div", { className: cls, style, dangerouslySetInnerHTML: { __html: html } });
+    return <div className={cls} style={style} dangerouslySetInnerHTML={{ __html: html }} />;
   }
-  return h("div", { className: cls, style }, children);
+  return <div className={cls} style={style}>{children}</div>;
 }
 
 /**
@@ -117,26 +131,30 @@ export function Hint(props) {
   const { html, children, intent, icon = null, title, className, style } = props || {};
   const { Callout } = getBlueprint();
   const body = typeof html === "string"
-    ? h("span", { dangerouslySetInnerHTML: { __html: html } })
+    ? <span dangerouslySetInnerHTML={{ __html: html }} />
     : children;
   const cls = "cos-onboarding-text cos-onboarding-hint" + (className ? " " + className : "");
-  if (!Callout) return h("div", { className: cls, style }, body);
-  return h(Callout, { className: cls, style, intent, icon, title }, body);
+  if (!Callout) return <div className={cls} style={style}>{body}</div>;
+  return (
+    <Callout className={cls} style={style} intent={intent} icon={icon} title={title}>
+      {body}
+    </Callout>
+  );
 }
 
 /** Bulleted list. Items are HTML strings (or React nodes). */
 export function BulletList(props) {
   const items = (props && props.items) || [];
-  return h(
-    "ul",
-    { className: "cos-onboarding-list" },
-    items
-      .filter((i) => i != null)
-      .map((item, i) =>
-        typeof item === "string"
-          ? h("li", { key: i, dangerouslySetInnerHTML: { __html: item } })
-          : h("li", { key: i }, item)
-      )
+  return (
+    <ul className="cos-onboarding-list">
+      {items
+        .filter((i) => i != null)
+        .map((item, i) =>
+          typeof item === "string"
+            ? <li key={i} dangerouslySetInnerHTML={{ __html: item }} />
+            : <li key={i}>{item}</li>
+        )}
+    </ul>
   );
 }
 
@@ -144,7 +162,7 @@ export function BulletList(props) {
 export function InlineError(props) {
   const message = typeof props === "string" ? props : props && props.message;
   if (!message) return null;
-  return h("div", { className: "cos-onboarding-error" }, String(message));
+  return <div className="cos-onboarding-error">{String(message)}</div>;
 }
 
 /**
@@ -157,7 +175,7 @@ export function useInlineError(initial = null) {
   const [error, setErrorState] = useState(initial == null ? null : String(initial));
   const setError = useCallback((msg) => setErrorState(msg == null ? null : String(msg)), []);
   const clearError = useCallback(() => setErrorState(null), []);
-  return { error, setError, clearError, errorNode: h(InlineError, { message: error }) };
+  return { error, setError, clearError, errorNode: <InlineError message={error} /> };
 }
 
 // ---------------------------------------------------------------------------
@@ -209,26 +227,30 @@ export function Field(props) {
     : { defaultValue: defaultValue != null ? defaultValue : value == null ? "" : value };
 
   const input = InputGroup
-    ? h(InputGroup, {
-        ...shared,
-        ...valueProps,
-        className: "cos-onboarding-input-group" + (className ? " " + className : ""),
-        fill,
-        inputRef: setRef,
-        rightElement,
-      })
-    : h("input", {
-        ...shared,
-        ...valueProps,
-        className: "cos-onboarding-input" + (className ? " " + className : ""),
-        ref: setRef,
-      });
+    ? (
+        <InputGroup
+          {...shared}
+          {...valueProps}
+          className={"cos-onboarding-input-group" + (className ? " " + className : "")}
+          fill={fill}
+          inputRef={setRef}
+          rightElement={rightElement}
+        />
+      )
+    : (
+        <input
+          {...shared}
+          {...valueProps}
+          className={"cos-onboarding-input" + (className ? " " + className : "")}
+          ref={setRef}
+        />
+      );
 
-  return h(
-    "div",
-    { className: "cos-onboarding-field", style },
-    label ? h("label", { className: "cos-onboarding-label" }, label) : null,
-    input
+  return (
+    <div className="cos-onboarding-field" style={style}>
+      {label ? <label className="cos-onboarding-label">{label}</label> : null}
+      {input}
+    </div>
   );
 }
 
@@ -243,38 +265,40 @@ export function Select(props) {
   const normalized = options.map((o) => (typeof o === "string" ? { value: o, label: o } : o));
 
   const select = HTMLSelect
-    ? h(HTMLSelect, {
-        options: normalized,
-        value,
-        onChange,
-        disabled,
-        fill,
-        className: "cos-onboarding-select-wrap" + (className ? " " + className : ""),
-      })
-    : h(
-        "select",
-        {
-          className: "cos-onboarding-select" + (className ? " " + className : ""),
-          value,
-          onChange,
-          disabled,
-        },
-        normalized.map((o) => h("option", { key: String(o.value), value: o.value }, o.label))
+    ? (
+        <HTMLSelect
+          options={normalized}
+          value={value}
+          onChange={onChange}
+          disabled={disabled}
+          fill={fill}
+          className={"cos-onboarding-select-wrap" + (className ? " " + className : "")}
+        />
+      )
+    : (
+        <select
+          className={"cos-onboarding-select" + (className ? " " + className : "")}
+          value={value}
+          onChange={onChange}
+          disabled={disabled}
+        >
+          {normalized.map((o) => (
+            <option key={String(o.value)} value={o.value}>{o.label}</option>
+          ))}
+        </select>
       );
 
   if (!label) return select;
-  return h(
-    "div",
-    {
-      className: "cos-onboarding-field cos-onboarding-field--inline",
-      style: { display: "flex", alignItems: "center", gap: "6px", margin: "8px 0", ...(style || {}) },
-    },
-    h(
-      "label",
-      { className: "cos-onboarding-label", style: { margin: 0, fontSize: "13px", fontWeight: 600 } },
-      label
-    ),
-    select
+  return (
+    <div
+      className="cos-onboarding-field cos-onboarding-field--inline"
+      style={{ display: "flex", alignItems: "center", gap: "6px", margin: "8px 0", ...(style || {}) }}
+    >
+      <label className="cos-onboarding-label" style={{ margin: 0, fontSize: "13px", fontWeight: 600 }}>
+        {label}
+      </label>
+      {select}
+    </div>
   );
 }
 
@@ -289,41 +313,44 @@ export function Select(props) {
 export function Buttons(props) {
   const list = ((props && props.buttons) || []).filter(Boolean);
   const { Button } = getBlueprint();
-  return h(
-    "div",
-    { className: "cos-onboarding-buttons" },
-    list.map((b, i) => {
-      const common = {
-        // Key by position, not label — labels change in place (e.g. the codex
-        // "Connect ChatGPT" → "Waiting for sign-in…" swap) and a label-derived
-        // key would remount the button and drop keyboard focus.
-        key: b.key || `btn-${i}`,
-        onClick: b.onClick,
-        disabled: !!b.disabled,
-        title: b.title,
-        "data-cos-primary": b.primary ? "true" : undefined,
-      };
-      return Button
-        ? h(Button, {
-            ...common,
-            className: b.className,
-            intent: b.primary ? "primary" : undefined,
-            loading: !!b.loading,
-            text: b.label,
-          })
-        : h(
-            "button",
-            {
-              ...common,
-              type: "button",
-              className:
-                "cos-onboarding-btn " +
-                (b.primary ? "cos-onboarding-btn--primary" : "cos-onboarding-btn--secondary") +
-                (b.className ? " " + b.className : ""),
-            },
-            b.label
-          );
-    })
+  return (
+    <div className="cos-onboarding-buttons">
+      {list.map((b, i) => {
+        const common = {
+          // Key by position, not label — labels change in place (e.g. the codex
+          // "Connect ChatGPT" → "Waiting for sign-in…" swap) and a label-derived
+          // key would remount the button and drop keyboard focus.
+          key: b.key || `btn-${i}`,
+          onClick: b.onClick,
+          disabled: !!b.disabled,
+          title: b.title,
+          "data-cos-primary": b.primary ? "true" : undefined,
+        };
+        return Button
+          ? (
+              <Button
+                {...common}
+                className={b.className}
+                intent={b.primary ? "primary" : undefined}
+                loading={!!b.loading}
+                text={b.label}
+              />
+            )
+          : (
+              <button
+                {...common}
+                type="button"
+                className={
+                  "cos-onboarding-btn " +
+                  (b.primary ? "cos-onboarding-btn--primary" : "cos-onboarding-btn--secondary") +
+                  (b.className ? " " + b.className : "")
+                }
+              >
+                {b.label}
+              </button>
+            );
+      })}
+    </div>
   );
 }
 
@@ -333,22 +360,20 @@ export function Buttons(props) {
  */
 export function OptionCards(props) {
   const options = ((props && props.options) || []).filter(Boolean);
-  return h(
-    "div",
-    { className: "cos-onboarding-options" },
-    options.map((o, i) =>
-      h(
-        "button",
-        {
-          key: o.key || o.title || i,
-          type: "button",
-          className: "cos-onboarding-option",
-          onClick: o.onClick,
-        },
-        h("span", { className: "cos-onboarding-option-title" }, o.title),
-        o.description ? h("span", { className: "cos-onboarding-option-desc" }, o.description) : null
-      )
-    )
+  return (
+    <div className="cos-onboarding-options">
+      {options.map((o, i) => (
+        <button
+          key={o.key || o.title || i}
+          type="button"
+          className="cos-onboarding-option"
+          onClick={o.onClick}
+        >
+          <span className="cos-onboarding-option-title">{o.title}</span>
+          {o.description ? <span className="cos-onboarding-option-desc">{o.description}</span> : null}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -358,21 +383,19 @@ export function OptionCards(props) {
 
 /** Wrapper for a list of <SummaryItem>s. */
 export function Summary(props) {
-  return h("div", { className: "cos-onboarding-summary" }, props && props.children);
+  return <div className="cos-onboarding-summary">{props && props.children}</div>;
 }
 
 /** One checklist row: ✓ when `status` is truthy, – otherwise. */
 export function SummaryItem(props) {
   const { label, status } = props || {};
-  return h(
-    "div",
-    { className: "cos-onboarding-summary-item" },
-    h(
-      "span",
-      { className: status ? "cos-onboarding-summary-check" : "cos-onboarding-summary-pending" },
-      status ? "\u2713" : "\u2013"
-    ),
-    h("span", null, ` ${label}`)
+  return (
+    <div className="cos-onboarding-summary-item">
+      <span className={status ? "cos-onboarding-summary-check" : "cos-onboarding-summary-pending"}>
+        {status ? "\u2713" : "\u2013"}
+      </span>
+      <span>{` ${label}`}</span>
+    </div>
   );
 }
 
@@ -487,70 +510,60 @@ export function OnboardingCard(props) {
     e.preventDefault();
   };
 
-  const footerLink = (label, onClick, extraClass, style) =>
-    h(
-      "a",
-      {
-        className: "cos-onboarding-footer-link" + (extraClass ? " " + extraClass : ""),
-        href: "#",
-        style,
-        onClick: (e) => {
-          e.preventDefault();
-          if (typeof onClick === "function") onClick();
-        },
-      },
-      label
-    );
+  const footerLink = (label, onClick, extraClass, style) => (
+    <a
+      className={"cos-onboarding-footer-link" + (extraClass ? " " + extraClass : "")}
+      href="#"
+      style={style}
+      onClick={(e) => {
+        e.preventDefault();
+        if (typeof onClick === "function") onClick();
+      }}
+    >
+      {label}
+    </a>
+  );
 
-  return h(
-    "div",
-    {
+  return (
+    <div
       // bp3-dark keeps Blueprint controls legible on the dark card whatever
       // Roam's active theme is.
-      className:
-        "cos-onboarding-card bp3-dark " + (visible ? "cos-onboarding-visible" : "cos-onboarding-enter"),
-      ref: attachCard,
-    },
-    h(
-      "div",
-      { className: "cos-onboarding-header", onMouseDown: onHeaderMouseDown },
-      h("span", { className: "cos-onboarding-header-title" }, title),
-      h(
-        "button",
-        {
-          type: "button",
-          className: "cos-onboarding-header-close",
-          title: "Close onboarding",
-          onClick: () => {
+      className={
+        "cos-onboarding-card bp3-dark " + (visible ? "cos-onboarding-visible" : "cos-onboarding-enter")
+      }
+      ref={attachCard}
+    >
+      <div className="cos-onboarding-header" onMouseDown={onHeaderMouseDown}>
+        <span className="cos-onboarding-header-title">{title}</span>
+        <button
+          type="button"
+          className="cos-onboarding-header-close"
+          title="Close onboarding"
+          onClick={() => {
             if (typeof onDoLater === "function") onDoLater();
-          },
-        },
-        "\u00d7"
-      )
-    ),
-    h(
-      "div",
-      {
-        key: contentKey,
-        className: "cos-onboarding-content" + (entering ? " cos-onboarding-content-enter" : ""),
-      },
-      children
-    ),
-    h(
-      "div",
-      { className: "cos-onboarding-footer" },
-      h("span", { className: "cos-onboarding-step-indicator" }, `${stepCurrent + 1} of ${stepTotal}`),
-      onBack
-        ? footerLink("\u2190 Back", onBack, "cos-onboarding-back-link", {
-            display: showBack ? "" : "none",
-          })
-        : null,
-      h(
-        "span",
-        { className: "cos-onboarding-footer-links" },
-        onDoLater ? footerLink("Do this later", onDoLater) : null,
-        onSkip ? footerLink("Skip", onSkip) : null
-      )
-    )
+          }}
+        >
+          {"\u00d7"}
+        </button>
+      </div>
+      <div
+        key={contentKey}
+        className={"cos-onboarding-content" + (entering ? " cos-onboarding-content-enter" : "")}
+      >
+        {children}
+      </div>
+      <div className="cos-onboarding-footer">
+        <span className="cos-onboarding-step-indicator">{`${stepCurrent + 1} of ${stepTotal}`}</span>
+        {onBack
+          ? footerLink("\u2190 Back", onBack, "cos-onboarding-back-link", {
+              display: showBack ? "" : "none",
+            })
+          : null}
+        <span className="cos-onboarding-footer-links">
+          {onDoLater ? footerLink("Do this later", onDoLater) : null}
+          {onSkip ? footerLink("Skip", onSkip) : null}
+        </span>
+      </div>
+    </div>
   );
 }

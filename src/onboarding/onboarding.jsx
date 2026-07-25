@@ -1,3 +1,5 @@
+/** @jsx h */
+/** @jsxFrag Frag */
 /**
  * Onboarding flow controller (React 18, mounted with window.ReactDOM).
  *
@@ -12,8 +14,8 @@
  * touches window/document at import time (tests import it under plain node).
  */
 
-import { h, OnboardingCard, focusFirstInput } from "./onboarding-ui.js";
-import { ONBOARDING_STEPS } from "./onboarding-steps.js";
+import { h, OnboardingCard, focusFirstInput } from "./onboarding-ui.jsx";
+import { ONBOARDING_STEPS } from "./onboarding-steps.jsx";
 
 // ── Module-scoped state ──────────────────────────────────────────────────────
 let onboardingRoot = null;       // ReactDOM root
@@ -249,21 +251,21 @@ function OnboardingApp(props) {
     title = activeDeps?.getAssistantDisplayName?.(activeExtensionAPI) || title;
   } catch { /* keep the default */ }
 
-  return h(
-    OnboardingCard,
-    {
-      title,
-      cardRef,
-      contentKey: step.id || String(stepIndex),
-      showBack: findPreviousVisibleStep(stepIndex) >= 0,
-      stepCurrent: visiblePosition,
-      stepTotal: visibleTotal,
-      onBack: () => goBack(),
+  return (
+    <OnboardingCard
+      title={title}
+      cardRef={cardRef}
+      contentKey={step.id || String(stepIndex)}
+      showBack={findPreviousVisibleStep(stepIndex) >= 0}
+      stepCurrent={visiblePosition}
+      stepTotal={visibleTotal}
+      onBack={() => goBack()}
       // "Skip" footer link — advance one step
-      onSkip: () => goToStep(stepIndex + 1),
-      onDoLater: () => doThisLater(),
-    },
-    StepComponent ? h(StepComponent, { ctx }) : null
+      onSkip={() => goToStep(stepIndex + 1)}
+      onDoLater={() => doThisLater()}
+    >
+      {StepComponent ? <StepComponent ctx={ctx} /> : null}
+    </OnboardingCard>
   );
 }
 
@@ -316,7 +318,7 @@ export function launchOnboarding(extensionAPI, deps) {
   onboardingContainer = container;
 
   onboardingRoot = ReactDOM.createRoot(container);
-  onboardingRoot.render(h(OnboardingApp, { initialStep }));
+  onboardingRoot.render(<OnboardingApp initialStep={initialStep} />);
 }
 
 /**

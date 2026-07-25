@@ -22,7 +22,7 @@ import { initCorrectionCapture, trackCosWrite, readBackBlockTree, scanForCorrect
 import { initGraphHygiene, scanOrphanPages, scanStaleLinks, getOrphanPagesResult, getStaleLinkResult, ORPHAN_SCAN_INTERVAL_MS, STALE_LINK_SCAN_INTERVAL_MS } from "./graph-hygiene.js";
 import { initSynthesis, runSynthesisChunk, initialSynthesisState, getSynthesisResult, SYNTHESIS_IDLE_CHECK_INTERVAL_MS } from "./synthesis.js";
 import iziToast from "izitoast";
-import { launchOnboarding, teardownOnboarding } from "./onboarding/onboarding.js";
+import { launchOnboarding, teardownOnboarding } from "./onboarding/onboarding.jsx";
 import { computeRoutingScore, recordTurnOutcome, sessionTrajectory } from "./tier-routing.js";
 import {
   initChatPanel, getChatPanelIsOpen, getChatPanelContainer, getChatPanelMessages,

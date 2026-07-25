@@ -9,6 +9,23 @@ module.exports = {
             type: "module",
         },
     },
+  module: {
+    rules: [
+      {
+        test: /\.jsx$/,
+        loader: "esbuild-loader",
+        options: {
+          // JSX compiles to the lazy h()/Frag helpers from onboarding-ui.jsx
+          // (window.React resolved at render time — never bundled).
+          loader: "jsx",
+          jsx: "transform",
+          jsxFactory: "h",
+          jsxFragment: "Frag",
+          target: "es2020",
+        },
+      },
+    ],
+  },
   resolve: {
     extensions: [".ts", ".tsx", ".js", ".jsx"],
     fallback: {

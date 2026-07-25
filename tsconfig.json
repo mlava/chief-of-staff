@@ -1,0 +1,17 @@
+{
+  // Not used for type-checking — this configures the JSX transform for the
+  // `tsx` test loader (node --import tsx), mirroring the esbuild-loader
+  // options in webpack.config.js: JSX compiles to h()/Frag from
+  // src/onboarding/onboarding-ui.jsx.
+  "compilerOptions": {
+    "jsx": "react",
+    "jsxFactory": "h",
+    "jsxFragmentFactory": "Frag",
+    "allowJs": true,
+    "checkJs": false,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "es2020",
+    "noEmit": true
+  }
+}
