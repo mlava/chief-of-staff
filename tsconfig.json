@@ -1,0 +1,15 @@
+{
+  // Editor tooling only (IntelliSense for .jsx files). JSX uses the classic
+  // React.createElement transform — esbuild-loader (build) and tsx (tests)
+  // both default to it; webpack externals map the react imports to
+  // window.React at build time.
+  "compilerOptions": {
+    "jsx": "react",
+    "allowJs": true,
+    "checkJs": false,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "es2020",
+    "noEmit": true
+  }
+}

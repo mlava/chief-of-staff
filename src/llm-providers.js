@@ -105,6 +105,72 @@ export function getCustomProviderConfig(extensionAPI, provider) {
   };
 }
 
+// True when the user has ANY way to reach an LLM: a built-in provider key,
+// the legacy shared key, a connected ChatGPT subscription, or a configured
+// custom slot. Single source of truth for onboarding gating and the first-run
+// trigger — add new provider paths here, not at call sites.
+export function hasAnyLlmConfigured(extensionAPI) {
+  if (!extensionAPI) return false;
+  const k = deps.SETTINGS_KEYS;
+  const keyFields = [
+    k.anthropicApiKey, k.openaiApiKey, k.geminiApiKey,
+    k.mistralApiKey, k.groqApiKey, k.llmApiKey
+  ];
+  if (keyFields.some(key => !!deps.getSettingString(extensionAPI, key, "").trim())) return true;
+  if (deps.isCodexConnected?.(extensionAPI)) return true;
+  return listCustomProviderIds(extensionAPI).length > 0;
+}
+
+// First slot (1..CAP) with no base URL configured, or null when all are taken.
+// Scans every slot rather than count+1: listCustomProviderIds skips blank-URL
+// slots inside the count, so a gap left by a cleared slot should be reused.
+export function nextFreeCustomSlot(extensionAPI) {
+  for (let i = 1; i <= CUSTOM_LLM_SLOT_CAP; i++) {
+    if (!deps.getSettingString(extensionAPI, `custom-llm-${i}-base-url`, "").trim()) return i;
+  }
+  return null;
+}
+
+// Save a custom OpenAI-compatible provider into the next free slot and make it
+// the primary provider. Throws Error with a user-facing message on invalid
+// input or when all slots are taken (onboarding shows it inline).
+export function saveCustomProviderSlot(extensionAPI, { name = "", baseUrl = "", apiKey = "", miniModel = "" } = {}) {
+  const trimmedUrl = String(baseUrl || "").trim().replace(/\/+$/, "");
+  let parsed = null;
+  try { parsed = new URL(trimmedUrl); } catch { /* handled below */ }
+  if (!parsed || (parsed.protocol !== "http:" && parsed.protocol !== "https:")) {
+    throw new Error("That doesn’t look like a valid URL — it should start with http:// or https://, e.g. http://localhost:1234/v1");
+  }
+  const trimmedModel = String(miniModel || "").trim();
+  if (!trimmedModel) {
+    throw new Error("A model name is required — it’s the model ID your server exposes.");
+  }
+  const slot = nextFreeCustomSlot(extensionAPI);
+  if (!slot) {
+    throw new Error(`All ${CUSTOM_LLM_SLOT_CAP} custom provider slots are configured — manage them in Settings → Chief of Staff.`);
+  }
+  const trimmedName = String(name || "").trim();
+  const trimmedKey = String(apiKey || "").trim();
+  extensionAPI.settings.set(`custom-llm-${slot}-base-url`, trimmedUrl);
+  extensionAPI.settings.set(`custom-llm-${slot}-mini-model`, trimmedModel);
+  // Always write name/key, even blank — a reused slot may hold stale values
+  // from a previously cleared config (a stale Bearer key must not leak to the
+  // new server).
+  extensionAPI.settings.set(`custom-llm-${slot}-name`, trimmedName);
+  extensionAPI.settings.set(`custom-llm-${slot}-api-key`, trimmedKey);
+  const rawCount = extensionAPI.settings.get("custom-llm-count");
+  const currentCount = Math.min(CUSTOM_LLM_SLOT_CAP, Math.max(0, parseInt(rawCount, 10) || 0));
+  if (slot > currentCount) extensionAPI.settings.set("custom-llm-count", slot);
+  // llm-provider stores the compound "custom-N — Name" label when a custom
+  // name is set — must match the settings dropdown / onload label sync in
+  // index.js exactly, or the select widget shows nothing selected.
+  const providerId = `custom-${slot}`;
+  const isDefaultName = !trimmedName || trimmedName === `Custom ${slot}`;
+  const providerValue = isDefaultName ? providerId : `${providerId} — ${trimmedName}`;
+  extensionAPI.settings.set(deps.SETTINGS_KEYS.llmProvider, providerValue);
+  return { slot, providerId, providerValue, name: trimmedName || `Custom ${slot}` };
+}
+
 // True when the request to this provider should omit the `tools` field entirely.
 // Used for OpenRouter free models or small local models that don't support tool
 // calling — sending an empty or non-empty `tools` list still makes them 404.

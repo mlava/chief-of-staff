@@ -2,12 +2,13 @@
   "name": "chief-of-staff",
   "version": "1.0.0",
   "description": "Your personal Chief of Staff within Roam Research",
+  "type": "module",
   "license": "ISC",
   "author": "Mark Lavercombe",
   "main": "index.js",
   "scripts": {
     "build": "webpack",
-    "test": "node --experimental-default-type=module --test tests/*.test.mjs",
+    "test": "node --import tsx --test tests/*.test.mjs",
     "test:security": "node --test tests/security-core.test.mjs",
     "test:idle": "node --test tests/idle-scheduler.test.mjs",
     "test:eval": "node --test tests/eval-regression.test.mjs",
@@ -19,9 +20,13 @@
   "devDependencies": {
     "browserify-zlib": "^0.2.0",
     "buffer": "^6.0.3",
+    "esbuild-loader": "^4.5.0",
     "https-browserify": "^1.0.0",
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
     "stream-browserify": "^3.0.0",
     "stream-http": "^3.2.0",
+    "tsx": "^4.23.1",
     "url": "^0.11.4",
     "webpack": "^5.107.2",
     "webpack-cli": "^6.0.1"

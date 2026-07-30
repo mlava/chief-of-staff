@@ -22,7 +22,7 @@ import { initCorrectionCapture, trackCosWrite, readBackBlockTree, scanForCorrect
 import { initGraphHygiene, scanOrphanPages, scanStaleLinks, getOrphanPagesResult, getStaleLinkResult, ORPHAN_SCAN_INTERVAL_MS, STALE_LINK_SCAN_INTERVAL_MS } from "./graph-hygiene.js";
 import { initSynthesis, runSynthesisChunk, initialSynthesisState, getSynthesisResult, SYNTHESIS_IDLE_CHECK_INTERVAL_MS } from "./synthesis.js";
 import iziToast from "izitoast";
-import { launchOnboarding, teardownOnboarding } from "./onboarding/onboarding.js";
+import { launchOnboarding, teardownOnboarding } from "./onboarding/onboarding.jsx";
 import { computeRoutingScore, recordTurnOutcome, sessionTrajectory } from "./tier-routing.js";
 import {
   initChatPanel, getChatPanelIsOpen, getChatPanelContainer, getChatPanelMessages,
@@ -162,7 +162,9 @@ import {
   isCustomProvider,
   listCustomProviderIds,
   getCustomProviderConfig,
-  getValidProviders
+  getValidProviders,
+  hasAnyLlmConfigured,
+  saveCustomProviderSlot
 } from "./llm-providers.js";
 import {
   initConversation,
@@ -5267,6 +5269,14 @@ function buildOnboardingDeps(extensionAPI) {
     // Custom LLM provider awareness for the summary screen
     listCustomProviderIds,
     getCustomProviderConfig,
+    // LLM setup paths for the "connect an AI model" step
+    // (API key / ChatGPT subscription / custom provider)
+    hasAnyLlmConfigured,
+    saveCustomProviderSlot,
+    isCodexConnected,
+    getCodexAuthStatus,
+    connectCodex: () => startCodexConnectFlow(extensionAPI),
+    cancelCodexConnect: () => { stopCodexAuthPolling(); hideCodexCodeToast(); },
   };
 }
 
@@ -5297,8 +5307,13 @@ function disconnectCodexAndRestoreProvider(extensionAPI) {
   }
 }
 
-async function startCodexConnectFlow(extensionAPI) {
-  await startCodexDeviceConnect(extensionAPI, {
+function startCodexConnectFlow(extensionAPI) {
+  // Resolves { connected, status?, error? } only when the device flow SETTLES.
+  // startCodexDeviceConnect itself returns right after showing the code (the
+  // polling is fire-and-forget), so callers that need the outcome — the
+  // onboarding codex path — must get it via these callbacks. Never rejects.
+  return new Promise((resolve) => {
+  startCodexDeviceConnect(extensionAPI, {
     onCode: ({ userCode, verifyUrl, expiresInMinutes }) => {
       iziToast.show({
         class: "cos-toast cos-codex-code-toast",
@@ -5350,11 +5365,20 @@ async function startCodexConnectFlow(extensionAPI) {
         "ChatGPT-subscription calls route through Roam's shared CORS proxy, which times out at ~60s. "
         + "Everyday queries are fine; heavy skill runs will fail. Switch to an API-key provider (e.g. Anthropic) for those."
       );
+      resolve({ connected: true, status });
     },
     onError: (error) => {
       hideCodexCodeToast();
       showErrorToast("ChatGPT subscription connection failed", String(error?.message || error));
+      resolve({ connected: false, error });
     }
+  }).catch((error) => {
+    // Defensive: startCodexDeviceConnect routes its own failures through
+    // onError; this only catches unexpected sync/async throws so the
+    // promise always settles.
+    hideCodexCodeToast();
+    resolve({ connected: false, error });
+  });
   });
 }
 
@@ -7326,19 +7350,9 @@ function onload({ extensionAPI }) {
     onboardingCheckTimeoutId = null;
     if (unloadInProgress || extensionAPIRef === null) return;
     const hasCompleted = extensionAPI.settings.get(SETTINGS_KEYS.onboardingComplete);
-    const hasBuiltinKey =
-      getSettingString(extensionAPI, SETTINGS_KEYS.anthropicApiKey, "") ||
-      getSettingString(extensionAPI, SETTINGS_KEYS.openaiApiKey, "") ||
-      getSettingString(extensionAPI, SETTINGS_KEYS.geminiApiKey, "") ||
-      getSettingString(extensionAPI, SETTINGS_KEYS.mistralApiKey, "") ||
-      getSettingString(extensionAPI, SETTINGS_KEYS.groqApiKey, "") ||
-      getSettingString(extensionAPI, SETTINGS_KEYS.llmApiKey, "");
-    // A configured custom slot (LM Studio, Ollama, OpenRouter, etc.) or a
-    // connected ChatGPT subscription is just as valid an "I have an LLM"
-    // signal as a built-in key.
-    const hasCustomSlot = listCustomProviderIds(extensionAPI).length > 0;
-    const hasCodexSubscription = isCodexConnected(extensionAPI);
-    if (!hasCompleted && !hasBuiltinKey && !hasCustomSlot && !hasCodexSubscription) {
+    // Any way to reach an LLM — built-in key, legacy key, ChatGPT
+    // subscription, custom slot — counts as "already set up".
+    if (!hasCompleted && !hasAnyLlmConfigured(extensionAPI)) {
       launchOnboarding(extensionAPI, buildOnboardingDeps(extensionAPI));
     }
   }, 1500);
