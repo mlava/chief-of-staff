@@ -22,7 +22,12 @@ import {
 } from "../src/synthesis.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const NOW = Date.parse("July 8, 2026");
+// Tracks the real clock deliberately. The unit tests below pass `{ nowMs: NOW }`
+// explicitly, but the two full-run tests drive runSynthesisChunk, which has no
+// nowMs seam and calls Date.now() internally. Pinning NOW to a literal date made
+// those fixtures age against the real clock and fail permanently once it drifted
+// past SYNTHESIS_WINDOW_DAYS (30) from the pin — which is what happened.
+const NOW = Date.now();
 
 function daysAgoTitle(days) {
   // Produce a Roam-style title for NOW - days (ordinal suffix included)
