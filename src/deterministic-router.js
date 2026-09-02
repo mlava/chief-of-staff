@@ -1276,7 +1276,7 @@ export async function buildHelpSummary() {
   const lines = [];
   const extensionAPIRef = deps.getExtensionAPIRef();
   const provider = extensionAPIRef ? deps.getLlmProvider(extensionAPIRef) : "unknown";
-  const providerLabel = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Google Gemini", mistral: "Mistral", groq: "Groq" }[provider] || provider;
+  const providerLabel = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Google Gemini", mistral: "Mistral", groq: "Groq", grok: "Grok (xAI)", kimi: "Kimi (Moonshot)", "kimi-coding": "Kimi Code", deepseek: "DeepSeek", ollama: "Ollama" }[provider] || provider;
   const assistantName = deps.getAssistantDisplayName();
 
   lines.push(`## ${assistantName}`);
@@ -1294,7 +1294,12 @@ export async function buildHelpSummary() {
       openai: { key: deps.SETTINGS_KEYS.openaiApiKey, label: "OpenAI" },
       gemini: { key: deps.SETTINGS_KEYS.geminiApiKey, label: "Gemini" },
       mistral: { key: deps.SETTINGS_KEYS.mistralApiKey, label: "Mistral" },
-      groq: { key: deps.SETTINGS_KEYS.groqApiKey, label: "Groq" }
+      groq: { key: deps.SETTINGS_KEYS.groqApiKey, label: "Groq" },
+      grok: { key: deps.SETTINGS_KEYS.grokApiKey, label: "Grok (xAI)" },
+      kimi: { key: deps.SETTINGS_KEYS.kimiApiKey, label: "Kimi (Moonshot)" },
+      "kimi-coding": { key: deps.SETTINGS_KEYS.kimiCodingApiKey, label: "Kimi Code" },
+      deepseek: { key: deps.SETTINGS_KEYS.deepseekApiKey, label: "DeepSeek" },
+      ollama: { key: deps.SETTINGS_KEYS.ollamaApiKey, label: "Ollama" }
     };
     const configured = [];
     for (const [prov, { key, label }] of Object.entries(providerKeyMap)) {

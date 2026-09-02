@@ -1,8 +1,8 @@
 {
-  "generatedAt": "2026-07-13T06:27:07.911Z",
-  "serialNumber": "urn:uuid:7dd8a478-7f19-4bc6-8487-edb50b9064b7",
-  "sha256": "d7d847aeb65f1e6453ee1d2cd756feb26202d2ab0c6c1c5c8f4b34357ebd7176",
-  "componentCount": 234,
+  "generatedAt": "2026-08-26T03:59:16.338Z",
+  "serialNumber": "urn:uuid:6f01ccd9-4aac-4dea-a365-d2985929d288",
+  "sha256": "3d7e43aa7cd414a15a7265fa41b11d3a344861b933ae48249cd5939d4990648f",
+  "componentCount": 254,
   "npmComponentCount": 210,
-  "aiComponentCount": 24
+  "aiComponentCount": 44
 }

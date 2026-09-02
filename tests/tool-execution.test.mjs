@@ -8,6 +8,8 @@ import {
   convertMessagesForProvider,
   detectSuccessfulWriteToolCallsInMessages,
   computeToolCallScope,
+  sandboxWriteFenceError,
+  slotGrammarRefuseError,
 } from "../src/tool-execution.js";
 
 // ── Shared mock deps ────────────────────────────────────────────────────────
@@ -635,4 +637,149 @@ test("isExternalDataToolCall: roam_semantic_search satisfies the live-data guard
   assert.equal(isExternalDataToolCall("roam_semantic_search"), true,
     "roam_semantic_search must ground live-data intents or the guard overwrites valid answers");
   assert.equal(isExternalDataToolCall("roam_create_block"), false);
+});
+// ═════════════════════════════════════════════════════════════════════════════
+// sandboxWriteFenceError
+// ═════════════════════════════════════════════════════════════════════════════
+
+const SANDBOX_MSG = "schedule gaming 9pm to midnight [sandbox]";
+
+test("sandbox fence: roam_create_block onto today's daily page refuses, no execute", () => {
+  initToolExecution(makeDeps());
+  const err = sandboxWriteFenceError(
+    "roam_create_block",
+    { parent_uid: "TODAYUID", text: "hi" },
+    SANDBOX_MSG,
+    { todayPageUid: "TODAYUID", resolvePage: (u) => u }
+  );
+  assert.ok(err?.error?.includes("writes to today's daily page are blocked"));
+});
+
+test("sandbox fence: omitted parent_uid on roam_create_todo refuses", () => {
+  initToolExecution(makeDeps());
+  const err = sandboxWriteFenceError(
+    "roam_create_todo",
+    { text: "x" },
+    SANDBOX_MSG,
+    { todayPageUid: "TODAYUID", resolvePage: (u) => u }
+  );
+  assert.ok(err?.error?.includes("parent_uid is required"));
+});
+
+test("sandbox fence: sandbox page uid target passes (returns null)", () => {
+  initToolExecution(makeDeps());
+  const err = sandboxWriteFenceError(
+    "roam_create_block",
+    { parent_uid: "SANDBOXPG", text: "hi" },
+    SANDBOX_MSG,
+    { todayPageUid: "TODAYUID", resolvePage: (u) => u }
+  );
+  assert.equal(err, null);
+});
+
+test("sandbox fence: no [sandbox] pin → fence off even on today's page", () => {
+  initToolExecution(makeDeps());
+  const err = sandboxWriteFenceError(
+    "roam_create_block",
+    { parent_uid: "TODAYUID", text: "hi" },
+    "schedule gaming 9pm to midnight",
+    { todayPageUid: "TODAYUID", resolvePage: (u) => u }
+  );
+  assert.equal(err, null);
+});
+
+test("sandbox fence: ROAM_EXECUTE unwrap, cos_schedule_block exempt, fail-closed on garbage", () => {
+  initToolExecution(makeDeps());
+  // Inner tool is fenced too
+  const wrapped = sandboxWriteFenceError(
+    "ROAM_EXECUTE",
+    { tool_name: "roam_create_block", arguments: { parent_uid: "TODAYUID", text: "hi" } },
+    SANDBOX_MSG,
+    { todayPageUid: "TODAYUID", resolvePage: (u) => u }
+  );
+  assert.ok(wrapped?.error, "ROAM_EXECUTE-wrapped write must be fenced");
+  // cos_schedule_block self-pins — exempt
+  assert.equal(
+    sandboxWriteFenceError("cos_schedule_block", { start: "21:00", end: "00:00" }, SANDBOX_MSG,
+      { todayPageUid: "TODAYUID", resolvePage: (u) => u }),
+    null
+  );
+  // Present-but-unresolvable target fails closed
+  const garbage = sandboxWriteFenceError(
+    "roam_create_block",
+    { parent_uid: "August 26th, 2026", text: "hi" },
+    SANDBOX_MSG,
+    { todayPageUid: "TODAYUID", resolvePage: () => null }
+  );
+  assert.ok(garbage?.error, "unresolvable target must refuse");
+});
+
+test("sandbox fence: roam_move_block checks source AND destination", () => {
+  initToolExecution(makeDeps());
+  const destToday = sandboxWriteFenceError(
+    "roam_move_block",
+    { uid: "SANDBOXBLK", parent_uid: "TODAYUID" },
+    SANDBOX_MSG,
+    { todayPageUid: "TODAYUID", resolvePage: (u) => u }
+  );
+  assert.ok(destToday?.error, "moving INTO today's page must refuse");
+  const bothSandbox = sandboxWriteFenceError(
+    "roam_move_block",
+    { uid: "SANDBOXBLK", parent_uid: "SANDBOXPG" },
+    SANDBOX_MSG,
+    { todayPageUid: "TODAYUID", resolvePage: (u) => u }
+  );
+  assert.equal(bothSandbox, null);
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// slotGrammarRefuseError
+// ═════════════════════════════════════════════════════════════════════════════
+
+test("slot grammar: slot line with ((uid)) through roam_create_block refuses", () => {
+  initToolExecution(makeDeps());
+  const err = slotGrammarRefuseError("roam_create_block", {
+    parent_uid: "p", text: "21:00 - 00:00 (**180'**) ((abc))"
+  });
+  assert.equal(err?.error, "Timed slots go through cos_schedule_block — this tool's markdown parsing mangles ((refs)).");
+});
+
+test("slot grammar: #Event slot line refuses; plain text and headings pass", () => {
+  initToolExecution(makeDeps());
+  const event = slotGrammarRefuseError("roam_create_block", {
+    parent_uid: "p", text: "19:00 - 21:00  Dinner #Event"
+  });
+  assert.ok(event?.error, "#Event slot line must refuse");
+
+  assert.equal(slotGrammarRefuseError("roam_create_block", { parent_uid: "p", text: "hello" }), null);
+  assert.equal(
+    slotGrammarRefuseError("roam_update_block", { uid: "x", text: "Schedule #TimeBlock" }),
+    null,
+    "a heading edit must pass"
+  );
+  // Any slot-shaped line is refused, even without ((uid)) or #Event
+  assert.ok(
+    slotGrammarRefuseError("roam_create_block", { parent_uid: "p", text: "21:00 - 00:00 plain note" })?.error,
+    "plain slot line must refuse"
+  );
+});
+
+test("slot grammar: scans batches and ROAM_EXECUTE inner args", () => {
+  initToolExecution(makeDeps());
+  const batched = slotGrammarRefuseError("roam_create_blocks", {
+    batches: [{ parent_uid: "p", blocks: [{ text: "21:00 - 00:00 (**180'**) ((abc))" }] }]
+  });
+  assert.ok(batched?.error, "batches[].blocks[].text must be scanned");
+
+  const wrapped = slotGrammarRefuseError("ROAM_EXECUTE", {
+    tool_name: "roam_batch_write",
+    arguments: { parent_uid: "p", markdown: "- 21:00 - 00:00 (**180'**) ((abc))" }
+  });
+  assert.ok(wrapped?.error, "a markdown list item slot line must refuse");
+
+  const wrappedSlot = slotGrammarRefuseError("ROAM_EXECUTE", {
+    tool_name: "roam_batch_write",
+    arguments: { parent_uid: "p", markdown: "21:00 - 00:00 (**180'**) ((abc))" }
+  });
+  assert.ok(wrappedSlot?.error, "ROAM_EXECUTE inner batch_write slot must refuse");
 });

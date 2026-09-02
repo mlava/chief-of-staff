@@ -1,6 +1,6 @@
 # Chief of Staff
 
-An AI assistant embedded in Roam Research. Chief of Staff connects your Roam graph to large language models — Anthropic, OpenAI, Google Gemini, Mistral, Groq, or any OpenAI-compatible endpoint (LM Studio, Ollama, OpenRouter, vLLM, …) — and to external tools via [Composio](https://composio.dev), letting you ask questions, search and manage tasks, and orchestrate actions across your connected apps — all without leaving Roam.
+An AI assistant embedded in Roam Research. Chief of Staff connects your Roam graph to large language models — Anthropic, OpenAI, Google Gemini, Mistral, Groq, Grok, Kimi (Moonshot), Kimi Code, DeepSeek, Ollama (Cloud or local), or any OpenAI-compatible endpoint (LM Studio, OpenRouter, vLLM, …) — and to external tools via [Composio](https://composio.dev), letting you ask questions, search and manage tasks, and orchestrate actions across your connected apps — all without leaving Roam.
 
 https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 
@@ -10,8 +10,9 @@ https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 
 - **Ask anything** via the command palette or a persistent floating chat panel. The assistant can read your graph, create blocks, and call external tools — with your approval before any write operation. Common queries (task searches, memory saves, tool lists) are handled instantly without an LLM call.
 - **Graph search — exact and semantic** — search uses Roam's native ranked engine: page-title matches rank above block matches, and results include page context. If your graph has **semantic search** enabled (requires embeddings enabled in Roam's settings and a signed-in user), the assistant can also search by *meaning* — "what have I written that relates to burnout?" surfaces compassion-fatigue and change-fatigue notes even when the word "burnout" never appears. Conceptual phrasing like `find my notes about racquet sports` routes to semantic search automatically; when semantic search isn't available it falls back to exact-text search and tells you so.
-- **Multi-provider LLM support** — choose from Anthropic Claude, OpenAI GPT, Google Gemini, Mistral, Groq, or up to three **custom OpenAI-compatible endpoints** (LM Studio, Ollama, OpenRouter, vLLM, self-hosted, etc.) as your primary provider. If one provider is unavailable, the assistant automatically fails over to the next available provider in the chain. Custom local slots support a privacy mode that disables fallback to cloud providers — failed requests surface as errors instead of silently routing to a remote API.
+- **Multi-provider LLM support** — choose from Anthropic Claude, OpenAI GPT, Google Gemini, Mistral, Groq, Grok (xAI), Kimi (Moonshot), Kimi Code, DeepSeek, Ollama (Cloud or a local server), or up to three **custom OpenAI-compatible endpoints** (LM Studio, OpenRouter, vLLM, self-hosted, etc.) as your primary provider. If one provider is unavailable, the assistant automatically fails over to the next available provider in the chain. Custom local slots support a privacy mode that disables fallback to cloud providers — failed requests surface as errors instead of silently routing to a remote API.
 - **Better Tasks integration** — search, create, and modify Better Tasks (TODO/DONE parent blocks with `BT_attr*` attribute children) directly from natural language. Supports filtering by due date, project, status, and free text.
+- **Timed blocks** — one window on a daily page, written as `HH:MM - HH:MM (**N'**) ((uid))`. This is not a cron job; those stay under [Scheduled jobs](#scheduled-jobs). A JS executor owns clocks (`from 9 to 10pm`, `2 hours from 9pm`), today/tomorrow, overlap-on-request, move-by-title, unschedule-by-title (slot only, not the TODO), multi-window "and", and the `((uid))` placeholder, so Kimi, DeepSeek, Ollama, Grok, and the rest write the same line. One new window is `cos_schedule_block`; slot lines through roam_create_block are refused. Overlaps are refused unless you say "same time", "overlap", or "during lunch", or you turn on **Allow overlapping timed blocks**. Add / book / timebox work as well as "schedule". A full-day rewrite still runs as a skill, if the graph has one.
 - **Persistent memory** — loads context from dedicated memory pages into the system prompt each run (see [Memory and learning](#memory-and-learning)).
 - **Skill routing** — reads `Chief of Staff/Skills`, injects a compact skill index into the prompt, and can apply a specific skill on request. A gathering completeness guard ensures the assistant calls all required data sources before writing. Skills can declare **pre-flight acceptance criteria** (an `Acceptance:` field) — binding pass/fail conditions injected into the system prompt before the skill runs, so the model knows exactly what its output must satisfy. Same criteria are also passed to the post-run eval-judge.
 - **Skill & cron staleness detection** — track when each skill and scheduled job was last reviewed via a `Last reviewed::` attribute. A configurable threshold (default 30 days) triggers a once-per-day startup warning toast when items drift past it, and `cos_review_skill` / `cos_review_cron` tools mark items as current. Ask "stale skills" or "staleness report" any time. Prevents the silent process calcification problem where automations keep running long after the underlying workflow has changed.
@@ -22,7 +23,7 @@ https://www.loom.com/share/9aa3c07de0f147af971d2fc54fe65e4a
 - **Web page fetching** — fetch any public web page and return its content as Markdown using Cloudflare's Browser Rendering API. Useful for importing articles, documentation, or reference material into your graph. Requires a Cloudflare API token (free tier available).
 - **Scheduled jobs** — create recurring or one-shot scheduled tasks (cron expressions, intervals, or specific times) that the assistant runs automatically. Multi-tab safe via leader election.
 - **Self-healing tool calls** — if the LLM claims to have done something without actually doing it, the extension detects the hallucination, retries with the correct tool, and auto-escalates to a smarter model if needed. No user intervention required.
-- **Three model tiers with automatic routing** — most requests use a fast, cheap model. Append `/power` or `/ludicrous` to your message to force a more capable tier, or let the extension auto-escalate based on request complexity. You can also force a specific provider with `/claude`, `/gemini`, `/openai`, `/mistral`, or `/groq`. See [How tiers work](#how-tiers-work) for details.
+- **Three model tiers with automatic routing** — most requests use a fast, cheap model. Append `/power` or `/ludicrous` to your message to force a more capable tier, or let the extension auto-escalate based on request complexity. You can also force a specific provider with `/claude`, `/gemini`, `/openai`, `/mistral`, `/groq`, `/grok`, `/kimi`, `/kimi-code`, `/deepseek`, or `/ollama`. See [How tiers work](#how-tiers-work) for details.
 - **Anthropic advisor tool (beta, opt-in)** — when running on Anthropic, the cheap executor (Haiku/Sonnet) can consult Opus on hard judgment calls within a single API call without giving up control of the agent loop. The advisor returns guidance only; it never executes tools. Off by default; enable in Advanced settings. See [Anthropic advisor tool](#anthropic-advisor-tool) for details.
 - **Plan-first execution** — prefix any request with `/plan` to get a preview instead of an action. The assistant explores your graph read-only and lays out the exact steps, tools, and writes it intends, then waits for your one-click approval (Run plan / Discard) before making any changes. See [Chat panel](#chat-panel).
 - **Undo the assistant's last changes** — `/undo` (or just saying "undo" / "oops") reverses everything the assistant wrote in its last run: created blocks are deleted, edited blocks restored to their previous content. It shows you exactly what will be reversed before doing anything, skips blocks you've edited since, and never touches your own edits — Roam's native Ctrl/Cmd+Z covers those. See [Chat panel](#chat-panel).
@@ -49,7 +50,7 @@ Chief of Staff runs entirely inside your Roam browser tab — there's no server,
 
 Here's what crosses the network when something does run:
 
-**LLM calls** — Your prompt and supporting context are sent to whichever LLM provider you've configured (Anthropic, OpenAI, Google, Mistral, Groq, or a custom OpenAI-compatible endpoint of your choice). The context sent alongside your message includes conversation history (up to 12 prior turns), your COS memory pages, active project list, any active skill instructions, and tool results gathered during the current run (e.g. Roam search results, calendar events). Anthropic calls go direct from your browser; other built-in providers route through Roam's built-in CORS proxy. Custom slots pointing at `localhost` go direct (browser secure-context exception); custom slots pointing at remote URLs go direct by default and can opt into the proxy. An optional PII scrubbing setting can strip emails, phone numbers, and other sensitive patterns before anything is sent.
+**LLM calls** — Your prompt and supporting context are sent to whichever LLM provider you've configured (Anthropic, OpenAI, Google, Mistral, Groq, Grok, Kimi (Moonshot), Kimi Code, DeepSeek, Ollama, or a custom OpenAI-compatible endpoint of your choice). The context sent alongside your message includes conversation history (up to 12 prior turns), your COS memory pages, active project list, any active skill instructions, and tool results gathered during the current run (e.g. Roam search results, calendar events). Anthropic calls go direct from your browser; other built-in providers route through Roam's built-in CORS proxy. Custom slots pointing at `localhost` go direct (browser secure-context exception); custom slots pointing at remote URLs go direct by default and can opt into the proxy. An optional PII scrubbing setting can strip emails, phone numbers, and other sensitive patterns before anything is sent.
 
 **Composio integrations** — If you optionally connect external services (Gmail, Calendar, GitHub, etc.) through Composio, those tool calls go through Composio's API via a CORS proxy. Entirely opt-in — nothing connects unless you explicitly set it up and authenticate.
 
@@ -59,7 +60,7 @@ Here's what crosses the network when something does run:
 
 **Asking for help** — A dedicated remote MCP server contains semantically chunked documentation from the COS readme, other extension READMEs, and Roam help articles. When you ask "how do I connect to remote MCP servers?" this is where the query goes. It's hosted on a Supabase database controlled by the extension author.
 
-**What it can do inside your graph** — When you ask Chief of Staff to do something, it has access to Roam tools that can search blocks, read pages, create/edit/delete blocks, create pages, manage TODOs, and navigate your graph. If Better Tasks is installed, it can also search, create, and modify tasks with full attribute support. These tools only run during an active request — they don't scan or index your graph in the background by default.
+**What it can do inside your graph** — When you ask Chief of Staff to do something, it has access to Roam tools that can search blocks, read pages, create/edit/delete blocks, create pages, manage TODOs, and navigate your graph. If Better Tasks is installed, it can also search, create, and modify tasks with full attribute support. If Roam Grid is installed, its `rg_*` tools show up through the same Extension Tools path as other extensions once you enable the **Roam Grid** toggle (off by default). These tools only run during an active request — they don't scan or index your graph in the background by default.
 
 **Safety defaults** — Any action that modifies your graph (creating, editing, or deleting blocks) requires your explicit approval via a confirmation prompt. Read-only operations (searching, fetching) proceed automatically.
 
@@ -73,9 +74,10 @@ For full technical details on security measures, injection defences, and credent
 
 | Requirement | Notes |
 |---|---|
-| At least one LLM API key (Anthropic, OpenAI, Gemini, Mistral, Groq), **or** a ChatGPT Plus/Pro subscription (see [ChatGPT subscription auth](#chatgpt-subscription-auth-experimental)), **or** a custom OpenAI-compatible endpoint (LM Studio, Ollama, OpenRouter, vLLM, …) | API keys use direct browser fetch — incurs API costs at your provider's rates. Groq requires a paid plan (Dev tier or above) — the free tier's token-per-minute limit is too low. ChatGPT subscription auth draws on the plan's weekly quota instead of API billing (experimental). Local servers (LM Studio, Ollama) cost nothing and run offline. |
+| At least one LLM API key (Anthropic, OpenAI, Gemini, Mistral, Groq, Grok, Kimi Moonshot, Kimi Code, DeepSeek, Ollama Cloud), **or** a ChatGPT Plus/Pro subscription (see [ChatGPT subscription auth](#chatgpt-subscription-auth-experimental)), **or** a local Ollama server, **or** a custom OpenAI-compatible endpoint (LM Studio, OpenRouter, vLLM, …) | API keys use direct browser fetch — incurs API costs at your provider's rates. Groq requires a paid plan (Dev tier or above) — the free tier's token-per-minute limit is too low. ChatGPT subscription auth draws on the plan's weekly quota instead of API billing (experimental). Kimi Code, Ollama Cloud, and ChatGPT subscription calls are metered as zero-cost in Chief of Staff (billing lives on the subscription side). Local servers (LM Studio, Ollama on localhost) cost nothing and run offline. |
 | Composio account + API key | Only required for external tool integrations. Graph and task features work without it. |
 | [Better Tasks](https://github.com/mlava/recurring-tasks) extension | Only required for Better Tasks integration. Plain TODO search works without it. |
+| Roam Grid extension | Only required for grid tools (`rg_*`). Chief of Staff works without it. |
 
 ---
 
@@ -87,33 +89,56 @@ Open **Settings > Chief of Staff** and fill in:
 
 - **Your Name** — how Chief of Staff addresses you
 - **Assistant Name** — display-only label used in chat header and toasts (default: `Chief of Staff`)
-- **LLM Provider** — `anthropic` (default), `openai`, `gemini`, `mistral`, `groq`, `openai-codex` (appears once you connect a ChatGPT subscription — see [ChatGPT subscription auth](#chatgpt-subscription-auth-experimental) below), or one of your configured custom slots (see [Custom OpenAI-compatible providers](#custom-openai-compatible-providers-lm-studio-ollama-openrouter-vllm-) below).
+- **LLM Provider** — `anthropic` (default), `openai`, `gemini`, `mistral`, `groq`, `grok`, `kimi` (Moonshot), `kimi-coding` (kimi.com/code), `deepseek`, `ollama` (Ollama Cloud or a local server), `openai-codex` (appears once you connect a ChatGPT subscription — see [ChatGPT subscription auth](#chatgpt-subscription-auth-experimental) below), or one of your configured custom slots (see [Custom OpenAI-compatible providers](#custom-openai-compatible-providers-lm-studio-ollama-openrouter-vllm-) below).
 - **API Keys** — separate fields for each provider. Only the key for your selected provider is required; configure additional keys to enable automatic failover.
   - Anthropic API Key (`sk-ant-...`)
   - OpenAI API Key (`sk-...`)
   - Google Gemini API Key (`AIza...`)
   - Mistral API Key
   - Groq API Key (`gsk_...`) — requires a paid plan (Dev tier or above)
+  - Grok API Key (xAI) (`xai-...`)
+  - Kimi API Key (Moonshot) (`sk-...`)
+  - Kimi Code API Key — get yours at kimi.com/code. A `sk-kimi…` key pasted into the Moonshot field above is reused here automatically.
+  - DeepSeek API Key (`sk-...`) — get yours at platform.deepseek.com
+  - Ollama API Key — Ollama Cloud key. Leave blank for a local Ollama server.
+  - Ollama Base URL — default `https://ollama.com/v1`. Set to `http://127.0.0.1:11434/v1` for a local server. Optional per-tier model overrides (mini/power/ludicrous) sit below it.
 - **LLM Model** — leave blank to use the default for your provider, or enter any model ID supported by that provider
 - **Response Verbosity** — controls how verbose assistant responses are and how many output tokens are allowed per call. `concise` (1,200 tokens, brief bullet-point style), `standard` (2,500 tokens, default), or `detailed` (4,096 tokens, thorough explanations). Only affects the mini tier — power and ludicrous tiers have their own token budgets. With prompt caching reducing input costs, output tokens become the dominant expense, so this setting gives you direct control over the main remaining cost lever.
 - **Debug Logging** — enable verbose console output for troubleshooting
 - **Dry Run** — one-shot toggle that simulates the next mutating tool call without writing anything (auto-disables after one use)
 - **Ludicrous mode failover** — allow escalation to the most expensive models (Opus 5 / GPT-5.6 Sol) when all power-tier providers fail
+- **End run after a single successful write** (Advanced, default on) — a lone successful write ends the run with a confirmation. Turn it off if a skill needs several writes in one go (for example a create-then-update workflow, a batch edit, or a follow-up TODO plus slot). `/plan` then go still runs the full plan either way.
+- **Continue after a write during a skill run** (Advanced, default on) — when a skill is active, the run may take another turn after one write even if the switch above is on. Casual chat is unchanged.
+- **Escalate on claimed action with no tool call (all providers)** (Advanced, default on) — any mini-tier provider that repeatedly claims it did something without a successful tool call is bumped to power. Off keeps the old Gemini-only trigger.
+- **Agent max iterations** (Advanced, default 20) — cap on agent-loop iterations for normal chat. Raise for weaker models that spend one iteration per tool, or for long multi-write rearranges. Multi-write intents (rearrange a list / insert many items into an existing order) auto-boost to at least 32. Allowed range 10–40.
+- **Skill max iterations** (Advanced, default 16) — cap on agent-loop iterations when a skill or gathering guard is active. Raise it for weaker models that spend one iteration per tool. Allowed range 8–40.
+- **Timed block parent** (Advanced, empty by default): page title or block uid that owns new timed blocks. Empty uses today's daily page (an existing Nautilus Log child if present, otherwise a Schedule heading). Does not inject Nautilus onto a graph that never had it.
+- **Timed block sandbox page** (Advanced, default `COS Daily Plan Sandbox`): when the user message contains `[sandbox]`, timed blocks go under that page instead of today.
+- **Allow overlapping timed blocks** (Advanced, default off): Off (the default) refuses a new timed block that overlaps a different one unless you ask to overlap (same time, during, in parallel). On allows overlapping writes even without that language. The same task still reschedules in place. Saying "same time", "overlap", or "during lunch" writes both without flipping this setting.
+- **Auto mode** (Advanced, default `off`) — `off` still asks before every mutating tool. `graph` auto-approves reversible graph writes (create/update/todo/batch) after a toast; deletes, email, and money still ask. `full` also auto-approves a single `roam_delete_block`; bulk deletes, page deletes, email, and money still ask. Chat and prompt injection cannot change this.
 - **Hide COS Pages from Linked References** — automatically filters Chief of Staff namespace pages out of linked references on all non-COS pages. Enabled by default.
 - **Use Linked Dates in CoS Logs** — when enabled, internal CoS log entries (audit log, usage stats, eval scores, corrections, graph hygiene, skill-optimize) prefix each line with a `[[Linked Date]]`. Disable to write plain dates instead — keeps Daily Notes pages from accumulating linked references on mobile. Enabled by default.
 - **Staleness Warning Threshold (days)** — how long a skill or scheduled job can go without being reviewed before it's flagged. A startup toast (debounced to once per 24 hours) lists stale items, and `staleness report` returns the same list on demand. Default `30`. Set to `0` to disable the warnings entirely (the report still works).
 
 Default models by tier:
 
-| Tier | Anthropic | OpenAI | Gemini | Mistral | Groq | OpenAI-Codex (subscription) |
-|---|---|---|---|---|---|---|
-| Mini (default) | claude-haiku-4-5 | gpt-5.6-luna | gemini-3.1-flash-lite | mistral-small-latest | llama-3.3-70b-versatile | gpt-5.6-luna |
-| Power (`/power`) | claude-sonnet-5 | gpt-5.6-terra | gemini-3.6-flash | mistral-medium-latest | llama-3.3-70b-versatile | gpt-5.6-terra |
-| Ludicrous (`/ludicrous`) | claude-opus-5 | gpt-5.6-sol | gemini-3.1-pro-preview-customtools | mistral-medium-latest | llama-3.3-70b-versatile | gpt-5.6-sol |
+| Tier | Anthropic | OpenAI | Gemini | Mistral | Groq | Grok | Kimi | OpenAI-Codex (subscription) |
+|---|---|---|---|---|---|---|---|---|
+| Mini (default) | claude-haiku-4-5 | gpt-5.6-luna | gemini-3.1-flash-lite | mistral-small-latest | llama-3.3-70b-versatile | grok-4.3 | kimi-k2.5 | gpt-5.6-luna |
+| Power (`/power`) | claude-sonnet-5 | gpt-5.6-terra | gemini-3.6-flash | mistral-medium-latest | llama-3.3-70b-versatile | grok-4.6 | kimi-k2.7-code | gpt-5.6-terra |
+| Ludicrous (`/ludicrous`) | claude-opus-5 | gpt-5.6-sol | gemini-3.1-pro-preview-customtools | mistral-medium-latest | llama-3.3-70b-versatile | grok-4.6 | kimi-k3 | gpt-5.6-sol |
+
+| Tier | Kimi Code (`/kimi-code`) | DeepSeek | Ollama (Cloud default; overridable) |
+|---|---|---|---|
+| Mini | kimi-for-coding | deepseek-chat | deepseek-v4-flash |
+| Power | kimi-for-coding | deepseek-reasoner | deepseek-v4-pro |
+| Ludicrous | kimi-for-coding-highspeed | deepseek-reasoner | glm-5.2 |
+
+`/kimi` is Moonshot (`api.moonshot.ai`). `/kimi-code` is Kimi Code (`api.kimi.com/coding/v1`). A `sk-kimi…` key pasted into the Moonshot field is reused for Kimi Code and ignored for Moonshot. Ollama Cloud uses `https://ollama.com/v1`; a local server uses `http://127.0.0.1:11434/v1` and needs no key.
 
 #### Custom OpenAI-compatible providers (LM Studio, Ollama, OpenRouter, vLLM, …)
 
-In addition to the five built-in providers above, you can configure up to three custom slots pointing at any OpenAI-compatible `/v1/chat/completions` endpoint — local servers like LM Studio or Ollama, or remote services like OpenRouter, Together AI, or self-hosted vLLM. Settings live under **Show Integration Settings → Custom LLM Providers**.
+In addition to the built-in providers above, you can configure up to three custom slots pointing at any OpenAI-compatible `/v1/chat/completions` endpoint — local servers like LM Studio or a second Ollama, or remote services like OpenRouter, Together AI, or self-hosted vLLM. Settings live under **Show Integration Settings → Custom LLM Providers**. First-class Ollama (Cloud or local) is a built-in; custom slots are for extra endpoints.
 
 **Per-slot fields:**
 
@@ -157,7 +182,7 @@ Command palette entries: **Connect ChatGPT Subscription (Codex)**, **Disconnect 
 
 #### How tiers work
 
-By default, requests go to the **mini** tier — fast and cheap. You can force a higher tier by appending `/power` or `/ludicrous` to your message in the chat panel (e.g. "summarise my week /power"). You can also force a specific provider by appending `/claude`, `/gemini`, `/openai`, `/mistral`, or `/groq` (e.g. "summarise my week /claude /power"). Provider and tier commands are orthogonal and can be combined freely. All command suffixes are stripped before the message reaches the LLM. When a provider is forced, automatic failover is disabled — if that provider fails, you see the error rather than a silent switch to another provider.
+By default, requests go to the **mini** tier — fast and cheap. You can force a higher tier by appending `/power` or `/ludicrous` to your message in the chat panel (e.g. "summarise my week /power"). You can also force a specific provider by appending `/claude`, `/gemini`, `/openai`, `/mistral`, `/groq`, `/grok`, `/kimi`, `/kimi-code`, `/deepseek`, or `/ollama` (e.g. "summarise my week /claude /power"). `/kimi-code` must be typed in full — the `/kimi` flag selects the Moonshot host. Provider and tier commands are orthogonal and can be combined freely. All command suffixes are stripped before the message reaches the LLM. When a provider is forced, automatic failover is disabled — if that provider fails, you see the error rather than a silent switch to another provider.
 
 Most of the time, you don't need to think about tiers. A composite scoring system evaluates each request across three dimensions — tool count requirements (40% weight), prompt complexity (35%), and conversation trajectory (25%) — and automatically escalates to the power tier when the score exceeds 0.45. Requests involving routed MCP servers (those with more than 15 tools) are always escalated to power regardless of score. Trivial follow-ups ("thanks", "ok") stay on mini even after complex sessions.
 
@@ -354,6 +379,22 @@ The tool is now available to the assistant. Ask it to "fetch https://example.com
 
 > **Note:** Cloudflare's free tier has daily usage limits for Browser Rendering. If you hit a rate limit (HTTP 429), wait for the daily reset.
 
+### 6. Roam Grid (optional)
+
+Install **Roam Grid** from Roam Depot if you want grid tools. Chief of Staff works without it.
+
+Roam Grid registers tools on `window.RoamExtensionTools["roam-grid"]` with display name **Roam Grid**. Chief of Staff discovers them through the existing Extension Tools path (`getExternalExtensionTools`). There is no roam-grid-specific wiring.
+
+Chief of Staff must not flatten tables: it never writes a grid as sibling bullets under `{{table}}` via `roam_create_block`, `roam_create_blocks`, or `roam_batch_write`. Those render as a single column in Roam Grid. It uses `rg_create_table` instead.
+
+All extensions default to disabled. Opt in the same way as any other extension:
+
+1. In **Settings > Chief of Staff**, enable **Show Extension Tools**.
+2. Turn on the **Roam Grid** toggle (off by default).
+3. Run **Chief of Staff: Refresh Extension Tools** from the command palette, or `/doctor`, so discovery is current.
+
+Tool names: `rg_list_grids`, `rg_get_grid`, `rg_get_cell`, `rg_enhance_table`, `rg_restore_native`, `rg_create_table`, `rg_resize_table`, `rg_insert_rows`, `rg_insert_cols`, `rg_delete_rows`, `rg_delete_cols`, `rg_set_cell`, `rg_fill`, `rg_add_formula`, `rg_merge`, `rg_unmerge`, `rg_sort`, `rg_insert_chart`, `rg_export_grid`, `rg_apply_patch`, `rg_list_templates`, `rg_create_from_template`.
+
 ### Recovery — starting over
 
 Roam Depot stores extension settings in your browser's IndexedDB, which means they **survive uninstall and reinstall**. If you end up with a poisoned configuration — a malformed custom LLM endpoint, a stuck OAuth token, an MCP server that crashes the agent loop — uninstalling the extension does not give you a clean slate.
@@ -400,7 +441,7 @@ Use this only as a recovery hatch — there's no undo, and you will need to re-e
 | **Chief of Staff: Connect Remote OAuth Server** | Starts the OAuth sign-in flow for a remote MCP server configured with auth type "oauth". |
 | **Chief of Staff: Disconnect Remote OAuth Server** | Clears stored OAuth credentials and disconnects a remote server. |
 | **Chief of Staff: Review MCP Schema Changes** | Shows the schema diff for any MCP server suspended after an unexpected tool schema change, and lets you accept or keep it blocked. |
-| **Chief of Staff: Refresh Extension Tools** | Re-discovers tools registered by other extensions on `window.RoamExtensionTools`. |
+| **Chief of Staff: Refresh Extension Tools** | Re-discovers tools registered by other extensions on `window.RoamExtensionTools`. After you enable an extension's toggle (for example **Roam Grid**), run this or `/doctor` so those tools are callable. |
 | **Chief of Staff: Show Stored Tool Config** | Logs the current tool configuration to the browser console. |
 | **Chief of Staff: Show Last Run Trace** | Logs the most recent agent run (iterations, tool calls, timing) to the browser console. |
 | **Chief of Staff: Debug Runtime Stats** | Logs current runtime state (cache sizes, connection status, conversation turns) to the browser console. |
@@ -417,7 +458,7 @@ Use this only as a recovery hatch — there's no undo, and you will need to re-e
 
 The floating chat panel (bottom-right corner by default) provides a persistent conversational interface. It is draggable, resizable, and remembers history across sessions (up to 80 messages). Use it for follow-up questions without re-opening the command palette.
 
-- **Enter** to send, **Shift+Enter** for a new line.
+- **Enter** to send, **Shift+Enter** for a new line. Composer keys stay in the panel so Roam does not steal them. The resize grip skips the textarea and Send button, so the caret does not jump while you type. The input grows with the text.
 - **Arrow Up / Down** to cycle through previous messages (like a terminal).
 - **Type `/` at the start of the input** to open an autocomplete menu of the available commands (below), each with a short description. It filters as you type (`/ex` → `/export`); use **Arrow Up / Down** to navigate, **Tab / Enter / click** to complete, and **Esc** to dismiss. The menu also fires **mid-message** when you type a trailing `/` after a space ("summarise my week `/pow`…"), offering just the inline flags (`/power`, `/plan`, provider overrides) and completing in place without disturbing your message.
 - **Mistyped a command?** A lone `/veridy` gets an instant "did you mean `/verify`?" instead of being sent to the model.
@@ -432,7 +473,7 @@ The floating chat panel (bottom-right corner by default) provides a persistent c
 - `/help` shows a context-aware capability summary, including the full command list.
 - `/doctor` runs a health check across API keys, MCP servers, memory, skills, cron jobs, Composio, and Extension Tools — results displayed inline.
 - `/lesson` reviews the conversation and records lessons learned to `[[Chief of Staff/Lessons Learned]]`. Add a topic to focus the reflection (e.g. `/lesson error handling`).
-- Suffix a message with `/power` or `/ludicrous` to use a more capable model for that request. Use `/claude`, `/gemini`, `/openai`, `/mistral`, or `/groq` to force a specific provider.
+- Suffix a message with `/power` or `/ludicrous` to use a more capable model for that request. Use `/claude`, `/gemini`, `/openai`, `/mistral`, `/groq`, `/grok`, `/kimi`, `/kimi-code`, `/deepseek`, or `/ollama` to force a specific provider.
 - A **cost indicator** in the header shows cumulative API spend. Hover for a detailed breakdown: session cost with input/output token counts, today's cost with per-model splits (e.g. `3-flash $2.06`), and rolling 7-day and 30-day totals. Cost history is persisted across sessions. Use **Chief of Staff: Reset Token Usage Stats** to zero the session counters.
 - Each assistant response has a small pin icon at its bottom right. Click it to append the response to your daily note page.
 - **[[Page references]]** and **((block references))** in responses are clickable — click to navigate, Shift-click to open in the sidebar.
@@ -883,7 +924,7 @@ If you discover a security issue, please report it directly rather than filing a
 ## Limitations and performance considerations
 
 - **Graph scans** — task search queries scan all blocks in your graph that match TODO/DONE patterns. Performance scales with graph size. On very large graphs (100k+ blocks) this may take a second or two.
-- **Agent iterations** — the reasoning loop is capped at 20 iterations per request (10 for skills with a defined iteration limit) to prevent runaway API usage.
+- **Agent iterations** — the reasoning loop is capped by **Agent max iterations** (default 20; range 10–40). Skills use **Skill max iterations** (default 16). Multi-write graph-edit intents auto-boost the chat cap to at least 32.
 - **Conversation context** — the assistant retains up to 12 recent turns (truncated to 500 user / 2,000 assistant characters each) for follow-up context. Older turns are dropped automatically. Within a single agent run, tool result payloads are progressively trimmed if the message budget (70,000 characters) is exceeded. Key references (identifiers from MCP tool results) are extracted and stored at the front of assistant turns to survive truncation.
 - **Composio dependency** — external tool features (Gmail, Google Calendar, Todoist, etc.) require an active Composio connection. Roam graph and task features work fully without Composio.
 - **LLM API costs** — requests are sent directly from your browser to your configured provider. Costs are billed to your API account. Structured briefings, multi-tool agent runs, and scheduled jobs consume more tokens than simple queries. The chat panel shows a running cost estimate with per-model breakdowns — for Anthropic, this includes a cache breakdown showing how many input tokens were served from cache. **Note:** displayed costs are estimates based on hardcoded per-model rates and may not reflect current provider pricing. Always check your provider's billing dashboard for authoritative usage and charges.

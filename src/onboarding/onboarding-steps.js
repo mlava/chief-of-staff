@@ -26,9 +26,11 @@ import {
 function detectProvider(key) {
   if (!key) return null;
   if (key.startsWith("sk-ant-")) return "anthropic";
-  if (key.startsWith("sk-")) return "openai";
   if (key.startsWith("AIza")) return "gemini";
   if (key.startsWith("gsk_")) return "groq";
+  if (key.startsWith("xai-")) return "grok";
+  // Generic sk- (including sk-kimi… for Kimi Code) is ambiguous — fall through
+  // to the manual dropdown instead of guessing.
   return null;
 }
 
@@ -206,7 +208,7 @@ const ONBOARDING_STEPS = [
       providerSelectLabel.style.cssText = "font-size: 13px; margin: 0; font-weight: 600;";
       const providerSelect = document.createElement("select");
       providerSelect.className = "cos-onboarding-select";
-      for (const opt of ["mistral", "anthropic", "openai", "gemini", "groq"]) {
+      for (const opt of ["mistral", "anthropic", "openai", "gemini", "groq", "grok", "kimi", "kimi-coding", "deepseek", "ollama"]) {
         const el = document.createElement("option");
         el.value = opt;
         el.textContent = opt.charAt(0).toUpperCase() + opt.slice(1);
@@ -222,7 +224,7 @@ const ONBOARDING_STEPS = [
       detectedFeedback.style.cssText = "font-size: 13px; margin: 4px 0 8px; min-height: 20px;";
       frag.appendChild(detectedFeedback);
 
-      const providerLabelsMap = { anthropic: "Anthropic (Claude)", openai: "OpenAI (GPT)", gemini: "Google (Gemini)", groq: "Groq (Llama)" };
+      const providerLabelsMap = { anthropic: "Anthropic (Claude)", openai: "OpenAI (GPT)", gemini: "Google (Gemini)", groq: "Groq (Llama)", grok: "Grok (xAI)", kimi: "Kimi (Moonshot)", "kimi-coding": "Kimi Code", deepseek: "DeepSeek", ollama: "Ollama" };
 
       // Show/hide manual selector + detection feedback based on key prefix.
       // Debounced to avoid excessive DOM updates during fast typing.
@@ -282,11 +284,16 @@ const ONBOARDING_STEPS = [
               anthropic: deps.SETTINGS_KEYS.anthropicApiKey,
               gemini: deps.SETTINGS_KEYS.geminiApiKey,
               mistral: deps.SETTINGS_KEYS.mistralApiKey,
-              groq: deps.SETTINGS_KEYS.groqApiKey
+              groq: deps.SETTINGS_KEYS.groqApiKey,
+              grok: deps.SETTINGS_KEYS.grokApiKey,
+              kimi: deps.SETTINGS_KEYS.kimiApiKey,
+              "kimi-coding": deps.SETTINGS_KEYS.kimiCodingApiKey,
+              deepseek: deps.SETTINGS_KEYS.deepseekApiKey,
+              ollama: deps.SETTINGS_KEYS.ollamaApiKey
             };
             extensionAPI.settings.set(keySettingMap[provider], key);
             extensionAPI.settings.set(deps.SETTINGS_KEYS.llmProvider, provider);
-            const providerLabels = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Gemini", mistral: "Mistral", groq: "Groq" };
+            const providerLabels = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Gemini", mistral: "Mistral", groq: "Groq", grok: "Grok (xAI)", kimi: "Kimi (Moonshot)", "kimi-coding": "Kimi Code", deepseek: "DeepSeek", ollama: "Ollama" };
             deps.iziToast.success({
               class: "cos-toast",
               title: `${providerLabels[provider]} key saved`,
@@ -878,13 +885,18 @@ const ONBOARDING_STEPS = [
         deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.openaiApiKey, "") ||
         deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.geminiApiKey, "") ||
         deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.mistralApiKey, "") ||
-        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.groqApiKey, "")
+        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.groqApiKey, "") ||
+        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.grokApiKey, "") ||
+        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.kimiApiKey, "") ||
+        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.kimiCodingApiKey, "") ||
+        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.deepseekApiKey, "") ||
+        deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.ollamaApiKey, "")
       );
       // A configured custom slot also counts as "AI provider set up"
       const customSlotIds = (deps.listCustomProviderIds ? deps.listCustomProviderIds(extensionAPI) : []);
       const hasCustomSlot = customSlotIds.length > 0;
       const hasAnyKey = hasBuiltinKey || hasCustomSlot;
-      const providerLabels = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Gemini", mistral: "Mistral", groq: "Groq" };
+      const providerLabels = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Gemini", mistral: "Mistral", groq: "Groq", grok: "Grok (xAI)", kimi: "Kimi (Moonshot)", "kimi-coding": "Kimi Code", deepseek: "DeepSeek", ollama: "Ollama" };
       let providerLabel = providerLabels[provider] || "Not set";
       // If the saved primary is a custom slot, use the friendly name
       const slotMatch = String(provider || "").match(/^(custom-\d+)\b/i);

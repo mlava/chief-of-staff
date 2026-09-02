@@ -16,6 +16,7 @@ const SKILL_DECLARED_TOOLS = [
   "cos_get_skill",
   "cos_count_skill_tokens",
   "cos_write_draft_skill",
+  "cos_schedule_block",
   "roam_get_page",
 ];
 

@@ -24,10 +24,13 @@ import {
   summariseModelSmokeResults,
   BUILTIN_LLM_PROVIDERS,
   VALID_LLM_PROVIDERS,
+  getOpenAiApiKey,
   CODEX_PROVIDER_ID,
   isCodexProvider,
   callCodexResponsesStreaming,
   callAnthropic,
+  filterToolsByRelevance,
+  dropBypassToolsForTimedBlock,
 } from "../src/llm-providers.js";
 
 // ── Test helpers ─────────────────────────────────────────────────────────────
@@ -40,6 +43,15 @@ const SETTINGS_KEYS = {
   geminiApiKey: "gemini-api-key",
   mistralApiKey: "mistral-api-key",
   groqApiKey: "groq-api-key",
+  grokApiKey: "grok-api-key",
+  kimiApiKey: "kimi-api-key",
+  kimiCodingApiKey: "kimi-coding-api-key",
+  deepseekApiKey: "deepseek-api-key",
+  ollamaApiKey: "ollama-api-key",
+  ollamaBaseUrl: "ollama-base-url",
+  ollamaMiniModel: "ollama-mini-model",
+  ollamaPowerModel: "ollama-power-model",
+  ollamaLudicrousModel: "ollama-ludicrous-model",
   piiScrubEnabled: "pii-scrub-enabled",
   advisorEnabled: "cos-advisor-enabled",
   advisorMaxUses: "cos-advisor-max-uses",
@@ -47,9 +59,9 @@ const SETTINGS_KEYS = {
 };
 
 const FAILOVER_CHAINS = {
-  mini: ["gemini", "mistral", "openai", "anthropic", "groq"],
-  power: ["gemini", "mistral", "openai", "anthropic", "groq"],
-  ludicrous: ["gemini", "openai", "mistral", "anthropic", "groq"],
+  mini: ["gemini", "mistral", "openai", "anthropic", "groq", "grok", "kimi", "kimi-coding", "deepseek", "ollama"],
+  power: ["gemini", "mistral", "openai", "anthropic", "groq", "grok", "kimi", "kimi-coding", "deepseek", "ollama"],
+  ludicrous: ["gemini", "openai", "mistral", "anthropic", "groq", "grok", "kimi", "kimi-coding", "deepseek", "ollama"],
 };
 
 const LLM_MODEL_COSTS = {
@@ -200,8 +212,16 @@ test("getCustomProviderConfig synthesises a default name when blank", () => {
 test("isOpenAICompatible includes built-ins and custom slots", () => {
   assert.equal(isOpenAICompatible("openai"), true);
   assert.equal(isOpenAICompatible("gemini"), true);
+  assert.equal(isOpenAICompatible("grok"), true);
+  assert.equal(isOpenAICompatible("kimi"), true);
+  assert.equal(isOpenAICompatible("kimi-coding"), true);
+  assert.equal(isOpenAICompatible("deepseek"), true);
+  assert.equal(isOpenAICompatible("ollama"), true);
   assert.equal(isOpenAICompatible("custom-1"), true);
   assert.equal(isOpenAICompatible("anthropic"), false);
+});
+test("BUILTIN_LLM_PROVIDERS includes grok, kimi, kimi-coding, deepseek, ollama after the original five", () => {
+  assert.deepEqual(BUILTIN_LLM_PROVIDERS, ["anthropic", "openai", "gemini", "mistral", "groq", "grok", "kimi", "kimi-coding", "deepseek", "ollama"]);
 });
 
 // ── getValidProviders ────────────────────────────────────────────────────────
@@ -250,6 +270,33 @@ test("getApiKeyForProvider still resolves built-in providers from per-provider k
     "anthropic-api-key": "sk-ant-real",
   }));
   assert.equal(getApiKeyForProvider(ext, "anthropic"), "sk-ant-real");
+});
+test("getApiKeyForProvider reads grok-api-key and kimi-api-key", () => {
+  const ext = initWithExt(makeExtensionAPI({
+    "grok-api-key": "key-grok",
+    "kimi-api-key": "key-kimi",
+  }));
+  assert.equal(getApiKeyForProvider(ext, "grok"), "key-grok");
+  assert.equal(getApiKeyForProvider(ext, "kimi"), "key-kimi");
+});
+
+test("getOpenAiApiKey does not treat a legacy sk- key as OpenAI when provider is kimi or grok", () => {
+  const kimiExt = initWithExt(makeExtensionAPI({
+    "llm-provider": "kimi",
+    "llm-api-key": "sk-moonshot-key",
+  }));
+  assert.equal(getOpenAiApiKey(kimiExt), "");
+  const grokExt = initWithExt(makeExtensionAPI({
+    "llm-provider": "grok",
+    "llm-api-key": "sk-moonshot-key",
+  }));
+  assert.equal(getOpenAiApiKey(grokExt), "");
+  // OpenAI provider still picks up the legacy sk- key
+  const openaiExt = initWithExt(makeExtensionAPI({
+    "llm-provider": "openai",
+    "llm-api-key": "sk-oa-key",
+  }));
+  assert.equal(getOpenAiApiKey(openaiExt), "sk-oa-key");
 });
 
 // ── getLlmProvider ───────────────────────────────────────────────────────────
@@ -391,6 +438,36 @@ test("resolveOpenAIEndpoint throws for an unconfigured custom slot", () => {
   initWithExt(makeExtensionAPI({ "custom-llm-count": 0 }));
   assert.throws(() => resolveOpenAIEndpoint("custom-1"), /not configured/);
 });
+test("resolveOpenAIEndpoint routes grok and kimi through the proxied vendor URLs", () => {
+  initWithExt(makeExtensionAPI());
+  assert.equal(
+    resolveOpenAIEndpoint("grok"),
+    "https://proxy.example/https://api.x.ai/v1/chat/completions"
+  );
+  assert.equal(
+    resolveOpenAIEndpoint("kimi"),
+    "https://proxy.example/https://api.moonshot.ai/v1/chat/completions"
+  );
+});
+
+test("built-in model getters return grok and kimi tier defaults", () => {
+  const ext = initWithExt(makeExtensionAPI());
+  assert.equal(getLlmModel(ext, "grok"), "grok-4.3");
+  assert.equal(getPowerModel(ext, "grok"), "grok-4.6");
+  assert.equal(getLudicrousModel(ext, "grok"), "grok-4.6");
+  assert.equal(getLlmModel(ext, "kimi"), "kimi-k2.5");
+  assert.equal(getPowerModel(ext, "kimi"), "kimi-k2.7-code");
+  assert.equal(getLudicrousModel(ext, "kimi"), "kimi-k3");
+});
+
+test("failover chains start with gemini and append kimi-coding, deepseek, ollama at the end", () => {
+  const ext = initWithExt(makeExtensionAPI());
+  for (const tier of ["mini", "power", "ludicrous"]) {
+    const chain = buildEffectiveFailoverChain(ext, tier);
+    assert.equal(chain[0], "gemini");
+    assert.deepEqual(chain.slice(-3), ["kimi-coding", "deepseek", "ollama"]);
+  }
+});
 
 // ── buildEffectiveFailoverChain ──────────────────────────────────────────────
 
@@ -476,7 +553,10 @@ test("getFailoverProviders returns rotated chain when primary is custom slot WIT
     "mistral-api-key": "key-m",
     "groq-api-key": "key-q",
   }));
-  // Chain is [gemini, mistral, openai, anthropic, groq, custom-1]; primary at end → rotation puts everything before it first
+  // Chain is [gemini, mistral, openai, anthropic, groq, grok, kimi, kimi-coding,
+  //          deepseek, ollama, custom-1]; primary at end → rotation puts
+  // everything before it first. Only the keyed providers survive the truthiness
+  // filter (grok/kimi/kimi-coding/deepseek/ollama have no key in this fixture).
   const result = getFailoverProviders("custom-1", ext, "mini");
   assert.deepEqual(result, ["gemini", "mistral", "openai", "anthropic", "groq"]);
 });
@@ -752,4 +832,193 @@ test("callAnthropic pins thinking off on Sonnet 5 and Opus 5, leaves other model
   assert.equal(captured.thinking, undefined);
   await callAnthropic("sk-x", "claude-haiku-4-5", "sys", [], []);
   assert.equal(captured.thinking, undefined);
+});
+
+// ── Kimi Code / DeepSeek / Ollama providers ───────────────────────────────────
+
+test("kimi-coding endpoint routes through the proxied kimi.com/coding host", () => {
+  initWithExt(makeExtensionAPI());
+  assert.equal(
+    resolveOpenAIEndpoint("kimi-coding"),
+    "https://proxy.example/https://api.kimi.com/coding/v1/chat/completions"
+  );
+});
+
+test("deepseek endpoint routes through the proxied api.deepseek.com host", () => {
+  initWithExt(makeExtensionAPI());
+  assert.equal(
+    resolveOpenAIEndpoint("deepseek"),
+    "https://proxy.example/https://api.deepseek.com/v1/chat/completions"
+  );
+});
+
+test("getApiKeyForProvider reads kimi-coding-api-key and deepseek-api-key", () => {
+  const ext = initWithExt(makeExtensionAPI({
+    "kimi-coding-api-key": "kc-key",
+    "deepseek-api-key": "ds-key",
+  }));
+  assert.equal(getApiKeyForProvider(ext, "kimi-coding"), "kc-key");
+  assert.equal(getApiKeyForProvider(ext, "deepseek"), "ds-key");
+});
+
+test("kimi-coding falls back to a sk-kimi… Moonshot key when the dedicated key is empty", () => {
+  const ext = initWithExt(makeExtensionAPI({
+    "kimi-api-key": "sk-kimi-some-machine-key",
+    // kimi-coding-api-key intentionally blank
+  }));
+  assert.equal(getApiKeyForProvider(ext, "kimi-coding"), "sk-kimi-some-machine-key");
+});
+
+test("kimi (Moonshot) ignores a sk-kimi… key so /kimi asks for a real Moonshot key", () => {
+  const ext = initWithExt(makeExtensionAPI({
+    "kimi-api-key": "sk-kimi-some-machine-key",
+  }));
+  assert.equal(getApiKeyForProvider(ext, "kimi"), "");
+});
+
+test("built-in model getters return kimi-coding, deepseek, ollama tier defaults", () => {
+  const ext = initWithExt(makeExtensionAPI());
+  assert.equal(getLlmModel(ext, "kimi-coding"), "kimi-for-coding");
+  assert.equal(getPowerModel(ext, "kimi-coding"), "kimi-for-coding");
+  assert.equal(getLudicrousModel(ext, "kimi-coding"), "kimi-for-coding-highspeed");
+  assert.equal(getLlmModel(ext, "deepseek"), "deepseek-chat");
+  assert.equal(getPowerModel(ext, "deepseek"), "deepseek-reasoner");
+  assert.equal(getLudicrousModel(ext, "deepseek"), "deepseek-reasoner");
+  assert.equal(getLlmModel(ext, "ollama"), "deepseek-v4-flash");
+  assert.equal(getPowerModel(ext, "ollama"), "deepseek-v4-pro");
+  assert.equal(getLudicrousModel(ext, "ollama"), "glm-5.2");
+});
+
+// ── Ollama base URL + key + model overrides ──────────────────────────────────
+
+test("ollama localhost empty key → lm-studio-no-auth; cloud empty key → empty string", () => {
+  const localExt = initWithExt(makeExtensionAPI({
+    "ollama-base-url": "http://127.0.0.1:11434/v1",
+    // ollama-api-key intentionally blank
+  }));
+  assert.equal(getApiKeyForProvider(localExt, "ollama"), "lm-studio-no-auth");
+
+  const cloudExt = initWithExt(makeExtensionAPI({
+    "ollama-base-url": "https://ollama.com/v1",
+    // ollama-api-key intentionally blank
+  }));
+  assert.equal(getApiKeyForProvider(cloudExt, "ollama"), "");
+
+  // Default base URL (omitted setting) is the Ollama Cloud default.
+  const defaultExt = initWithExt(makeExtensionAPI());
+  assert.equal(getApiKeyForProvider(defaultExt, "ollama"), "");
+});
+
+test("ollama endpoint: localhost base goes direct; cloud base goes through the proxy", () => {
+  const localExt = initWithExt(makeExtensionAPI({
+    "ollama-base-url": "http://127.0.0.1:11434/v1",
+  }));
+  assert.equal(resolveOpenAIEndpoint("ollama"), "http://127.0.0.1:11434/v1/chat/completions");
+
+  const cloudExt = initWithExt(makeExtensionAPI({
+    "ollama-base-url": "https://ollama.com/v1",
+  }));
+  assert.equal(
+    resolveOpenAIEndpoint("ollama"),
+    "https://proxy.example/https://ollama.com/v1/chat/completions"
+  );
+
+  // Default base URL (omitted setting) is Ollama Cloud → proxied.
+  const defaultExt = initWithExt(makeExtensionAPI());
+  assert.equal(
+    resolveOpenAIEndpoint("ollama"),
+    "https://proxy.example/https://ollama.com/v1/chat/completions"
+  );
+});
+
+test("ollama per-tier model settings override the aibom defaults when non-empty", () => {
+  const ext = initWithExt(makeExtensionAPI({
+    "ollama-mini-model": "local-mini",
+    "ollama-power-model": "local-power",
+    "ollama-ludicrous-model": "local-ludi",
+  }));
+  assert.equal(getLlmModel(ext, "ollama"), "local-mini");
+  assert.equal(getPowerModel(ext, "ollama"), "local-power");
+  assert.equal(getLudicrousModel(ext, "ollama"), "local-ludi");
+});
+
+test("getOpenAiApiKey does not treat a legacy sk- key as OpenAI for kimi-coding or deepseek", () => {
+  const kcExt = initWithExt(makeExtensionAPI({
+    "llm-provider": "kimi-coding",
+    "llm-api-key": "sk-kimi-key",
+  }));
+  assert.equal(getOpenAiApiKey(kcExt), "");
+  const dsExt = initWithExt(makeExtensionAPI({
+    "llm-provider": "deepseek",
+    "llm-api-key": "sk-deepseek-key",
+  }));
+  assert.equal(getOpenAiApiKey(dsExt), "");
+});
+// ── Timed-block tool pack (filterToolsByRelevance + dropBypassToolsForTimedBlock)
+
+const TIMED_BLOCK_TOOLS = [
+  { name: "cos_schedule_block" },
+  { name: "roam_create_block" },
+  { name: "roam_create_blocks" },
+  { name: "roam_batch_write" },
+  { name: "roam_create_todo" },
+  { name: "roam_update_block" },
+  { name: "roam_search" },
+  { name: "roam_get_page" },
+  { name: "ROAM_ROUTE" },
+  { name: "cos_cron_create" },
+];
+
+test("timed-block prompt: bypass + cron tools dropped, cos_schedule_block kept", () => {
+  initLlmProviders({ debugLog: () => {} });
+  const out = filterToolsByRelevance(
+    TIMED_BLOCK_TOOLS,
+    "schedule a gaming session 9pm to midnight [sandbox]"
+  );
+  const names = out.map((t) => t.name);
+  assert.ok(!names.includes("roam_create_block"), "roam_create_block must be dropped");
+  assert.ok(!names.includes("roam_create_blocks"), "roam_create_blocks must be dropped");
+  assert.ok(!names.includes("roam_batch_write"), "roam_batch_write must be dropped");
+  assert.ok(!names.includes("roam_create_todo"), "roam_create_todo must be dropped");
+  assert.ok(!names.includes("roam_update_block"), "roam_update_block must be dropped");
+  assert.ok(!names.includes("cos_cron_create"), "bare 'schedule' must not pull in cos_cron_*");
+  assert.ok(names.includes("cos_schedule_block"));
+  assert.ok(names.includes("roam_search"));
+  assert.ok(names.includes("roam_get_page"));
+  assert.ok(names.includes("ROAM_ROUTE"));
+});
+
+test("cron prompt: cos_cron_create still present", () => {
+  initLlmProviders({ debugLog: () => {} });
+  const out = filterToolsByRelevance(TIMED_BLOCK_TOOLS, "schedule a cron every 5 min");
+  const names = out.map((t) => t.name);
+  assert.ok(names.includes("cos_cron_create"));
+  // Not a one-window intent → bypass tools untouched
+  assert.ok(names.includes("roam_create_block"));
+});
+
+test("calendar question: roam_create_block still present", () => {
+  initLlmProviders({ debugLog: () => {} });
+  const out = filterToolsByRelevance(TIMED_BLOCK_TOOLS, "what's on my calendar");
+  const names = out.map((t) => t.name);
+  assert.ok(names.includes("roam_create_block"));
+  assert.ok(!names.includes("cos_cron_create"), "calendar reads are not cron-like");
+});
+
+test("dropBypassToolsForTimedBlock: no-op for non-slot messages and after whitelist", () => {
+  initLlmProviders({ debugLog: () => {} });
+  // Non-slot message → identity
+  assert.equal(dropBypassToolsForTimedBlock(TIMED_BLOCK_TOOLS, "hello there"), TIMED_BLOCK_TOOLS);
+  // Slot message → drops even when the array came from a skill whitelist
+  const whitelisted = [
+    { name: "cos_schedule_block" },
+    { name: "roam_create_block" }, // ROAM_CORE_TOOLS member a whitelist run keeps
+    { name: "cos_cron_create" },
+    { name: "roam_search" },
+  ];
+  const names = dropBypassToolsForTimedBlock(
+    whitelisted,
+    "schedule gaming 9pm to midnight [sandbox]"
+  ).map((t) => t.name);
+  assert.deepEqual(names, ["cos_schedule_block", "roam_search"]);
 });

@@ -4,11 +4,32 @@
  *
  * Extracted from index.js. All external dependencies are injected via initToolExecution().
  */
+import { classifyAutoApprove, normaliseAutoApproveMode } from "./security-core.js";
+import { isSandboxUserMessage, parseSlotLine } from "./schedule-block.js";
 
 // ── Module-scoped state ──────────────────────────────────────────────────────
 const TOOL_APPROVAL_TTL_MS = 15 * 60 * 1000; // 15 minutes
 const approvedToolsThisSession = new Map(); // approvalKey -> approvedAt timestamp
 const approvedWritePageUids = new Map(); // pageUid -> approvedAt timestamp (scoped page approval for create tools)
+// ── Auto-approve run cap ────────────────────────────────────────────────────
+// Hard cap on auto-mode approvals per agent run. runAgentLoop resets the
+// counter via resetAutoApproveCount(); the (cap + 1)th mutating call prompts
+// regardless of mode. classifyAutoApprove (security-core.js) decides what is
+// eligible; this counter only bounds how much can go through silently.
+export const AUTO_APPROVE_MAX_PER_RUN = 12;
+let autoApproveCount = 0;
+
+export function resetAutoApproveCount() {
+  autoApproveCount = 0;
+}
+
+export function getAutoApproveCount() {
+  return autoApproveCount;
+}
+
+function incrementAutoApproveCount() {
+  autoApproveCount += 1;
+}
 
 // ── Dependencies (injected via init) ────────────────────────────────────────
 let deps = {};
@@ -430,8 +451,129 @@ function extractTargetPageUids(toolName, args) {
 }
 
 // ── Main tool execution dispatcher ──────────────────────────────────────────
+// ── Sandbox write-fence ─────────────────────────────────────────────────────
+// A [sandbox] session must not touch today's daily page. cos_schedule_block
+// self-pins to the sandbox page and is exempt; every other Roam graph write
+// is fenced here, BEFORE the approval gate, so fenced calls never prompt.
+const SANDBOX_FENCED_WRITE_TOOLS = new Set([
+  "roam_create_block", "roam_create_blocks", "roam_batch_write",
+  "roam_update_block", "roam_delete_block", "roam_move_block",
+  "roam_modify_todo", "roam_create_todo", "roam_create_page"
+]);
 
-export async function executeToolCall(toolName, args, { readOnly = false, skipApproval = false } = {}) {
+// Unwrap ROAM_EXECUTE to its inner tool name + arguments.
+function unwrapRoamExecute(toolName, args) {
+  if (String(toolName || "") === "ROAM_EXECUTE") {
+    return { name: String(args?.tool_name || ""), args: args?.arguments || {} };
+  }
+  return { name: String(toolName || ""), args: args || {} };
+}
+
+// Strict variant of resolvePageUidForBlock: returns the page uid the target
+// belongs to, or null when the string doesn't resolve (a page title like
+// "August 26th, 2026", garbage, or a uid the graph doesn't know).
+function resolvePageUidStrict(uidStr) {
+  const s = String(uidStr || "").trim();
+  if (!s || !/^[\w-]{1,15}$/.test(s)) return null;
+  const api = deps.getRoamAlphaApi?.();
+  if (!api?.q) return null;
+  const escaped = deps.escapeForDatalog(s);
+  const isPage = api.q(`[:find ?t . :where [?e :block/uid "${escaped}"] [?e :node/title ?t]]`);
+  if (isPage) return s;
+  const pageUid = api.q(`[:find ?pu . :where [?b :block/uid "${escaped}"] [?b :block/page ?p] [?p :block/uid ?pu]]`);
+  return pageUid || null;
+}
+
+/**
+ * Sandbox write-fence. Returns an {error} result when a [sandbox] session
+ * tries a Roam graph write that is missing a target, targets today's daily
+ * page, or names a target that doesn't resolve to a page uid (fail closed).
+ * Returns null when the call may proceed. The 4th options bag lets unit
+ * tests inject todayPageUid / resolvePage without a live graph.
+ */
+export function sandboxWriteFenceError(toolName, args, userMessage, opts = {}) {
+  if (!isSandboxUserMessage(userMessage)) return null;
+  const { name, args: inner } = unwrapRoamExecute(toolName, args);
+  if (name === "cos_schedule_block") return null; // self-pins to the sandbox page
+  if (!SANDBOX_FENCED_WRITE_TOOLS.has(name)) return null;
+  const resolvePage = typeof opts.resolvePage === "function" ? opts.resolvePage : resolvePageUidStrict;
+  const todayPageUid = opts.todayPageUid ?? null;
+
+  const targets = [];
+  const push = (v) => { const s = String(v ?? "").trim(); if (s) targets.push(s); };
+  if (name === "roam_create_blocks" && Array.isArray(inner.batches)) {
+    for (const batch of inner.batches) push(batch?.parent_uid);
+    push(inner.parent_uid);
+  } else if (name === "roam_move_block") {
+    push(inner.uid);        // source block
+    push(inner.parent_uid); // destination
+  } else if (name === "roam_create_page") {
+    // No parent target: it creates a NEW page in the live graph — refuse below.
+  } else {
+    push(inner.parent_uid);
+    push(inner.uid);
+  }
+
+  if (!targets.length) {
+    return { error: "Sandbox session: parent_uid is required; writes to today's daily page are blocked." };
+  }
+  for (const target of targets) {
+    const pageUid = resolvePage(target);
+    if (!pageUid) {
+      // Fail closed: a present-but-unresolvable target (title, garbage uid).
+      return { error: "Sandbox session: writes to today's daily page are blocked. Use the sandbox schedule parent." };
+    }
+    if (todayPageUid && pageUid === todayPageUid) {
+      return { error: "Sandbox session: writes to today's daily page are blocked. Use the sandbox schedule parent." };
+    }
+  }
+  return null;
+}
+
+// ── Slot-grammar refuse ─────────────────────────────────────────────────────
+// The TimeBlock slot grammar (HH:MM - HH:MM (**N'**) ((uid)) / #Event) lives
+// in cos_schedule_block. The block-write tools run markdown parsing that
+// mangles ((refs)), so a hand-written slot line through them is refused.
+const SLOT_GRAMMAR_TOOLS = new Set([
+  "roam_create_block", "roam_create_blocks", "roam_batch_write",
+  "roam_update_block", "roam_create_todo"
+]);
+
+/**
+ * Refuse timed-slot lines written through block tools. Scans text / markdown
+ * / blocks[].text / batches[].blocks[].text; a line that parses as a slot AND
+ * carries a ((uid)) ref or #Event is rejected. Plain text and headings pass.
+ */
+export function slotGrammarRefuseError(toolName, args) {
+  const { name, args: inner } = unwrapRoamExecute(toolName, args);
+  if (!SLOT_GRAMMAR_TOOLS.has(name)) return null;
+  const lines = [];
+  const collectBlocks = (blocks) => {
+    for (const b of Array.isArray(blocks) ? blocks : []) {
+      if (b?.text != null) lines.push(String(b.text));
+      collectBlocks(b?.children);
+    }
+  };
+  if (inner.text != null) lines.push(String(inner.text));
+  if (inner.markdown != null) lines.push(...String(inner.markdown).split("\n"));
+  collectBlocks(inner.blocks);
+  if (Array.isArray(inner.batches)) for (const batch of inner.batches) collectBlocks(batch?.blocks);
+  for (const line of lines) {
+    const slot = parseSlotLine(stripMarkdownListMarker(line));
+    if (slot) {
+      return { error: "Timed slots go through cos_schedule_block — this tool's markdown parsing mangles ((refs))." };
+    }
+  }
+  return null;
+}
+
+function stripMarkdownListMarker(line) {
+  return String(line || "").replace(/^\s*(?:[-*]|\d+\.)\s+/, "");
+}
+
+
+export async function executeToolCall(toolName, args, { readOnly = false, skipApproval = false, userMessage = null } = {}) {
+  if (typeof userMessage === "string") deps.setAgentUserMessage?.(userMessage);
   // Tool name normalisation: LLMs (especially gemini flash-lite) sometimes hallucinate
   // hyphens in tool names (e.g. "cos_get-current-time" instead of "cos_get_current_time").
   // Try the original name first — MCP tools use hyphens natively (e.g. "list-events").
@@ -566,7 +708,7 @@ export async function executeToolCall(toolName, args, { readOnly = false, skipAp
       const wrappedArgs = {
         tools: [{ tool_slug: upperToolName, arguments: effectiveArgs }]
       };
-      return executeToolCall("COMPOSIO_MULTI_EXECUTE_TOOL", wrappedArgs, { readOnly, skipApproval });
+      return executeToolCall("COMPOSIO_MULTI_EXECUTE_TOOL", wrappedArgs, { readOnly, skipApproval, userMessage });
     }
   }
 
@@ -600,6 +742,29 @@ export async function executeToolCall(toolName, args, { readOnly = false, skipAp
     }
   }
 
+  // Sandbox write-fence: a [sandbox] session must not write to today's daily
+  // page (or anywhere without an explicit, resolvable target). cos_schedule_block
+  // self-pins and is exempt. Runs before the approval gate so fenced calls
+  // never prompt. Today's page uid is READ via getPageUidByTitleAsync — never
+  // ensureDailyPageUid, which would create the page.
+  const sandboxUserMessage = userMessage || deps.getAgentUserMessage?.();
+  if (isSandboxUserMessage(sandboxUserMessage)) {
+    let todayPageUid = null;
+    try {
+      const todayTitle = typeof deps.formatRoamDate === "function" ? deps.formatRoamDate(new Date()) : null;
+      if (todayTitle && typeof deps.getPageUidByTitleAsync === "function") {
+        todayPageUid = await deps.getPageUidByTitleAsync(todayTitle);
+      }
+    } catch (_) { /* lookup failure: per-target resolution still applies */ }
+    const fenceError = sandboxWriteFenceError(toolName, effectiveArgs, sandboxUserMessage, { todayPageUid });
+    if (fenceError) return fenceError;
+  }
+
+  // Slot-grammar refuse: hand-written timed slots through block tools get
+  // their ((refs)) mangled by markdown parsing — force cos_schedule_block.
+  const slotError = slotGrammarRefuseError(toolName, effectiveArgs);
+  if (slotError) return slotError;
+
   const extensionAPI = deps.getExtensionAPI();
   if (isMutating && extensionAPI && deps.isDryRunEnabled(extensionAPI)) {
     deps.consumeDryRunMode(extensionAPI);
@@ -617,9 +782,27 @@ export async function executeToolCall(toolName, args, { readOnly = false, skipAp
   const approvalKey = buildToolScopeKey(toolName, effectiveArgs);
   const now = Date.now();
   if (isMutating && !skipApproval) {
+    // Auto mode (Advanced settings select: off / graph / full). Compiled
+    // allowlist in security-core.js — tool args (skip_approval, pre_approved)
+    // and model text cannot widen it. Auto-approved calls skip the approval
+    // prompt but are never silent: a passive info toast is shown and a scope
+    // event is recorded. skipApproval stays an internal-only option
+    // (simulation / dry-run callers), never read from args.
+    const autoApproveMode = normaliseAutoApproveMode(
+      typeof deps.getSettingString === "function"
+        ? deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS?.autoApproveMode, "off")
+        : "off"
+    );
+    if (autoApproveMode !== "off"
+      && getAutoApproveCount() < AUTO_APPROVE_MAX_PER_RUN
+      && classifyAutoApprove(toolName, effectiveArgs, autoApproveMode) === "auto") {
+      incrementAutoApproveCount();
+      deps.showInfoToast("Auto mode", `Auto-approved: ${toolName}`);
+      emitScopeEvent(approvalKey, "tool", "auto");
+      deps.debugLog(`[Chief flow] Auto-approved (${autoApproveMode} mode, ${getAutoApproveCount()}/${AUTO_APPROVE_MAX_PER_RUN} this run): ${toolName}`);
     // Scoped page approval for block-creation tools: approve once per page,
     // then subsequent writes to that same page are auto-approved within TTL.
-    if (SCOPED_PAGE_APPROVAL_TOOLS.has(toolName)) {
+    } else if (SCOPED_PAGE_APPROVAL_TOOLS.has(toolName)) {
       const targetPageUids = extractTargetPageUids(toolName, effectiveArgs);
       const unapprovedPages = targetPageUids.filter(uid => !hasPageWriteApproval(uid, now));
       if (unapprovedPages.length > 0) {
@@ -684,17 +867,17 @@ export async function executeToolCall(toolName, args, { readOnly = false, skipAp
     const upperInner = innerName.toUpperCase();
     if (upperInner === "COMPOSIO_MULTI_EXECUTE_TOOL") {
       deps.debugLog(`[Chief flow] LOCAL_MCP_EXECUTE → Composio redirect: unwrapping ${innerName}`);
-      return executeToolCall("COMPOSIO_MULTI_EXECUTE_TOOL", effectiveArgs.arguments || {}, { readOnly, skipApproval });
+      return executeToolCall("COMPOSIO_MULTI_EXECUTE_TOOL", effectiveArgs.arguments || {}, { readOnly, skipApproval, userMessage });
     }
     // Normalise: collapse double underscores (LLMs invent "openweathermap__weather" for "WEATHERMAP_WEATHER")
     const normInner = upperInner.replace(/__+/g, "_");
     if (deps.getToolSchema(normInner)) {
       deps.debugLog(`[Chief flow] LOCAL_MCP_EXECUTE → Composio slug redirect: "${innerName}" → "${normInner}"`);
-      return executeToolCall(normInner, effectiveArgs.arguments || {}, { readOnly, skipApproval });
+      return executeToolCall(normInner, effectiveArgs.arguments || {}, { readOnly, skipApproval, userMessage });
     }
     if (normInner !== upperInner && deps.getToolSchema(upperInner)) {
       deps.debugLog(`[Chief flow] LOCAL_MCP_EXECUTE → Composio slug redirect: ${innerName}`);
-      return executeToolCall(upperInner, effectiveArgs.arguments || {}, { readOnly, skipApproval });
+      return executeToolCall(upperInner, effectiveArgs.arguments || {}, { readOnly, skipApproval, userMessage });
     }
     const cache = deps.getLocalMcpToolsCache() || [];
     // Exact match first, then try stripping server-name prefix (LLMs sometimes send "server.tool_name")
@@ -725,7 +908,7 @@ export async function executeToolCall(toolName, args, { readOnly = false, skipAp
           const suffixMatches = suffix ? allSlugs.filter(s => s.endsWith("_" + suffix)) : [];
           if (suffixMatches.length === 1) {
             deps.debugLog(`[Chief flow] LOCAL_MCP_EXECUTE → Composio fuzzy (suffix "${suffix}"): "${innerName}" → "${suffixMatches[0]}"`);
-            return executeToolCall(suffixMatches[0], effectiveArgs.arguments || {}, { readOnly, skipApproval });
+            return executeToolCall(suffixMatches[0], effectiveArgs.arguments || {}, { readOnly, skipApproval, userMessage });
           }
           // Prefix match: e.g. "GMAIL" from "GMAIL_LIST_MESSAGES" → suggest actual GMAIL_* tools
           const prefixMatches = allSlugs.filter(s => s.startsWith(prefix + "_"));

@@ -189,3 +189,44 @@ test("roam_create_page is a direct (core) tool, not orphaned behind ROAM_ROUTE",
   assert.ok(ROAM_CORE_TOOLS.has("roam_create_page"),
     "roam_create_page must be in ROAM_CORE_TOOLS so the agent sees it directly");
 });
+test("roam_create_todo: [sandbox] disables the today-page default, no ensureDailyPageUid call", async () => {
+  let dailyPageCalled = false;
+  const tool = getNamedTool("roam_create_todo", {
+    getAgentUserMessage: () => "add milk [sandbox]",
+    ensureDailyPageUid: async () => { dailyPageCalled = true; return { pageUid: "DAILYUID", pageTitle: "t" }; },
+  });
+  const result = await tool.execute({ text: "milk" });
+  assert.equal(
+    result.error,
+    "Sandbox session: parent_uid is required; the today-page default is disabled."
+  );
+  assert.equal(dailyPageCalled, false, "must not create/resolve today's page under sandbox");
+});
+
+test("roam_create_todo: today default unchanged without [sandbox]", async () => {
+  const tool = getNamedTool("roam_create_todo", {
+    getAgentUserMessage: () => "add milk",
+    ensureDailyPageUid: async () => ({ pageUid: "DAILYUID", pageTitle: "t" }),
+    createRoamBlock: async (parentUid, text) => {
+      assert.equal(parentUid, "DAILYUID");
+      return "NEWUID";
+    },
+  });
+  const result = await tool.execute({ text: "milk" });
+  assert.equal(result.success, true);
+  assert.equal(result.parent_uid, "DAILYUID");
+  assert.equal(result.text, "{{[[TODO]]}} milk");
+});
+
+test("roam_create_todo: [sandbox] with explicit parent_uid still writes", async () => {
+  const tool = getNamedTool("roam_create_todo", {
+    getAgentUserMessage: () => "add milk [sandbox]",
+    createRoamBlock: async (parentUid) => {
+      assert.equal(parentUid, "SANDBOXPG");
+      return "NEWUID";
+    },
+  });
+  const result = await tool.execute({ text: "milk", parent_uid: "SANDBOXPG" });
+  assert.equal(result.success, true);
+  assert.equal(result.parent_uid, "SANDBOXPG");
+});

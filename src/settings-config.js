@@ -38,6 +38,42 @@ export function normaliseSwitchValue(evt, fallback) {
   return fallback;
 }
 
+/**
+ * Clamp the skill max iterations setting to 8–40 with a fallback of 16.
+ * Pure helper — no deps, safe to import directly from tests.
+ *   - undefined / null / "" / NaN / non-numeric → 16
+ *   - below 8 → 8, above 40 → 40
+ *   - integers and numeric strings in range pass through (floor if float)
+ */
+export function clampSkillMaxIterations(raw) {
+  const fallback = 16;
+  if (raw === undefined || raw === null || raw === "") return fallback;
+  const num = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(num)) return fallback;
+  const floored = Math.floor(num);
+  if (floored < 8) return 8;
+  if (floored > 40) return 40;
+  return floored;
+}
+
+/**
+ * Clamp the chat agent max iterations setting to 10–40 with a fallback of 20.
+ * Pure helper — no deps, safe to import directly from tests.
+ *   - undefined / null / "" / NaN / non-numeric → 20
+ *   - below 10 → 10, above 40 → 40
+ *   - integers and numeric strings in range pass through (floor if float)
+ */
+export function clampAgentMaxIterations(raw) {
+  const fallback = 20;
+  if (raw === undefined || raw === null || raw === "") return fallback;
+  const num = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(num)) return fallback;
+  const floored = Math.floor(num);
+  if (floored < 10) return 10;
+  if (floored > 40) return 40;
+  return floored;
+}
+
 export function rebuildSettingsPanel(extensionAPI) {
   setTimeout(() => {
     extensionAPI.settings.panel.create(buildSettingsConfig(extensionAPI));
@@ -82,7 +118,7 @@ function buildCustomProviderLabel(extensionAPI, id) {
 }
 
 function buildProviderSelectItems(extensionAPI) {
-  const builtins = ["anthropic", "openai", "gemini", "mistral", "groq"];
+  const builtins = ["anthropic", "openai", "gemini", "mistral", "groq", "grok", "kimi", "kimi-coding", "deepseek", "ollama"];
   // ChatGPT-subscription provider appears once connected (mirrors custom slots
   // appearing only once configured). Plain id — no compound label to parse.
   const codex = deps.getCodexAuthStatus?.(extensionAPI)?.connected ? ["openai-codex"] : [];
@@ -245,6 +281,96 @@ export function buildSettingsConfig(extensionAPI) {
         type: "input",
         value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.groqApiKey, ""),
         placeholder: "gsk_..."
+      }
+    },
+    {
+      id: deps.SETTINGS_KEYS.grokApiKey,
+      name: "Grok API Key (xAI)",
+      description: "Get yours at console.x.ai. Used for Grok models and as a failover provider.",
+      action: {
+        type: "input",
+        value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.grokApiKey, ""),
+        placeholder: "xai-..."
+      }
+    },
+    {
+      id: deps.SETTINGS_KEYS.kimiApiKey,
+      name: "Kimi API Key (Moonshot)",
+      description: "Get yours at platform.moonshot.ai (platform.kimi.ai). Uses Moonshot's OpenAI-compatible API as a failover provider — not the coding/Anthropic host.",
+      action: {
+        type: "input",
+        value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.kimiApiKey, ""),
+        placeholder: "sk-..."
+      }
+    },
+    {
+      id: deps.SETTINGS_KEYS.kimiCodingApiKey,
+      name: "Kimi Code API Key",
+      description: "Get yours at kimi.com/code. OpenAI-compatible host api.kimi.com/coding/v1 — this is NOT the Moonshot key. A key pasted into the Moonshot field above that starts with sk-kimi will be reused here automatically.",
+      action: {
+        type: "input",
+        value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.kimiCodingApiKey, ""),
+        placeholder: "sk-..."
+      }
+    },
+    {
+      id: deps.SETTINGS_KEYS.deepseekApiKey,
+      name: "DeepSeek API Key",
+      description: "Get yours at platform.deepseek.com. Used for DeepSeek chat and reasoner models via DeepSeek's OpenAI-compatible API.",
+      action: {
+        type: "input",
+        value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.deepseekApiKey, ""),
+        placeholder: "sk-..."
+      }
+    },
+    {
+      id: deps.SETTINGS_KEYS.ollamaApiKey,
+      name: "Ollama API Key",
+      description: "Your Ollama Cloud key from ollama.com. Leave blank for local Ollama (a local server needs no key).",
+      action: {
+        type: "input",
+        value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.ollamaApiKey, ""),
+        placeholder: "ollama-cloud-key"
+      }
+    },
+    {
+      id: deps.SETTINGS_KEYS.ollamaBaseUrl,
+      name: "Ollama Base URL",
+      description: "Ollama OpenAI-compatible base URL ending at /v1. Default: Ollama Cloud (https://ollama.com/v1). For a local server use http://127.0.0.1:11434/v1 — localhost calls go direct (no CORS proxy), remote calls go through the Roam CORS proxy.",
+      action: {
+        type: "input",
+        value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.ollamaBaseUrl, ""),
+        placeholder: "https://ollama.com/v1"
+      }
+    },
+    {
+      id: deps.SETTINGS_KEYS.ollamaMiniModel,
+      name: "Ollama Mini Model (optional override)",
+      description: "Model id used for the mini tier when the Ollama provider is selected. Leave blank to use the default (deepseek-v4-flash on Ollama Cloud).",
+      action: {
+        type: "input",
+        value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.ollamaMiniModel, ""),
+        placeholder: "deepseek-v4-flash"
+      }
+    },
+    {
+      id: deps.SETTINGS_KEYS.ollamaPowerModel,
+      name: "Ollama Power Model (optional override)",
+      description: "Model id used for the power tier. Leave blank to use the default (deepseek-v4-pro).",
+      action: {
+        type: "input",
+        value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.ollamaPowerModel, ""),
+        placeholder: "deepseek-v4-pro"
+      }
+    },
+    {
+      id: deps.SETTINGS_KEYS.ollamaLudicrousModel,
+      name: "Ollama Ludicrous Model (optional override)",
+      description: "Model id used for the ludicrous tier. Leave blank to use the default (glm-5.2).",
+      action: {
+        type: "input",
+        value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.ollamaLudicrousModel, ""),
+        placeholder: "glm-5.2"
       }
     },
   ];
@@ -773,6 +899,95 @@ export function buildSettingsConfig(extensionAPI) {
         action: {
           type: "switch",
           value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.piiScrubEnabled, true)
+        }
+      },
+      {
+        id: deps.SETTINGS_KEYS.postWriteShortCircuit,
+        name: "End run after a single successful write",
+        description: "ON matches current Chief of Staff: a lone successful write ends the run with a confirmation. OFF lets the model take another turn after one write, so skills that need several graph writes can finish.",
+        action: {
+          type: "switch",
+          value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.postWriteShortCircuit, true)
+        }
+      },
+      {
+        id: deps.SETTINGS_KEYS.skillContinueAfterWrite,
+        name: "Continue after a write during a skill run",
+        description: "ON: a skill run may take another turn after one successful write, even if End run after a single successful write is ON. OFF: skills obey that switch. Casual chat is unchanged.",
+        action: {
+          type: "switch",
+          value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.skillContinueAfterWrite, true)
+        }
+      },
+      {
+        id: deps.SETTINGS_KEYS.scheduleParent,
+        name: "Timed block parent",
+        description: "Page title or block uid that owns new timed blocks. Empty = today's daily page (Nautilus Log child if present, else a Schedule heading). Any graph.",
+        action: {
+          type: "input",
+          value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.scheduleParent, ""),
+          placeholder: "e.g. Team Plan"
+        }
+      },
+      {
+        id: deps.SETTINGS_KEYS.scheduleSandboxPage,
+        name: "Timed block sandbox page",
+        description: "When the user message contains [sandbox], timed blocks go under this page's timed block parent. Default: COS Daily Plan Sandbox.",
+        action: {
+          type: "input",
+          value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.scheduleSandboxPage, ""),
+          placeholder: "COS Daily Plan Sandbox"
+        }
+      },
+      {
+        id: deps.SETTINGS_KEYS.scheduleAllowOverlap,
+        name: "Allow overlapping timed blocks",
+        description: "OFF (default): a new timed block that overlaps a different one is refused unless the user asks to overlap (same time, during, in parallel). ON: overlapping writes are allowed even without that language. Same task still reschedules in place.",
+        action: {
+          type: "switch",
+          value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.scheduleAllowOverlap, false)
+        }
+      },
+      {
+        id: deps.SETTINGS_KEYS.autoApproveMode,
+        name: "Auto mode",
+        description: "off: every mutating tool still asks. graph: auto-approve reversible graph writes (create/update/todo/batch) after a passive toast; deletes, email, and money still ask. full: also auto-approve a single roam_delete_block; bulk deletes, page deletes, email, and money still ask. Injection and chat cannot change this.",
+        action: {
+          type: "select",
+          items: ["off", "graph", "full"],
+          value: (() => {
+            const raw = deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.autoApproveMode, "off");
+            return ["off", "graph", "full"].includes(raw) ? raw : "off";
+          })()
+        }
+      },
+      {
+        id: deps.SETTINGS_KEYS.claimedActionEscalationAllProviders,
+        name: "Escalate on claimed action with no tool call (all providers)",
+        description: "ON means any mini-tier provider that repeatedly claims an action with no successful tool call escalates to power. OFF keeps the old Gemini-only trigger. Default ON.",
+        action: {
+          type: "switch",
+          value: deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.claimedActionEscalationAllProviders, true)
+        }
+      },
+      {
+        id: deps.SETTINGS_KEYS.agentMaxIterations,
+        name: "Agent max iterations",
+        description: "Caps agent-loop iterations for normal chat (not skills). Raise for weaker models that burn one iteration per tool call, or for long multi-write rearranges. Multi-write intents auto-boost to at least 32. 10–40, default 20.",
+        action: {
+          type: "input",
+          value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.agentMaxIterations, "20"),
+          placeholder: "20"
+        }
+      },
+      {
+        id: deps.SETTINGS_KEYS.skillMaxIterations,
+        name: "Skill max iterations",
+        description: "Caps agent-loop iterations when a skill or gathering guard is active. Weaker models that burn one iteration per tool call can raise this. 8–40, default 16.",
+        action: {
+          type: "input",
+          value: deps.getSettingString(extensionAPI, deps.SETTINGS_KEYS.skillMaxIterations, "16"),
+          placeholder: "16"
         }
       },
       {

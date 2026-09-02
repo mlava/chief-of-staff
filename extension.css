@@ -586,6 +586,12 @@
     padding: 8px;
     font-family: inherit;
     font-size: 13px;
+    cursor: text;
+    overflow-y: hidden;
+    min-height: 37px;
+    max-height: 160px;
+    /* beat any inline cursor the panel sets for resize grips */
+    caret-color: var(--cos-panel-text);
 }
 
 [data-chief-chat-input]::placeholder {

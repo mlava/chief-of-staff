@@ -512,3 +512,99 @@ export function detectClaimedActionWithoutToolCall(text, registeredTools) {
 
   return { detected: false, matchedToolHint: "" };
 }
+// ── Auto-approve mode policy ────────────────────────────────────────────────
+// Compiled allowlists for the "Auto mode" advanced setting (select: off /
+// graph / full). Allowlist, never denylist: any tool not named here prompts
+// in every mode. Classification is a pure function of the resolved tool name
+// plus its args — model text, chat, skills, memory pages, and tool args such
+// as skip_approval / pre_approved cannot widen it. Fails closed.
+
+// Reversible graph writes. off: prompt. graph: auto. full: auto.
+// (Reversible = covered by the COS undo ledger or trivially editable again.)
+export const AUTO_APPROVE_GRAPH_WRITE_TOOLS = new Set([
+  "roam_create_block",
+  "roam_create_blocks",
+  "roam_update_block",
+  "roam_batch_write",
+  "roam_create_todo",
+  "roam_modify_todo",
+  "roam_create_page",
+  "cos_schedule_block" // listed by name only — the tool may not exist yet
+]);
+
+// Single-block delete carve-out. off: prompt. graph: prompt. full: auto —
+// but only for exactly one block UID with no children-wipe flag. Bulk
+// deletes and page deletes prompt in every mode (the delete tool itself
+// also refuses page UIDs at execute time).
+export const AUTO_APPROVE_SINGLE_DELETE_TOOLS = new Set([
+  "roam_delete_block"
+]);
+
+const AUTO_APPROVE_META_EXECUTE_TOOLS = new Set([
+  "LOCAL_MCP_EXECUTE",
+  "REMOTE_MCP_EXECUTE",
+  "EXT_EXECUTE",
+  "ROAM_EXECUTE"
+]);
+
+// Normalise the raw settings string. Roam select values are strings; any
+// unknown value (including "yes", "", null) is treated as off.
+export function normaliseAutoApproveMode(mode) {
+  const m = String(mode || "").trim().toLowerCase();
+  return m === "graph" || m === "full" ? m : "off";
+}
+
+// Classify one already-resolved (non-meta) tool name. Never unwraps.
+function classifyResolvedAutoApprove(resolvedName, args, mode) {
+  if (resolvedName === "cos_schedule_block" && String(args?.action || "").trim() === "unschedule") {
+    if (mode === "full") return "auto";
+    return "prompt";
+  }
+  if (AUTO_APPROVE_GRAPH_WRITE_TOOLS.has(resolvedName)) return "auto";
+  if (AUTO_APPROVE_SINGLE_DELETE_TOOLS.has(resolvedName) && mode === "full") {
+    const uids = Array.isArray(args?.uids)
+      ? args.uids.filter(Boolean)
+      : (args?.uid ? [args.uid] : []);
+    if (uids.length !== 1) return "prompt";
+    if (args?.delete_children === true || args?.recursive === true) return "prompt";
+    return "auto";
+  }
+  return "prompt";
+}
+
+/**
+ * classifyAutoApprove(toolName, args, mode) → "auto" | "prompt"
+ *
+ * Meta-tools are classified on their resolved inner name/slug: a batch is as
+ * dangerous as its most dangerous member, and an unknown or missing inner
+ * name always prompts. External side effects (Composio SEND/POST/EMAIL
+ * slugs, cos_cron_delete, cos_update_memory, cos_write_draft_skill,
+ * roam_upload_file, money) are not on any allowlist, so they prompt in
+ * every mode — including full.
+ */
+export function classifyAutoApprove(toolName, args, mode) {
+  const m = normaliseAutoApproveMode(mode);
+  if (m === "off") return "prompt";
+  const name = String(toolName || "");
+  if (!name) return "prompt";
+  const safeArgs = args || {};
+
+  if (name === "COMPOSIO_MULTI_EXECUTE_TOOL") {
+    const tools = Array.isArray(safeArgs.tools) ? safeArgs.tools : [];
+    if (!tools.length) return "prompt";
+    for (const t of tools) {
+      const slug = String(t?.tool_slug || "");
+      if (!slug) return "prompt";
+      if (classifyResolvedAutoApprove(slug, t?.arguments || {}, m) !== "auto") return "prompt";
+    }
+    return "auto";
+  }
+
+  if (AUTO_APPROVE_META_EXECUTE_TOOLS.has(name)) {
+    const innerName = String(safeArgs?.tool_name || "");
+    if (!innerName) return "prompt"; // unknown inner → prompt
+    return classifyResolvedAutoApprove(innerName, safeArgs?.arguments || {}, m);
+  }
+
+  return classifyResolvedAutoApprove(name, safeArgs, m);
+}

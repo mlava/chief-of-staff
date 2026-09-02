@@ -5,9 +5,59 @@
 // provider tool-count limits (e.g. OpenAI's 128-tool cap).
 
 import { extractAuditableSkillLines, summariseSkillTokens } from "./parse-utils.js";
+import { buildScheduleBlockTool, isSandboxUserMessage } from "./schedule-block.js";
 
 let deps = {};
 let roamNativeToolsCache = null;
+
+/**
+ * Coerce an order arg to a Roam createBlock/moveBlock order value.
+ * Accepts "first", "last", non-negative integers, and numeric strings.
+ */
+export function coerceBlockOrder(order) {
+  if (order == null || order === "") return "last";
+  if (typeof order === "number" && Number.isFinite(order) && order >= 0) {
+    return Math.floor(order);
+  }
+  const s = String(order).trim().toLowerCase();
+  if (s === "first") return 0;
+  if (s === "last") return "last";
+  if (/^\d+$/.test(s)) return Number(s);
+  return "last";
+}
+
+/**
+ * Resolve insert/move order. Prefer after_uid (sibling + 1); else coerce order.
+ * after_uid must exist; when parent_uid is given, it must be that block's parent.
+ */
+export async function resolveBlockOrder(injectedDeps, { order, after_uid, parent_uid } = {}) {
+  const d = injectedDeps || deps;
+  const afterUid = String(after_uid || "").trim();
+  if (!afterUid) return coerceBlockOrder(order);
+
+  d.requireRoamUidExists?.(afterUid, "after_uid");
+  const escaped = d.escapeForDatalog(afterUid);
+  const rows = await d.queryRoamDatalog(
+    `[:find ?ord ?puid
+      :where
+      [?b :block/uid "${escaped}"]
+      [?b :block/order ?ord]
+      [?b :block/parent ?p]
+      [?p :block/uid ?puid]]`
+  );
+  const first = Array.isArray(rows) && rows.length ? rows[0] : null;
+  if (!Array.isArray(first) || first.length < 2 || !Number.isFinite(Number(first[0]))) {
+    throw new Error(`after_uid "${afterUid}" was not found or has no order.`);
+  }
+  const [ord, parentOfAfter] = first;
+  const expectedParent = String(parent_uid || "").trim();
+  if (expectedParent && parentOfAfter && parentOfAfter !== expectedParent) {
+    throw new Error(
+      `after_uid "${afterUid}" is under parent "${parentOfAfter}", not "${expectedParent}".`
+    );
+  }
+  return Number(ord) + 1;
+}
 
 // Core tools stay as direct, first-class tools in every LLM call.
 // Everything else is behind ROAM_ROUTE → ROAM_EXECUTE two-stage routing.
@@ -20,7 +70,9 @@ export const ROAM_CORE_TOOLS = new Set([
   // strips ROAM_ROUTE/ROAM_EXECUTE, so a routed tool named in a whitelist is
   // unreachable — the agent loop's `startsWith("cos_")` bypass only admits
   // tools already in the array, it cannot add a routed one to it.
-  "cos_get_skill", "cos_count_skill_tokens", "cos_write_draft_skill"
+  "cos_get_skill", "cos_count_skill_tokens", "cos_write_draft_skill",
+  // Deterministic TimeBlock slot writer — skills declare it, so it must be direct.
+  "cos_schedule_block"
 ]);
 
 const ROAM_TOOL_CATEGORIES = {
@@ -458,25 +510,28 @@ export function getRoamNativeTools() {
     {
       name: "roam_create_block",
       isMutating: true,
-      description: "Create a new block in Roam under a parent block/page UID.",
+      description: "Create a new block in Roam under a parent block/page UID. Prefer after_uid to insert mid-list after a sibling; order accepts first/last or a numeric index.",
       input_schema: {
         type: "object",
         properties: {
           parent_uid: { type: "string", description: "Parent block or page UID." },
           text: { type: "string", description: "Block text content." },
-          order: { type: "string", description: "\"first\" or \"last\". Default \"last\"." }
+          order: { type: ["string", "number"], description: "\"first\", \"last\", or a non-negative numeric index. Default \"last\". Ignored when after_uid is set." },
+          after_uid: { type: "string", description: "Insert immediately after this sibling block UID (preferred for mid-list placement)." }
         },
         required: ["parent_uid", "text"]
       },
-      execute: async ({ parent_uid, text, order = "last" } = {}) => {
+      execute: async ({ parent_uid, text, order = "last", after_uid } = {}) => {
         // Resolves a real UID, or a page title / [[Page]] ref (creating the page
         // if needed) — so "create a block under [[New Page]]" works directly.
         const parentUid = await deps.resolveWriteParentUid(parent_uid, "parent_uid");
-        const uid = await deps.createRoamBlock(parentUid, text, order);
+        const resolvedOrder = await resolveBlockOrder(deps, { order, after_uid, parent_uid: parentUid });
+        const uid = await deps.createRoamBlock(parentUid, text, resolvedOrder);
         return {
           success: true,
           uid,
-          parent_uid: parentUid
+          parent_uid: parentUid,
+          order: resolvedOrder
         };
       }
     },
@@ -572,22 +627,26 @@ export function getRoamNativeTools() {
     {
       name: "roam_move_block",
       isMutating: true,
-      description: "Move an existing block to a new parent in Roam.",
+      description: "Move an existing block to a new parent in Roam. Prefer after_uid to place mid-list after a sibling; order accepts first/last or a numeric index.",
       input_schema: {
         type: "object",
         properties: {
           uid: { type: "string", description: "Block UID to move." },
           parent_uid: { type: "string", description: "New parent block or page UID." },
-          order: { type: "string", description: "\"first\" or \"last\". Default \"last\"." }
+          order: { type: ["string", "number"], description: "\"first\", \"last\", or a non-negative numeric index. Default \"last\". Ignored when after_uid is set." },
+          after_uid: { type: "string", description: "Place immediately after this sibling block UID under the new parent (preferred for mid-list moves)." }
         },
         required: ["uid", "parent_uid"]
       },
-      execute: async ({ uid, parent_uid, order = "last" } = {}) => {
+      execute: async ({ uid, parent_uid, order = "last", after_uid } = {}) => {
         const blockUid = String(uid || "").trim();
         const parentUid = String(parent_uid || "").trim();
         if (!blockUid) throw new Error("uid is required");
         if (!parentUid) throw new Error("parent_uid is required");
         if (blockUid === parentUid) throw new Error("Cannot move a block under itself");
+        if (after_uid && String(after_uid).trim() === blockUid) {
+          throw new Error("after_uid cannot be the same as the block being moved");
+        }
         deps.requireRoamUidExists(blockUid, "uid");
         deps.requireRoamUidExists(parentUid, "parent_uid");
         // Guard against moving a block under one of its own descendants (creates cycles)
@@ -600,13 +659,14 @@ export function getRoamNativeTools() {
           if (puid === blockUid) throw new Error("Cannot move a block under its own descendant");
           ancestor = puid;
         }
+        const resolvedOrder = await resolveBlockOrder(deps, { order, after_uid, parent_uid: parentUid });
         const api = deps.getRoamAlphaApi();
         if (!api?.moveBlock) throw new Error("Roam moveBlock API unavailable");
         await deps.withRoamWriteRetry(() => api.moveBlock({
-          location: { "parent-uid": parentUid, order: order === "first" ? 0 : "last" },
+          location: { "parent-uid": parentUid, order: resolvedOrder },
           block: { uid: blockUid }
         }));
-        return { success: true, moved_uid: blockUid, new_parent_uid: parentUid };
+        return { success: true, moved_uid: blockUid, new_parent_uid: parentUid, order: resolvedOrder };
       }
     },
     {
@@ -1148,17 +1208,19 @@ export function getRoamNativeTools() {
         properties: {
           parent_uid: { type: "string", description: "UID of the page or block to write under." },
           markdown: { type: "string", description: "Markdown content. Use ## headings for sections, - lists for items, **bold** for emphasis. Headings create parent blocks; list items nest as children." },
-          order: { type: "string", description: "Where to insert: 'first' or 'last'. Default 'last'." }
+          order: { type: ["string", "number"], description: "Where to insert: 'first', 'last', or a numeric index. Default 'last'. Ignored when after_uid is set." },
+          after_uid: { type: "string", description: "Insert the batch immediately after this sibling block UID." }
         },
         required: ["parent_uid", "markdown"]
       },
-      execute: async ({ parent_uid, markdown, order = "last" } = {}) => {
+      execute: async ({ parent_uid, markdown, order = "last", after_uid } = {}) => {
         // Accepts a real UID or a page title / [[Page]] ref (creating the page
         // if needed), so structured content can target a new page directly.
         const parentUid = await deps.resolveWriteParentUid(parent_uid, "parent_uid");
         const md = String(markdown || "").trim();
         if (!md) throw new Error("markdown content is required");
         if (md.length > 50000) throw new Error(`Markdown too large (${md.length} chars). Maximum is 50,000 characters.`);
+        const resolvedOrder = await resolveBlockOrder(deps, { order, after_uid, parent_uid: parentUid });
         // Try Roam's native fromMarkdown first; fall back to our own parser if it fails.
         // fromMarkdown can throw internal errors ("n.map is not a function") on some markdown inputs;
         // these are bugs in Roam's parser, not transient — skip straight to fallback.
@@ -1168,10 +1230,10 @@ export function getRoamNativeTools() {
             throw new Error("Roam fromMarkdown API unavailable.");
           }
           const result = await api.data.block.fromMarkdown({
-            location: { "parent-uid": parentUid, order: order === "first" ? 0 : "last" },
+            location: { "parent-uid": parentUid, order: resolvedOrder },
             "markdown-string": md
           });
-          return { success: true, parent_uid: parentUid, uids: result };
+          return { success: true, parent_uid: parentUid, uids: result, order: resolvedOrder };
         } catch (fmError) {
           // Fallback: Roam has no batch API beyond fromMarkdown, so we create blocks
           // sequentially via createRoamBlockTree. This path is rarely hit (only when
@@ -1399,6 +1461,7 @@ export function getRoamNativeTools() {
         };
       }
     },
+    buildScheduleBlockTool(deps),
     {
       name: "cos_get_current_time",
       isMutating: false,
@@ -1811,6 +1874,10 @@ export function getRoamNativeTools() {
 
         let targetUid = String(parent_uid || "").trim();
         if (!targetUid) {
+          // Sandbox sessions never default to today's daily page.
+          if (isSandboxUserMessage(deps.getAgentUserMessage?.())) {
+            return { error: "Sandbox session: parent_uid is required; the today-page default is disabled." };
+          }
           const { pageUid } = await deps.ensureDailyPageUid();
           targetUid = pageUid;
         } else {

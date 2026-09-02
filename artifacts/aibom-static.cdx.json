@@ -1,10 +1,10 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:7dd8a478-7f19-4bc6-8487-edb50b9064b7",
+  "serialNumber": "urn:uuid:6f01ccd9-4aac-4dea-a365-d2985929d288",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-07-13T06:27:07.911Z",
+    "timestamp": "2026-08-26T03:59:16.338Z",
     "tools": [
       {
         "vendor": "chief-of-staff",
@@ -28,7 +28,7 @@
       },
       {
         "name": "chief:aibom:ai-component-count",
-        "value": "24"
+        "value": "44"
       }
     ]
   },
@@ -3490,6 +3490,101 @@
     },
     {
       "type": "service",
+      "name": "llm-endpoint/grok",
+      "version": "runtime-config",
+      "description": "https://api.x.ai/v1/chat/completions",
+      "endpoints": [
+        "https://api.x.ai/v1/chat/completions"
+      ],
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-endpoint"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "grok"
+        }
+      ]
+    },
+    {
+      "type": "service",
+      "name": "llm-endpoint/kimi",
+      "version": "runtime-config",
+      "description": "https://api.moonshot.ai/v1/chat/completions",
+      "endpoints": [
+        "https://api.moonshot.ai/v1/chat/completions"
+      ],
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-endpoint"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "kimi"
+        }
+      ]
+    },
+    {
+      "type": "service",
+      "name": "llm-endpoint/kimi-coding",
+      "version": "runtime-config",
+      "description": "https://api.kimi.com/coding/v1/chat/completions",
+      "endpoints": [
+        "https://api.kimi.com/coding/v1/chat/completions"
+      ],
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-endpoint"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "kimi-coding"
+        }
+      ]
+    },
+    {
+      "type": "service",
+      "name": "llm-endpoint/deepseek",
+      "version": "runtime-config",
+      "description": "https://api.deepseek.com/v1/chat/completions",
+      "endpoints": [
+        "https://api.deepseek.com/v1/chat/completions"
+      ],
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-endpoint"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "deepseek"
+        }
+      ]
+    },
+    {
+      "type": "service",
+      "name": "llm-endpoint/ollama",
+      "version": "runtime-config",
+      "description": "https://ollama.com/v1/chat/completions",
+      "endpoints": [
+        "https://ollama.com/v1/chat/completions"
+      ],
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-endpoint"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "ollama"
+        }
+      ]
+    },
+    {
+      "type": "service",
       "name": "llm-endpoint/openai-codex",
       "version": "runtime-config",
       "description": "https://chatgpt.com/backend-api/codex/responses",
@@ -3529,7 +3624,7 @@
     {
       "type": "machine-learning-model",
       "name": "llm-model/openai/mini",
-      "version": "gpt-5.4-mini",
+      "version": "gpt-5.6-luna",
       "properties": [
         {
           "name": "chief:aibom:component-class",
@@ -3604,8 +3699,103 @@
     },
     {
       "type": "machine-learning-model",
+      "name": "llm-model/grok/mini",
+      "version": "grok-4.3",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "grok"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "mini"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/kimi/mini",
+      "version": "kimi-k2.5",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "kimi"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "mini"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/kimi-coding/mini",
+      "version": "kimi-for-coding",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "kimi-coding"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "mini"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/deepseek/mini",
+      "version": "deepseek-chat",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "deepseek"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "mini"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/ollama/mini",
+      "version": "deepseek-v4-flash",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "ollama"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "mini"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
       "name": "llm-model/openai-codex/mini",
-      "version": "gpt-5.4-mini",
+      "version": "gpt-5.6-luna",
       "properties": [
         {
           "name": "chief:aibom:component-class",
@@ -3662,7 +3852,7 @@
     {
       "type": "machine-learning-model",
       "name": "llm-model/gemini/power",
-      "version": "gemini-3.5-flash",
+      "version": "gemini-3.6-flash",
       "properties": [
         {
           "name": "chief:aibom:component-class",
@@ -3718,6 +3908,101 @@
     },
     {
       "type": "machine-learning-model",
+      "name": "llm-model/grok/power",
+      "version": "grok-4.6",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "grok"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "power"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/kimi/power",
+      "version": "kimi-k2.7-code",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "kimi"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "power"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/kimi-coding/power",
+      "version": "kimi-for-coding",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "kimi-coding"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "power"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/deepseek/power",
+      "version": "deepseek-reasoner",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "deepseek"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "power"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/ollama/power",
+      "version": "deepseek-v4-pro",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "ollama"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "power"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
       "name": "llm-model/openai-codex/power",
       "version": "gpt-5.6-terra",
       "properties": [
@@ -3738,7 +4023,7 @@
     {
       "type": "machine-learning-model",
       "name": "llm-model/anthropic/ludicrous",
-      "version": "claude-opus-4-8",
+      "version": "claude-opus-5",
       "properties": [
         {
           "name": "chief:aibom:component-class",
@@ -3823,6 +4108,101 @@
         {
           "name": "chief:aibom:provider",
           "value": "groq"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "ludicrous"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/grok/ludicrous",
+      "version": "grok-4.6",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "grok"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "ludicrous"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/kimi/ludicrous",
+      "version": "kimi-k3",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "kimi"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "ludicrous"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/kimi-coding/ludicrous",
+      "version": "kimi-for-coding-highspeed",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "kimi-coding"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "ludicrous"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/deepseek/ludicrous",
+      "version": "deepseek-reasoner",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "deepseek"
+        },
+        {
+          "name": "chief:aibom:tier",
+          "value": "ludicrous"
+        }
+      ]
+    },
+    {
+      "type": "machine-learning-model",
+      "name": "llm-model/ollama/ludicrous",
+      "version": "glm-5.2",
+      "properties": [
+        {
+          "name": "chief:aibom:component-class",
+          "value": "llm-model"
+        },
+        {
+          "name": "chief:aibom:provider",
+          "value": "ollama"
         },
         {
           "name": "chief:aibom:tier",

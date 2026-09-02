@@ -8,6 +8,8 @@
 
 import iziToast from "izitoast";
 import { filterSlashCommands, filterFlagCommands, matchTrailingFlagToken, isKnownCommandToken, findClosestCommand } from "./chat-commands.js";
+import { isChatComposerField, autosizeChatInput } from "./chat-composer.js";
+export { isChatComposerField, autosizeChatInput };
 
 // ── Dependency injection ────────────────────────────────────────────
 let deps = {};
@@ -1581,12 +1583,19 @@ function installChatPanelDragBehavior(handleEl, panelEl) {
 
   const onPanelMouseMove = (event) => {
     if (resizeState) return;
+    // Never paint a resize cursor over the composer — it overrides the
+    // textarea's I-beam and makes the caret look like it jumped.
+    if (isChatComposerField(event.target)) {
+      panelEl.style.cursor = "";
+      return;
+    }
     const edge = getResizeEdge(event);
     panelEl.style.cursor = getCursor(edge);
   };
 
   const onPanelMouseDown = (event) => {
     if (event.button !== 0) return;
+    if (isChatComposerField(event.target)) return;
     const edge = getResizeEdge(event);
     if (!edge) return;
     const rect = panelEl.getBoundingClientRect();
@@ -2103,7 +2112,11 @@ export function ensureChatPanel() {
   input.setAttribute("data-chief-chat-input", "true");
   input.placeholder = "Ask " + assistantName + "...";
   input.rows = 2;
+  autosizeChatInput(input);
   const inputKeydownHandler = (event) => {
+    // Roam listens on document. If these bubble, the graph editor also
+    // handles the key and the textarea caret jumps or duplicates characters.
+    event.stopPropagation();
     // Slash-menu navigation pre-empts send/history when the menu is open.
     if (handleSlashMenuKeydown(event)) return;
     if (event.key === "Enter" && !event.shiftKey) {
@@ -2139,10 +2152,22 @@ export function ensureChatPanel() {
       } else {
         input.value = userMessages[userMessages.length - 1 - chatInputHistoryIndex] || "";
       }
+      const end = input.value.length;
+      try { input.setSelectionRange(end, end); } catch { /* ignore */ }
+      autosizeChatInput(input);
     }
   };
+  const stopRoamKeys = (event) => { event.stopPropagation(); };
+  const inputInputHandler = (event) => {
+    event.stopPropagation();
+    onSlashInput();
+    autosizeChatInput(input);
+  };
   input.addEventListener("keydown", inputKeydownHandler);
-  input.addEventListener("input", onSlashInput);
+  input.addEventListener("keyup", stopRoamKeys);
+  input.addEventListener("keypress", stopRoamKeys);
+  input.addEventListener("beforeinput", stopRoamKeys);
+  input.addEventListener("input", inputInputHandler);
 
   // Slash-command autocomplete menu — a child of the composer (position:
   // relative), floated above the input. Hidden until `/` is typed.
@@ -2242,7 +2267,10 @@ export function ensureChatPanel() {
 
   chatPanelCleanupListeners = () => {
     input.removeEventListener("keydown", inputKeydownHandler);
-    input.removeEventListener("input", onSlashInput);
+    input.removeEventListener("keyup", stopRoamKeys);
+    input.removeEventListener("keypress", stopRoamKeys);
+    input.removeEventListener("beforeinput", stopRoamKeys);
+    input.removeEventListener("input", inputInputHandler);
     messages.removeEventListener("click", messagesClickHandler);
     tabBar.removeEventListener("click", tabClickHandler);
     closeSlashMenu(); // removes the document mousedown handler if attached

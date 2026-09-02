@@ -41,7 +41,7 @@ let batchIdCounter = 0;
 // Tools whose successful results feed the ledger as CREATES.
 const CREATE_TOOLS = new Set([
   "roam_create_block", "roam_create_blocks", "roam_batch_write",
-  "roam_create_page", "roam_create_todo",
+  "roam_create_page", "roam_create_todo", "cos_schedule_block",
 ]);
 
 // Tools recorded as UPDATES (before-image captured pre-execution, keyed on args.uid).
@@ -151,6 +151,15 @@ function extractCreatedUids(toolName, args, result) {
     case "roam_batch_write":
     case "roam_create_page":
       return Array.isArray(result?.uids) ? result.uids : [];
+    case "cos_schedule_block": {
+      // Parent first so reverse-order deletion removes it last (after the
+      // slot). A reschedule updates an existing slot in place — not a create.
+      const uids = [];
+      if (result?.created_parent && result?.parent_uid) uids.push(result.parent_uid);
+      if (result?.created_todo && result?.task_uid) uids.push(result.task_uid);
+      if (result?.rescheduled !== true && result?.slot_uid) uids.push(result.slot_uid);
+      return uids;
+    }
     default:
       return [];
   }

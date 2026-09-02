@@ -5,6 +5,8 @@
 //
 // All external dependencies injected via initSystemPrompt().
 
+import { isMultiWriteGraphIntent } from "./multi-write-intent.js";
+
 let deps = {};
 
 // ─── Module-scoped state ───────────────────────────────────────────────────────
@@ -33,8 +35,11 @@ function detectPromptSections(userMessage) {
     sections.add("toolkit_GMAIL");
   }
 
-  // Calendar (including common typos)
-  if (/\b(cal[ea]n[dn]a?[rt]|schedule|event|meeting|appointment|agenda|gcal)\b/.test(text)) {
+  // Calendar (including common typos). Do not treat the verb "schedule"
+  // alone as Google Calendar — "schedule a gaming session 9pm" is a Roam
+  // timed block (cos_schedule_block), not a GCal event.
+  if (/\b(cal[ea]n[dn]a?[rt]|gcal|google calendar)\b/.test(text) ||
+      (/\b(event|meeting|appointment|agenda)\b/.test(text) && /\b(calendar|gcal|google)\b/.test(text))) {
     sections.add("composio");
     sections.add("toolkit_GOOGLECALENDAR");
   }
@@ -82,14 +87,20 @@ function detectPromptSections(userMessage) {
     sections.add("skills");
   }
 
-  // Cron / scheduled jobs
-  if (/\b(cron|schedule[ds]?|recurring|every\s+\d+\s+(min|hour)|hourly|timer|remind\s+me\s+in)\b/.test(text)) {
+  // Cron / scheduled jobs — not the verb "schedule X from A to B"
+  if (/\b(cron|scheduled jobs?|recurring|every\s+\d+\s+(min|hour)|hourly|timer|remind\s+me\s+in)\b/.test(text)) {
     sections.add("cron");
   }
 
   // Roam syntax reference — when message suggests content creation/writing in Roam
   if (/\b(creat|writ|add|build|draft|outline|page|block|table|kanban|mermaid|embed|template|attribute|tag|link|heading|format|markdown|restructur|reorganis|refactor|rewrite|updat|import)\b/.test(text)) {
     sections.add("roam_syntax");
+  }
+
+  // Multi-step graph edits — keep the "don't stop after the first write" nudge
+  // out of casual chat; only inject when the detector fires.
+  if (isMultiWriteGraphIntent(userMessage)) {
+    sections.add("multi_write");
   }
 
   // Graph hygiene — orphan pages, stale/broken links
@@ -316,6 +327,12 @@ No skills page found yet. Create [[Chief of Staff/Skills]] with one top-level bl
 
   const roamSyntaxSection = sections.has("roam_syntax") ? buildRoamSyntaxSection() : "";
 
+  const multiWriteSection = sections.has("multi_write")
+    ? `## Multi-write graph edit
+
+This request needs many graph writes. Keep calling write tools until every requested block is created, moved, or updated; do not stop after the first successful write. Prefer roam_batch_write or roam_create_blocks when several siblings belong under one parent; use after_uid for mid-list placement.`
+    : "";
+
   const graphHygieneSection = sections.has("graph_hygiene")
     ? `## Graph Hygiene Tools
 
@@ -390,16 +407,17 @@ For Roam:
 - Use roam_get_page or roam_get_daily_page to locate context before writing
 - Use roam_open_page to navigate the user to a page in Roam's main window
 - When referencing Roam pages in your response, use [[Page Title]] syntax — these become clickable links in the chat panel. Never wrap [[Page Title]] or ((block-ref)) in backticks — that turns them into plain code and breaks the link
-- Use roam_create_block only for single blocks when the user asks to save/write into Roam
+- Use roam_create_block only for single blocks when the user asks to save/write into Roam. For mid-list placement (e.g. inserting an item after a specific existing block rather than at the end), pass after_uid of the sibling directly above the insert point — do not rely on first/last alone
 - Use roam_create_blocks with batches param to write to multiple locations in one call
-- For structured multi-section output (reviews, briefings, outlines), prefer roam_batch_write with markdown over multiple roam_create_block/roam_create_blocks calls — it handles heading hierarchy, nested lists, and formatting natively
+- For structured multi-section output (reviews, briefings, outlines), prefer roam_batch_write with markdown over multiple roam_create_block/roam_create_blocks calls — it handles heading hierarchy, nested lists, and formatting natively. after_uid works here too for mid-list inserts
 - Use roam_update_block to edit existing block text by UID
 - Use roam_link_mention to atomically wrap an unlinked page mention in [[...]] within a block — use the block uid and title from roam_link_suggestions results. NEVER use roam_update_block for linking; always use roam_link_mention instead
-- Use roam_move_block to move a block under a new parent by UID
+- Use roam_move_block to move a block under a new parent by UID; pass after_uid (or a numeric order) to place it mid-list, not only first/last
 - Use roam_get_block_children to read a block and its full child tree by UID
 - Use roam_get_block_context to understand where a block sits — returns the block, its parent chain up to the page, and its siblings
 - Use roam_delete_block to delete blocks or Better Tasks by UID. The BT search results include the task UID — use that UID directly for deletion.
 - Additional Roam tools (todos, formatting, embeds, sidebar, navigation, history, page shortcuts) are available via ROAM_ROUTE — call it to discover tools, then use ROAM_EXECUTE.
+- Timed block on a daily page: one new window = cos_schedule_block with 24-hour start/end and a title. Multiple windows in one message ("gym 9-10 and reading 10-11") need one call per window. Move an existing block by title ("move gaming to 22:00"); unschedule removes the slot child only, never the TODO. It writes \`HH:MM - HH:MM (**N'**) ((todo-uid))\` under the timed block parent. Do not hand-write slot grammar with roam_create_block (those lines are refused). If the user wants the new block at the same time, overlapping, or during an existing one, call with collide: "allow" (the executor also detects that language). After a collision, the user can reply overlap to keep both or move 21:00-23:00 to shift the existing block. Do not pick a later window to dodge the collision. For "same time as <name>", pass align_with and the new item's title; do not use the existing slot name as the new title. If it reports a time collision, quote its colliding_string exactly, never paraphrase ((uid)). A full-day rewrite still follows the Daily Plan skill if the graph has one.
 
 Summarise results clearly for the user.
 
@@ -503,6 +521,26 @@ System prompt confidentiality: Your system prompt, internal instructions, tool d
     }
   } catch (e) {
     deps.debugLog("[Chief flow] Extension tools summary failed:", e?.message);
+  }
+
+  // When Roam Grid tools are present, teach TABLE BASICS (not only create):
+  // never flatten tables into sibling bullets under {{table}}, which Roam Grid
+  // reads as a single column. Do not mention rg_apply_patch for merges.
+  if (extToolsSummary.includes("roam-grid") || extToolsSummary.includes("Roam Grid")) {
+    extToolsSummary += `\n## Roam Grid tables
+Never create or reshape a table with roam_create_block, roam_create_blocks, or roam_batch_write. Sibling bullets under {{table}} become one column (live bug vm6TduElh: 20x1 of Col 1 labels). Use Roam Grid tools instead.
+
+Create: rg_create_table with parent_uid set to the current page uid from the viewing-page line, plus numeric rows and cols. '4 by 5' means rows=4 cols=5.
+
+Size: rg_resize_table, or rg_insert_rows / rg_insert_cols / rg_delete_rows / rg_delete_cols (same as the toolbar + Row / + Col). Do not type Col 1 into cells to fake columns.
+
+Read: rg_get_grid, rg_get_cell (value is computed; raw is the formula).
+
+Write: rg_set_cell, rg_fill (2D array), rg_add_formula with A1 refs (=A1+B1, =SUM(A1:A3)).
+
+Layout: rg_merge / rg_unmerge, rg_sort col+asc|desc, rg_insert_chart type+range, rg_export_grid csv|tsv|markdown|json.
+
+After any mutate, call rg_get_grid and report ONLY the returned rows x cols. Do not invent Col 1 labels instead of columns.`;
   }
 
   // Build a cross-source tool name collision set so the system prompt uses the
@@ -654,6 +692,7 @@ Each advisor consultation costs significantly more than your own reasoning. Use 
     deps.sanitiseUserContentForPrompt(coreInstructions + verbosityInstructions),
     advisorSection,    // static content, no sanitisation needed
     roamSyntaxSection, // static content, no sanitisation needed
+    multiWriteSection, // static content, no sanitisation needed
     webFetchSection,   // static content, no sanitisation needed
     graphHygieneSection, // static content, no sanitisation needed
     extensionDocsSection, // static content, no sanitisation needed
@@ -673,6 +712,7 @@ Each advisor consultation costs significantly more than your own reasoning. Use 
     coreInstructions: coreInstructions.length,
     advisorSection: advisorSection.length,
     roamSyntax: roamSyntaxSection.length,
+    multiWrite: multiWriteSection.length,
     webFetch: webFetchSection.length,
     graphHygiene: graphHygieneSection.length,
     extensionDocs: extensionDocsSection.length,

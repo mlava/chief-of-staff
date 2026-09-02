@@ -210,6 +210,8 @@ import {
   initSettingsConfig,
   buildSettingsConfig,
   remountSettingsPanel,
+  clampSkillMaxIterations,
+  clampAgentMaxIterations,
 } from "./settings-config.js";
 import {
   initOpenAiCodexAuth,
@@ -343,6 +345,15 @@ const SETTINGS_KEYS = {
   geminiApiKey: "gemini-api-key",
   mistralApiKey: "mistral-api-key",
   groqApiKey: "groq-api-key",
+  grokApiKey: "grok-api-key",
+  kimiApiKey: "kimi-api-key",
+  kimiCodingApiKey: "kimi-coding-api-key",
+  deepseekApiKey: "deepseek-api-key",
+  ollamaApiKey: "ollama-api-key",
+  ollamaBaseUrl: "ollama-base-url",
+  ollamaMiniModel: "ollama-mini-model",
+  ollamaPowerModel: "ollama-power-model",
+  ollamaLudicrousModel: "ollama-ludicrous-model",
   debugLogging: "debug-logging",
   dryRunMode: "dry-run-mode",
   conversationContext: "conversation-context",
@@ -392,13 +403,21 @@ const SETTINGS_KEYS = {
   advisorEnabled: "cos-advisor-enabled",
   advisorMaxUses: "cos-advisor-max-uses",
   advisorMiniOnly: "cos-advisor-mini-only",
-  llmModelSmokeResults: "llm-model-smoke-results"
+  llmModelSmokeResults: "llm-model-smoke-results",
+  postWriteShortCircuit: "post-write-short-circuit",
+  claimedActionEscalationAllProviders: "claimed-action-escalation-all-providers",
+  agentMaxIterations: "agent-max-iterations",
+  skillMaxIterations: "skill-max-iterations",
+  skillContinueAfterWrite: "skill-continue-after-write",
+  autoApproveMode: "auto-approve-mode",
+  scheduleParent: "schedule-parent",
+  scheduleSandboxPage: "schedule-sandbox-page",
+  scheduleAllowOverlap: "schedule-allow-overlap"
 };
 const TOOLS_SCHEMA_VERSION = 3;
 const AUTH_POLL_INTERVAL_MS = 9000;
 const AUTH_POLL_TIMEOUT_MS = 180000;
-const MAX_AGENT_ITERATIONS = 20;
-const MAX_AGENT_ITERATIONS_SKILL = 16;    // Extended cap when gathering guard activates (skills need more iterations)
+const MAX_AGENT_ITERATIONS_SKILL = 16;    // Fallback constant; live value comes from getSkillMaxIterations()
 const MAX_TOOL_CALLS_PER_ITERATION = 4;   // Caps tool calls from a single LLM response (prevents budget blowout)
 const MAX_TOOL_CALLS_PER_ITERATION_SKILL = 8; // Higher cap when gathering guard is active (skills need parallel data gathering)
 const MAX_CALLS_PER_TOOL_PER_LOOP = 10;   // Caps how many times the same tool can be called across the loop
@@ -420,9 +439,9 @@ const LLM_STREAM_CHUNK_TIMEOUT_MS = 60_000; // 60s per-chunk timeout for streami
 const LLM_RESPONSE_TIMEOUT_MS = 90_000; // 90s per-request timeout for non-streaming calls
 const DEFAULT_LLM_PROVIDER = "anthropic";
 const FAILOVER_CHAINS = {
-  mini: ["gemini", "mistral", "openai", "anthropic", "groq"],
-  power: ["gemini", "mistral", "openai", "anthropic", "groq"],
-  ludicrous: ["gemini", "openai", "mistral", "anthropic", "groq"]
+  mini: ["gemini", "mistral", "openai", "anthropic", "groq", "grok", "kimi", "kimi-coding", "deepseek", "ollama"],
+  power: ["gemini", "mistral", "openai", "anthropic", "groq", "grok", "kimi", "kimi-coding", "deepseek", "ollama"],
+  ludicrous: ["gemini", "openai", "mistral", "anthropic", "groq", "grok", "kimi", "kimi-coding", "deepseek", "ollama"]
 };
 const PROVIDER_COOLDOWN_MS = 60_000;
 const FAILOVER_CONTINUATION_MESSAGE = "Note: You are continuing a task started by another AI model which hit a temporary error. The conversation above contains all data gathered so far. Please complete the task using this context.";
@@ -457,7 +476,23 @@ const LLM_MODEL_COSTS = {
   "mistral-small-latest": [0.10, 0.30],
   "mistral-medium-latest": [0.40, 2.00],
   "mistral-large-2512": [0.50, 1.50],
-  "llama-3.3-70b-versatile": [0.59, 0.79]
+  "llama-3.3-70b-versatile": [0.59, 0.79],
+  "grok-4.3": [1.50, 2.50],
+  "grok-4.6": [2.00, 6.00],
+  "kimi-k2.5": [0.60, 3.00],
+  "kimi-k2.7-code": [0.95, 4.00],
+  "kimi-k3": [3.00, 15.00],
+  // Kimi Code subscription models — list so the cost lookup doesn't throw,
+  // even though billing lives on the kimi.com/code subscription side.
+  "kimi-for-coding": [0.00, 0.00],
+  "kimi-for-coding-highspeed": [0.00, 0.00],
+  // DeepSeek public ballpark pricing (USD per 1M tokens, input/output).
+  "deepseek-chat": [0.28, 0.42],
+  "deepseek-reasoner": [0.55, 2.19],
+  // Ollama Cloud models run on the Ollama subscription — $0 to Chief of Staff.
+  "deepseek-v4-flash": [0.00, 0.00],
+  "deepseek-v4-pro": [0.00, 0.00],
+  "glm-5.2": [0.00, 0.00]
 };
 // Anthropic advisor tool (beta) — model invoked when the executor consults the advisor.
 // Pinned to Opus to maximise the quality delta over the executor (Haiku/Sonnet).
@@ -537,6 +572,7 @@ const WRITE_TOOL_NAMES = new Set([
   "roam_link_mention",
   "cos_update_memory",
   "cos_write_draft_skill",
+  "cos_schedule_block",
   "cos_cron_create",
   "cos_cron_update",
   "cos_cron_delete",
@@ -617,6 +653,9 @@ let askChiefInFlight = false; // Concurrency guard for askChiefOfStaff
 let activeCouncilQuestion = null; // Concurrency guard for cos_llm_council
 const authPollStateBySlug = new Map();
 let extensionAPIRef = null;
+// The current user message, set at the start of each agent run so tools
+// (cos_schedule_block's [sandbox] pin) can inspect user text executor-side.
+let agentUserMessage = "";
 // lastAgentRunTrace — moved to agent-loop.js
 // providerCooldowns — moved to llm-providers.js
 // conversationTurns, conversationPersistTimeoutId, lastKnownPageContext,
@@ -1369,6 +1408,29 @@ function getSettingNumber(extensionAPI, key, fallbackValue = 0) {
   return fallbackValue;
 }
 
+/**
+ * Reads the agent-max-iterations setting (normal chat), falling back through
+ * the raw stored value to the clamp default (20). Live getter on agent-loop
+ * deps so a settings change applies without a full extension rewrite.
+ */
+function getAgentMaxIterations() {
+  const ext = extensionAPIRef;
+  const raw = ext?.settings?.get?.(SETTINGS_KEYS.agentMaxIterations);
+  return clampAgentMaxIterations(raw);
+}
+
+/**
+ * Reads the skill-max-iterations setting, falling back through the raw stored
+ * value (number or numeric string) to the clamp default (16). Used as a live
+ * getter on the agent-loop deps object so a settings change applies without a
+ * full extension rewrite.
+ */
+function getSkillMaxIterations() {
+  const ext = extensionAPIRef;
+  const raw = ext?.settings?.get?.(SETTINGS_KEYS.skillMaxIterations);
+  return clampSkillMaxIterations(raw);
+}
+
 function getSettingBool(extensionAPI, key, fallbackValue = false) {
   const value = extensionAPI?.settings?.get?.(key);
   return typeof value === "boolean" ? value : fallbackValue;
@@ -2019,8 +2081,17 @@ async function createRoamBlock(parentUid, text, order = "last") {
     const uid = api.util.generateUID();
     const safeText = truncateRoamBlockText(text);
 
-    // Support numeric order (pass-through), "first" → 0, anything else → "last"
-    const resolvedOrder = typeof order === "number" ? order : (order === "first" ? 0 : "last");
+    // Support numeric order (number or digit string), "first" → 0, else → "last"
+    let resolvedOrder;
+    if (typeof order === "number" && Number.isFinite(order) && order >= 0) {
+      resolvedOrder = Math.floor(order);
+    } else if (order === "first") {
+      resolvedOrder = 0;
+    } else if (/^\d+$/.test(String(order ?? "").trim())) {
+      resolvedOrder = Number(String(order).trim());
+    } else {
+      resolvedOrder = "last";
+    }
 
     // Warm Roam's internal cache by pulling the parent's children before creating.
     // This prevents "n.map is not a function" when Roam's internal children array is stale/null.
@@ -3743,7 +3814,7 @@ function getCosIntegrationTools() {
           models: {
             type: "array",
             items: { type: "string" },
-            description: "2-4 LLM providers (anthropic, openai, gemini, mistral, groq). Default: auto-selects best 3 with API keys configured."
+            description: "2-4 LLM providers (anthropic, openai, gemini, mistral, groq, grok, kimi). Default: auto-selects best 3 with API keys configured."
           },
           chair: { type: "string", description: "Provider for the synthesis phase. Default: first model in the list." },
           context: { type: "string", description: "Additional context to include with the question." },
@@ -3760,7 +3831,7 @@ function getCosIntegrationTools() {
         }
 
         // Resolve models — auto-select if not provided
-        const validProviders = ["anthropic", "openai", "gemini", "mistral", "groq"];
+        const validProviders = ["anthropic", "openai", "gemini", "mistral", "groq", "grok", "kimi"];
         let resolved;
         if (Array.isArray(models) && models.length >= 2) {
           resolved = models.filter(m => validProviders.includes(m) && getApiKeyForProvider(extensionAPIRef, m));
@@ -4789,9 +4860,11 @@ async function askChiefOfStaff(userMessage, options = {}) {
   const ludicrousFlag = /(?:^|\s)\/ludicrous(?:\s|$)/i.test(rawPrompt);
   const powerFlag = /(?:^|\s)\/power(?:\s|$)/i.test(rawPrompt);
 
-  // Detect provider override — /claude, /gemini, /openai, /mistral, /groq
-  const PROVIDER_SLASH_MAP = { claude: "anthropic", gemini: "gemini", openai: "openai", mistral: "mistral", groq: "groq" };
-  const providerSlashMatch = rawPrompt.match(/(?:^|\s)\/(claude|gemini|openai|mistral|groq)(?:\s|$)/i);
+  // Detect provider override — /claude, /gemini, /openai, /mistral, /groq,
+  // /grok, /kimi, /kimi-code, /deepseek, /ollama. /kimi-code must be matched
+  // before /kimi in the regex so "kimi-code" isn't captured as "kimi".
+  const PROVIDER_SLASH_MAP = { claude: "anthropic", gemini: "gemini", openai: "openai", mistral: "mistral", groq: "groq", grok: "grok", kimi: "kimi", "kimi-code": "kimi-coding", deepseek: "deepseek", ollama: "ollama" };
+  const providerSlashMatch = rawPrompt.match(/(?:^|\s)\/(claude|gemini|openai|mistral|groq|grok|kimi-code|kimi|deepseek|ollama)(?:\s|$)/i);
   const providerOverride = providerSlashMatch ? PROVIDER_SLASH_MAP[providerSlashMatch[1].toLowerCase()] : null;
 
   // Detect /lesson flag — records lessons from the conversation
@@ -4809,7 +4882,7 @@ async function askChiefOfStaff(userMessage, options = {}) {
   let prompt = rawPrompt
     .replace(/(?:^|\s)\/ludicrous(?:\s|$)/i, " ")
     .replace(/(?:^|\s)\/power(?:\s|$)/i, " ")
-    .replace(/(?:^|\s)\/(claude|gemini|openai|mistral|groq)(?:\s|$)/gi, " ")
+    .replace(/(?:^|\s)\/(claude|gemini|openai|mistral|groq|grok|kimi-code|kimi|deepseek|ollama)(?:\s|$)/gi, " ")
     .replace(/(?:^|\s)\/lesson(?:\s|$)/i, " ")
     .replace(/(?:^|\s)\/allow-homoglyph(?:\s|$)/i, " ")
     .trim();
@@ -6338,6 +6411,18 @@ function onload({ extensionAPI }) {
   if (extensionAPI?.settings?.get?.(SETTINGS_KEYS.skillAutoresearchTokenGuard) === undefined) {
     extensionAPI.settings.set(SETTINGS_KEYS.skillAutoresearchTokenGuard, true);
   }
+  if (extensionAPI?.settings?.get?.(SETTINGS_KEYS.postWriteShortCircuit) === undefined) {
+    extensionAPI.settings.set(SETTINGS_KEYS.postWriteShortCircuit, true);
+  }
+  if (extensionAPI?.settings?.get?.(SETTINGS_KEYS.claimedActionEscalationAllProviders) === undefined) {
+    extensionAPI.settings.set(SETTINGS_KEYS.claimedActionEscalationAllProviders, true);
+  }
+  if (extensionAPI?.settings?.get?.(SETTINGS_KEYS.skillContinueAfterWrite) === undefined) {
+    extensionAPI.settings.set(SETTINGS_KEYS.skillContinueAfterWrite, true);
+  }
+  if (extensionAPI?.settings?.get?.(SETTINGS_KEYS.autoApproveMode) === undefined) {
+    extensionAPI.settings.set(SETTINGS_KEYS.autoApproveMode, "off");
+  }
 
   initUsageTracking({
     SETTINGS_KEYS,
@@ -6751,6 +6836,9 @@ function onload({ extensionAPI }) {
     withRoamWriteRetry,
     ensurePageUidByTitle,
     ensureDailyPageUid,
+    getAgentUserMessage: () => agentUserMessage,
+    getSettingString: (key, fallback) => getSettingString(extensionAPIRef, key, fallback),
+    getSettingBool: (key, fallback) => getSettingBool(extensionAPIRef, key, fallback),
     resolveWriteParentUid,
     getPageTreeByUidAsync,
     getPageTreeByTitleAsync,
@@ -6923,6 +7011,10 @@ function onload({ extensionAPI }) {
   initToolExecution({
     debugLog,
     getExtensionAPI: () => extensionAPIRef,
+    setAgentUserMessage: (m) => { agentUserMessage = String(m || ""); },
+    getAgentUserMessage: () => agentUserMessage,
+    getPageUidByTitleAsync,
+    formatRoamDate,
     isDryRunEnabled,
     consumeDryRunMode,
     getSessionUsedLocalMcp,
@@ -6964,6 +7056,8 @@ function onload({ extensionAPI }) {
     getComposioSafeMultiExecuteSlugAllowlist: () => COMPOSIO_SAFE_MULTI_EXECUTE_SLUG_ALLOWLIST,
     promptToolExecutionApproval,
     showInfoToast,
+    getSettingString,
+    SETTINGS_KEYS,
     INBOX_READ_ONLY_TOOL_ALLOWLIST,
     WRITE_TOOL_NAMES,
     MAX_TOOL_RESULT_CHARS,
@@ -7037,7 +7131,9 @@ function onload({ extensionAPI }) {
     findSkillEntryByName,
     getAvailableToolSchemas,
     runAgentLoopWithFailover,
-    SETTINGS_KEYS, MAX_AGENT_ITERATIONS_SKILL,
+    SETTINGS_KEYS,
+    get MAX_AGENT_ITERATIONS() { return getAgentMaxIterations(); },
+    get MAX_AGENT_ITERATIONS_SKILL() { return getSkillMaxIterations(); },
     MEMORY_PAGE_TITLES_BASE, MEMORY_TOTAL_MAX_CHARS, SOURCE_TOOL_NAME_MAP,
     getApiKeyForProvider: (ext, p) => getApiKeyForProvider(ext, p),
     isProviderCoolingDown,
@@ -7060,6 +7156,7 @@ function onload({ extensionAPI }) {
   initAgentLoop({
     debugLog,
     getExtensionAPIRef: () => extensionAPIRef,
+    setAgentUserMessage: (m) => { agentUserMessage = String(m || ""); },
     getExternalExtensionTools,
     getExtensionToolsRegistry,
     getExtToolsConfig,
@@ -7087,8 +7184,8 @@ function onload({ extensionAPI }) {
     updateChatPanelCostIndicator,
     getToastTheme,
     isUnloadInProgress: () => unloadInProgress,
-    MAX_AGENT_ITERATIONS,
-    MAX_AGENT_ITERATIONS_SKILL,
+    get MAX_AGENT_ITERATIONS() { return getAgentMaxIterations(); },
+    get MAX_AGENT_ITERATIONS_SKILL() { return getSkillMaxIterations(); },
     MAX_TOOL_CALLS_PER_ITERATION,
     MAX_TOOL_CALLS_PER_ITERATION_SKILL,
     MAX_CALLS_PER_TOOL_PER_LOOP,
@@ -7334,6 +7431,13 @@ function onload({ extensionAPI }) {
       getSettingString(extensionAPI, SETTINGS_KEYS.geminiApiKey, "") ||
       getSettingString(extensionAPI, SETTINGS_KEYS.mistralApiKey, "") ||
       getSettingString(extensionAPI, SETTINGS_KEYS.groqApiKey, "") ||
+      getSettingString(extensionAPI, SETTINGS_KEYS.grokApiKey, "") ||
+      getSettingString(extensionAPI, SETTINGS_KEYS.kimiApiKey, "") ||
+      getSettingString(extensionAPI, SETTINGS_KEYS.kimiCodingApiKey, "") ||
+      getSettingString(extensionAPI, SETTINGS_KEYS.deepseekApiKey, "") ||
+      // Ollama Cloud counts only when an explicit key is set — localhost
+      // needs no key and is covered by the configured-custom-slot signal.
+      getSettingString(extensionAPI, SETTINGS_KEYS.ollamaApiKey, "") ||
       getSettingString(extensionAPI, SETTINGS_KEYS.llmApiKey, "");
     // A configured custom slot (LM Studio, Ollama, OpenRouter, etc.) or a
     // connected ChatGPT subscription is just as valid an "I have an LLM"

@@ -134,6 +134,23 @@ test("registry names, aliases, and hidden tokens are known", () => {
   assert.ok(isKnownCommandToken("tag"));             // /export subcommand
   assert.ok(isKnownCommandToken("TAGS"));            // case-insensitive
 });
+test("grok and kimi are flag-kind provider commands", () => {
+  const flags = CHAT_COMMANDS.filter((c) => c.kind === "flag").map((c) => c.name);
+  assert.ok(flags.includes("/grok"));
+  assert.ok(flags.includes("/kimi"));
+  assert.ok(isKnownCommandToken("grok"));
+  assert.ok(isKnownCommandToken("kimi"));
+});
+
+test("kimi-code, deepseek, ollama are flag-kind provider commands", () => {
+  const flags = CHAT_COMMANDS.filter((c) => c.kind === "flag").map((c) => c.name);
+  assert.ok(flags.includes("/kimi-code"));
+  assert.ok(flags.includes("/deepseek"));
+  assert.ok(flags.includes("/ollama"));
+  assert.ok(isKnownCommandToken("kimi-code"));
+  assert.ok(isKnownCommandToken("deepseek"));
+  assert.ok(isKnownCommandToken("ollama"));
+});
 
 test("unknown and empty tokens are not known", () => {
   assert.ok(!isKnownCommandToken("veridy"));

@@ -19,7 +19,7 @@ import {
   formatToolResults, extractComposioSessionIdFromToolResult,
   withComposioSessionArgs, convertMessagesForProvider,
   detectWrittenBlocksInMessages, detectSuccessfulWriteToolCallsInMessages,
-  isLikelyLiveDataReadIntent, computeToolCallScope
+  isLikelyLiveDataReadIntent, computeToolCallScope, resetAutoApproveCount
 } from "./tool-execution.js";
 
 import {
@@ -29,6 +29,8 @@ import {
   isFailoverEligibleError, isOpenAICompatible, filterToolsByRelevance,
   buildEffectiveFailoverChain, isCustomProvider, getCustomProviderConfig
 } from "./llm-providers.js";
+import { dropBypassToolsForTimedBlock } from "./llm-providers.js";
+import { buildForcedScheduleToolCalls } from "./schedule-block.js";
 
 import {
   getConversationTurns, getConversationMessages,
@@ -53,7 +55,13 @@ import { buildPlanModeAddendum, buildExecutionAddendum } from "./plan-mode.js";
 import { getLocalMcpToolsCache, getLocalMcpTools } from "./local-mcp.js";
 import { getRemoteMcpToolsCache, getRemoteMcpTools } from "./remote-mcp.js";
 import { getToolkitSchemaRegistry } from "./composio-mcp.js";
+import {
+  isMultiWriteGraphIntent,
+  resolveMultiWriteMaxIterations,
+} from "./multi-write-intent.js";
 // parseSkillSources injected via deps (avoids transitive izitoast dependency from deterministic-router → chat-panel)
+
+export { isMultiWriteGraphIntent, resolveMultiWriteMaxIterations };
 
 // ── Dependency injection ────────────────────────────────────────────────────
 
@@ -191,6 +199,162 @@ export function buildToolCacheKey(toolName, args) {
   catch { return null; }
 }
 
+// ── Post-write short-circuit helpers ───────────────────────────────────────
+
+/**
+ * Decide whether a claimed-action-without-tool-call escalation should fire.
+ * Pure helper — no deps, no mock.module needed.
+ *
+ * When `allProviders` is ON (default, including undefined): any mini-tier
+ * provider with sessionCount >= 2 escalates to power. When OFF: only the
+ * legacy Gemini-only trigger fires. Still requires effectiveTier === "mini"
+ * and sessionCount >= 2.
+ */
+export function shouldEscalateClaimedAction({ provider, effectiveTier, sessionCount, allProviders }) {
+  if (effectiveTier !== "mini") return false;
+  if (!(sessionCount >= 2)) return false;
+  if (allProviders !== false) return true;
+  // allProviders OFF: legacy Gemini-only gate
+  return provider === "gemini";
+}
+
+/**
+ * Decide whether to end the run after a lone successful write.
+ * Pure helper — no deps, no mock.module needed.
+ *
+ * `skillContinueAfterWrite` (default ON, including undefined): when a skill
+ * is active, the skill may take another turn even if the one-write switch is
+ * ON. Casual chat (skillActive false/undefined) still short-circuits.
+ * `multiWriteIntent` (rearrange / insert-many) also suppresses short-circuit.
+ */
+export function shouldShortCircuitAfterWrite({ toolResults, approvedPlan, settingOn, writeToolNames, skillActive, skillContinueAfterWrite, multiWriteIntent }) {
+  if (settingOn === false) return false;
+  if (skillContinueAfterWrite !== false && skillActive) return false;
+  if (multiWriteIntent) return false;
+  if (approvedPlan) return false;
+  if (!Array.isArray(toolResults) || !toolResults.length) return false;
+
+  const isScheduleWrite = (tr) => {
+    const name = tr?.toolCall?.name;
+    const inner = tr?.toolCall?.arguments?.tool_name;
+    return name === "cos_schedule_block" || (name === "ROAM_EXECUTE" && inner === "cos_schedule_block");
+  };
+
+  const allSchedule = toolResults.every(isScheduleWrite);
+  if (allSchedule && toolResults.length >= 1 && toolResults.length <= 4) {
+    const successes = toolResults.filter((tr) => tr?.result?.success && !tr?.result?.error);
+    const last = toolResults[toolResults.length - 1];
+    const lastIsCollision = Boolean(
+      last?.result?.colliding_string && (last?.result?.success === false || last?.result?.error)
+    );
+    if (lastIsCollision && successes.length > 0) return true;
+    if (successes.length === toolResults.length) return true;
+    return false;
+  }
+
+  if (toolResults.length !== 1) return false;
+  const last = toolResults[0];
+  if (last?.result?.error) return false;
+  const name = last?.toolCall?.name;
+  const isWrite = writeToolNames?.has(name) || (name === "ROAM_EXECUTE" && writeToolNames?.has(last?.toolCall?.arguments?.tool_name));
+  return isWrite === true;
+}
+
+function scheduleBlockConfirmationLine(resultData) {
+  if (resultData?.unscheduled) return `Timed block removed: ${resultData.slot_string}`;
+  if (resultData?.moved && resultData?.moved_string) {
+    let msg = `Timed block moved: ${resultData.moved_string}`;
+    if (resultData.slot_string) msg += `\nTimed block placed: ${resultData.slot_string}`;
+    return msg;
+  }
+  if (resultData?.rescheduled) return `Timed block moved: ${resultData.slot_string}`;
+  if (resultData?.overlapped) return `Timed block placed alongside an existing one: ${resultData.slot_string}`;
+  return `Timed block placed: ${resultData.slot_string}`;
+}
+
+export function batchShortCircuitMessage(toolResults) {
+  const lines = [];
+  for (const tr of toolResults) {
+    if (tr?.result?.success && tr?.result?.slot_string) {
+      lines.push(scheduleBlockConfirmationLine(tr.result));
+    }
+  }
+  const last = toolResults[toolResults.length - 1];
+  if (last?.result?.colliding_string && (last?.result?.success === false || last?.result?.error)) {
+    lines.push(collisionShortCircuitMessage(last.result));
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Builds the terse confirmation message shown when short-circuiting after a write.
+ * Mirrors the original specialised copy exactly.
+ */
+export function shortCircuitMessage(toolCall, result) {
+  const toolName = toolCall?.name;
+  const resultData = result || {};
+  if (toolName === "cos_write_draft_skill") {
+    return `Draft skill "${resultData.skill_name || "skill"}" written to Skills page.`;
+  }
+  if (toolName === "cos_update_memory") {
+    const page = resultData.page || "memory";
+    const action = resultData.action || "updated";
+    return `${page} ${action} successfully.`;
+  }
+  if (toolName === "cos_cron_create" && resultData.created) {
+    const cronType = resultData.type || "job";
+    const cronName = resultData.name || "";
+    const cronWhen = resultData.nextRunLocal || resultData.nextRun || "";
+    if (cronType === "reminder") {
+      return cronWhen ? `Reminder set — I'll notify you at ${cronWhen}.` : `Reminder set.`;
+    }
+    return cronWhen
+      ? `Scheduled ${cronType}${cronName ? ` "${cronName}"` : ""} — next run at ${cronWhen}.`
+      : `Scheduled ${cronType}${cronName ? ` "${cronName}"` : ""} successfully.`;
+  }
+  if (toolName === "cos_cron_update" && resultData.updated) {
+    return `Job "${resultData.id || "job"}" updated.`;
+  }
+  if (toolName === "cos_cron_delete" && resultData.deleted) {
+    return `Job "${resultData.id || "job"}" deleted.`;
+  }
+  if (toolName === "cos_cron_delete_jobs" && Array.isArray(resultData.deleted)) {
+    const names = resultData.deleted.map(d => `"${d.name || d.id}"`).join(", ");
+    let text = `Deleted ${resultData.deleted.length} job(s): ${names}.`;
+    if (resultData.notFound?.length) text += ` Not found: ${resultData.notFound.join(", ")}.`;
+    return text;
+  }
+  const innerName = toolCall?.arguments?.tool_name;
+  const effectiveName = toolName === "ROAM_EXECUTE" ? innerName : toolName;
+  if (effectiveName === "cos_schedule_block" && resultData.slot_string) {
+    return scheduleBlockConfirmationLine(resultData);
+  }
+  return `Written successfully.`;
+}
+/**
+ * A cos_schedule_block collision is terminal in casual chat: the tool
+ * returned `colliding_string`, and the user must see it verbatim — giving
+ * the model another turn invites a paraphrase of the overlapping slot.
+ * Skill runs with skill-continue-after-write ON are exempt (the skill
+ * handles the refusal itself).
+ */
+export function shouldShortCircuitAfterCollision({ toolResults, skillActive, skillContinueAfterWrite }) {
+  if (skillContinueAfterWrite !== false && skillActive) return false;
+  if (!Array.isArray(toolResults) || !toolResults.length) return false;
+  const last = toolResults[toolResults.length - 1];
+  const name = last?.toolCall?.name;
+  const inner = last?.toolCall?.arguments?.tool_name;
+  const isSchedule = name === "cos_schedule_block" || (name === "ROAM_EXECUTE" && inner === "cos_schedule_block");
+  const colliding = last?.result?.colliding_string;
+  const failed = last?.result?.success === false || last?.result?.error;
+  return Boolean(isSchedule && colliding && failed);
+}
+
+export function collisionShortCircuitMessage(result) {
+  const colliding = result?.colliding_string ?? "";
+  return `Time collision: ${colliding}\nThat window is taken. Reply overlap or allow overlapping timed blocks to keep both, move 21:00-23:00 to shift the existing timed block, or pick a different time.`;
+}
+
 // ── Core agent loop ─────────────────────────────────────────────────────────
 
 /**
@@ -200,6 +364,11 @@ export function buildToolCacheKey(toolName, args) {
  */
 
 export async function runAgentLoop(userMessage, options = {}) {
+  // Auto mode: each run gets a fresh auto-approval budget (cap in
+  // tool-execution.js). Failover retries re-enter runAgentLoop and so
+  // also start a fresh budget — each provider attempt is its own run.
+  resetAutoApproveCount();
+  deps.setAgentUserMessage?.(userMessage);
   const {
     maxIterations: initialMaxIterations = deps.MAX_AGENT_ITERATIONS,
     systemPrompt = null,
@@ -226,6 +395,17 @@ export async function runAgentLoop(userMessage, options = {}) {
   } = options;
   let maxIterations = initialMaxIterations;
   let gatheringGuard = initialGatheringGuard;
+
+  // Multi-write graph edits (rearrange a list, fill an outline, migrate many
+  // children): raise the cap the same way gathering-guard does for skills —
+  // default 20 is too low when a model burns one iteration per create/move.
+  if (isMultiWriteGraphIntent(userMessage)) {
+    const boosted = resolveMultiWriteMaxIterations(maxIterations);
+    if (boosted > maxIterations) {
+      deps.debugLog(`[Chief flow] Multi-write intent boosting maxIterations: ${maxIterations} → ${boosted}`);
+      maxIterations = boosted;
+    }
+  }
 
   const extensionAPI = deps.getExtensionAPIRef();
   if (!extensionAPI) throw new Error("Extension API not ready");
@@ -257,6 +437,10 @@ export async function runAgentLoop(userMessage, options = {}) {
   } else {
     tools = filterToolsByRelevance(allTools, userMessage);
   }
+  // Timed-block tool pack: on a one-window schedule request, strip the tools
+  // that bypass cos_schedule_block (direct block writes, cron) even when a
+  // skill whitelist kept ROAM_CORE_TOOLS like roam_create_block.
+  tools = dropBypassToolsForTimedBlock(tools, userMessage);
 
   // Read-only addendum. Plan mode (`/plan`) and inbox mode both run read-only
   // but need different wording: plan mode must produce a plan (future tense so it
@@ -371,6 +555,7 @@ export async function runAgentLoop(userMessage, options = {}) {
     toolCount: tools.length,
     breakdown: toolTokenBreakdown
   });
+  const multiWriteIntentAtStart = isMultiWriteGraphIntent(userMessage);
   const trace = {
     startedAt: Date.now(),
     finishedAt: null,
@@ -383,6 +568,7 @@ export async function runAgentLoop(userMessage, options = {}) {
     resultTextPreview: "",
     error: null,
     guardsFired: [],
+    multiWriteIntent: multiWriteIntentAtStart,
     inputBreakdown: { systemChars, toolsChars, messagesChars, totalInputChars, estInputTokens, toolPct, toolCount: tools.length, toolTokenBreakdown }
   };
   lastAgentRunTrace = trace;
@@ -641,6 +827,33 @@ export async function runAgentLoop(userMessage, options = {}) {
         toolCalls = extractToolCalls(provider, response);
       }
 
+      // Force-dispatch: the model answered a one-window schedule request with
+      // no tool call at all — inject the cos_schedule_block call the user
+      // asked for (built from THEIR times, not the model's prose). Downstream
+      // guards then see a real tool call; no empty-response nudge is sent.
+      // Overlap follow-ups also replace a weak/wrong cos_schedule_block the
+      // model invented (Kimi often re-refuses instead of collide:allow).
+      if (!readOnlyTools && !planMode) {
+        const forced = buildForcedScheduleToolCalls(userMessage);
+        if (forced.length >= 1) {
+          const onlySchedule = toolCalls.length === 0
+            || toolCalls.every((tc) => tc.name === "cos_schedule_block");
+          const hasNonSchedule = toolCalls.some((tc) => tc.name && tc.name !== "cos_schedule_block");
+          const overlapAllowRetry = forced.length === 1
+            && forced[0]?.arguments?.collide === "allow";
+          if (forced.length >= 2 && onlySchedule && !hasNonSchedule) {
+            toolCalls = forced;
+            deps.debugLog("[Chief flow] Force-dispatch: replaced cos_schedule_block batch for multi-window schedule request.");
+          } else if (toolCalls.length === 0) {
+            toolCalls = forced;
+            deps.debugLog("[Chief flow] Force-dispatch: injected cos_schedule_block for a timed-block request the model answered without tools.");
+          } else if (overlapAllowRetry && onlySchedule && !hasNonSchedule) {
+            toolCalls = forced;
+            deps.debugLog("[Chief flow] Force-dispatch: replaced cos_schedule_block with last-collision overlap allow retry.");
+          }
+        }
+      }
+
       deps.debugLog("[Chief flow] runAgentLoop iteration:", {
         iteration: index + 1,
         toolCalls: toolCalls.length,
@@ -735,13 +948,20 @@ export async function runAgentLoop(userMessage, options = {}) {
             const toolHint = claimCheck.matchedToolHint ? ` (expected tool: ${claimCheck.matchedToolHint})` : "";
             deps.debugLog("[Chief flow] runAgentLoop hallucination guard triggered — model claimed action with 0 successful tool calls" + toolHint + " (iteration " + (index + 1) + ", session count: " + getSessionClaimedActionCount() + "), retrying.");
 
-            // Mitigation 3: If this is gemini on mini tier and we've seen this pattern,
-            // throw an escalation error so the failover handler can restart at power tier.
-            // Only escalate on the first fire per loop — a second fire means even the retry failed.
-            if (provider === "gemini" && effectiveTier === "mini" && getSessionClaimedActionCount() >= 2) {
-              deps.debugLog("[Chief flow] Claimed-action escalation: gemini mini-tier repeated failure (session count: " + getSessionClaimedActionCount() + "), escalating to power tier.");
+            // Mitigation 3: If this is a mini-tier provider and we've seen this
+            // pattern, throw an escalation error so the failover handler can
+            // restart at power tier. Only escalate on the first fire per loop —
+            // a second fire means even the retry failed.
+            //
+            // The `claimed-action-escalation-all-providers` advanced setting
+            // (default ON) widens the legacy Gemini-only gate to any mini-tier
+            // provider. OFF restores the Gemini-only behaviour.
+            const allProvidersEscalation = deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.claimedActionEscalationAllProviders, true);
+            if (shouldEscalateClaimedAction({ provider, effectiveTier, sessionCount: getSessionClaimedActionCount(), allProviders: allProvidersEscalation })) {
+              const scope = allProvidersEscalation === false ? "gemini mini-tier" : "mini-tier";
+              deps.debugLog("[Chief flow] Claimed-action escalation: " + scope + " repeated failure (session count: " + getSessionClaimedActionCount() + "), escalating to power tier.");
               throw new ClaimedActionEscalationError(
-                "Gemini mini-tier repeated claimed-action-without-tool-call failure",
+                "Mini-tier repeated claimed-action-without-tool-call failure",
                 { provider, model, tier: effectiveTier, sessionClaimedActionCount: getSessionClaimedActionCount(), matchedToolHint: claimCheck.matchedToolHint }
               );
             }
@@ -1030,7 +1250,7 @@ export async function runAgentLoop(userMessage, options = {}) {
 
         if (!cacheHit) {
           try {
-            result = await executeToolCall(toolCall.name, toolArgs, { readOnly: readOnlyTools, skipApproval });
+            result = await executeToolCall(toolCall.name, toolArgs, { readOnly: readOnlyTools, skipApproval, userMessage });
             const discoveredSessionId = extractComposioSessionIdFromToolResult(result);
             if (discoveredSessionId) composioSessionId = discoveredSessionId;
           } catch (error) {
@@ -1040,7 +1260,7 @@ export async function runAgentLoop(userMessage, options = {}) {
             if (isComposioTool && isValidationError && composioSessionId) {
               try {
                 const retryArgs = withComposioSessionArgs(toolCall.name, toolArgs, composioSessionId);
-                result = await executeToolCall(toolCall.name, retryArgs, { readOnly: readOnlyTools, skipApproval });
+                result = await executeToolCall(toolCall.name, retryArgs, { readOnly: readOnlyTools, skipApproval, userMessage });
                 errorMessage = "";
                 const discoveredSessionId = extractComposioSessionIdFromToolResult(result);
                 if (discoveredSessionId) composioSessionId = discoveredSessionId;
@@ -1209,43 +1429,34 @@ export async function runAgentLoop(userMessage, options = {}) {
         };
       }
       const lastToolResult = toolResults[toolResults.length - 1];
-      const isWriteCall_last = deps.WRITE_TOOL_NAMES.has(lastToolResult?.toolCall?.name) || (lastToolResult?.toolCall?.name === "ROAM_EXECUTE" && deps.WRITE_TOOL_NAMES.has(lastToolResult?.toolCall?.arguments?.tool_name));
       // Post-write short-circuit: a single successful write ends the run with a
       // terse confirmation, skipping the summarising LLM call. Suppress it when
       // executing an approved multi-step plan — the plan may have further steps
-      // and terminating after the first write would leave it half-done.
-      if (toolResults.length === 1 && isWriteCall_last && !lastToolResult?.result?.error && !approvedPlan) {
-        const toolName = lastToolResult.toolCall.name;
-        const resultData = lastToolResult.result;
-        let finalText;
-        if (toolName === "cos_write_draft_skill") {
-          finalText = `Draft skill "${resultData?.skill_name || "skill"}" written to Skills page.`;
-        } else if (toolName === "cos_update_memory") {
-          const page = resultData?.page || "memory";
-          const action = resultData?.action || "updated";
-          finalText = `${page} ${action} successfully.`;
-        } else if (toolName === "cos_cron_create" && resultData?.created) {
-          const cronType = resultData.type || "job";
-          const cronName = resultData.name || "";
-          const cronWhen = resultData.nextRunLocal || resultData.nextRun || "";
-          if (cronType === "reminder") {
-            finalText = cronWhen ? `Reminder set — I'll notify you at ${cronWhen}.` : `Reminder set.`;
-          } else {
-            finalText = cronWhen
-              ? `Scheduled ${cronType}${cronName ? ` "${cronName}"` : ""} — next run at ${cronWhen}.`
-              : `Scheduled ${cronType}${cronName ? ` "${cronName}"` : ""} successfully.`;
-          }
-        } else if (toolName === "cos_cron_update" && resultData?.updated) {
-          finalText = `Job "${resultData.id || "job"}" updated.`;
-        } else if (toolName === "cos_cron_delete" && resultData?.deleted) {
-          finalText = `Job "${resultData.id || "job"}" deleted.`;
-        } else if (toolName === "cos_cron_delete_jobs" && Array.isArray(resultData?.deleted)) {
-          const names = resultData.deleted.map(d => `"${d.name || d.id}"`).join(", ");
-          finalText = `Deleted ${resultData.deleted.length} job(s): ${names}.`;
-          if (resultData.notFound?.length) finalText += ` Not found: ${resultData.notFound.join(", ")}.`;
-        } else {
-          finalText = `Written successfully.`;
-        }
+      // and terminating after the first write would leave it half-done. Gated on
+      // the "post-write-short-circuit" advanced setting (default ON).
+      //
+      // The "skill-continue-after-write" advanced setting (default ON): when a
+      // skill is active (gathering guard or active skill name), the skill may
+      // take another turn even if the one-write switch is ON. Casual chat is
+      // unchanged. OFF makes skills obey the one-write switch.
+      const settingOn = deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.postWriteShortCircuit, true);
+      const skillActive = Boolean(gatheringGuard) || Boolean(activeSkillName);
+      const skillContinueAfterWrite = deps.getSettingBool(extensionAPI, deps.SETTINGS_KEYS.skillContinueAfterWrite, true);
+      // A schedule collision is terminal even though result.error is set:
+      // echo colliding_string verbatim instead of letting the model paraphrase.
+      if (shouldShortCircuitAfterCollision({ toolResults, skillActive, skillContinueAfterWrite })) {
+        const finalText = collisionShortCircuitMessage(lastToolResult.result);
+        deps.debugLog("[Chief flow] runAgentLoop short-circuit: schedule collision, echoing colliding_string verbatim.");
+        trace.finishedAt = Date.now();
+        trace.resultTextPreview = finalText;
+        deps.updateChatPanelCostIndicator();
+        return { text: finalText, messages, mcpResultTexts };
+      }
+      const multiWriteIntent = isMultiWriteGraphIntent(userMessage);
+      if (shouldShortCircuitAfterWrite({ toolResults, approvedPlan, settingOn, writeToolNames: deps.WRITE_TOOL_NAMES, skillActive, skillContinueAfterWrite, multiWriteIntent })) {
+        const finalText = toolResults.length > 1
+          ? batchShortCircuitMessage(toolResults)
+          : shortCircuitMessage(lastToolResult.toolCall, lastToolResult.result);
         deps.debugLog("[Chief flow] runAgentLoop short-circuit: write tool succeeded, skipping final LLM call.");
         trace.finishedAt = Date.now();
         trace.resultTextPreview = finalText;
