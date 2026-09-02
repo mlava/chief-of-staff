@@ -442,7 +442,9 @@ const LLM_MODEL_COSTS = {
   "gpt-4.1": [2.00, 8.00],
   "gpt-5.4": [2.50, 15.00],
   "gpt-5.5": [5.00, 30.00],
-  "gpt-5.6-sol": [5.00, 30.00],
+  // sol repriced 2026-09 to $4/$20 (was $5/$30). Promotional per OpenAI's
+  // pricing page: "available at least through November 21, 2026" — recheck then.
+  "gpt-5.6-sol": [4.00, 20.00],
   // Repriced 2026-07-31 (developers.openai.com/api/docs/pricing): terra $2.50/$15 → $2/$12, luna $1/$6 → $0.20/$1.20
   "gpt-5.6-terra": [2.00, 12.00],
   "gpt-5.6-luna": [0.20, 1.20],
